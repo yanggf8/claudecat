@@ -73,8 +73,8 @@ npm run build
 # Install and register with Claude Code
 ./scripts/install.sh
 
-# Start Claude Code with MCP tools
-claude chat --mcp
+# Start Claude Code (MCP tools are auto-detected)
+claude
 
 # Test pattern detection
 ./scripts/test-detection.js
@@ -192,7 +192,7 @@ Since this is a documentation-only project:
 
 ✅ **Follow `global middleware`** error handling pattern
 
-**Last Updated**: 2025-08-21T09:33:42.738Z  
+**Last Updated**: 2025-08-22T15:08:19.272Z  
 **Detection Quality**: Implementation patterns auto-detected with confidence scoring
 
 *This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
