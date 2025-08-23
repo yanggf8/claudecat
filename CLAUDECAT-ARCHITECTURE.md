@@ -287,3 +287,60 @@ HTTP (localhost)  │ 2-5ms      │ Higher   │ Medium   │ Medium
 - File Watching: Real-time pattern updates validated
 - Build System: TypeScript compilation and ES modules
 - Error Handling: Graceful startup, shutdown, and recovery
+
+## Study Report: chat-cli Architecture Analysis
+
+### Architecture Overview
+
+The chat-cli follows a layered architecture with clear separation of concerns:
+
+- **Presentation Layer**: Terminal UI (tui/) and CLI argument handling (cli.rs)
+- **Logic Layer**: Conversation management (conversation/) and orchestration
+- **Data Access Layer**: API client (api/) for backend communication
+
+### Key Components
+
+#### Core Modules
+
+- **Entry Point (main.rs)**: Minimal bootstrapping
+- **CLI Interface (cli.rs)**: Command-line structure using clap
+- **API Client (api/)**: HTTP client with streaming support
+- **Terminal UI (tui/)**: Real-time rendering with markdown support
+- **Conversation State (conversation/)**: History and context management
+- **Authentication (auth/)**: AWS credential and session management
+
+#### Important Patterns
+
+- **Asynchronous, event-driven model** using tokio for streaming responses
+- **Builder pattern** for configuration management
+- **Trait-based abstractions** for streaming and rendering
+- **Custom error types** with user-friendly messages
+
+### Key Design Decisions
+
+1. **Client-Server Architecture**: All AI processing happens server-side
+2. **Streaming First**: Real-time chat experience with streaming responses
+3. **Configuration Hierarchy**: CLI args > environment > config files
+4. **MCP Protocol Support**: Enables integration with various development environments
+5. **AWS Integration**: Deep integration with AWS SDK and credential management
+
+### Notable Features
+
+- Real-time streaming for chat responses
+- Markdown rendering with syntax highlighting
+- Multi-line input support
+- Conversation history management
+- Profile-based configuration for different contexts
+- IDE integration support through MCP protocol
+
+### Architecture Assessment
+
+The architecture demonstrates mature software engineering practices with strong emphasis on modularity, testability, and user experience while maintaining compatibility with the broader AWS ecosystem. This design serves as an excellent reference for building scalable, maintainable CLI applications with real-time capabilities.
+
+### Key Insights for ClaudeCat
+
+- **Layered Architecture**: Clear separation between presentation, logic, and data access layers
+- **Event-Driven Design**: Asynchronous patterns enable real-time streaming and responsiveness
+- **Configuration Management**: Hierarchical approach allows flexible deployment scenarios
+- **Protocol Integration**: MCP protocol enables broader ecosystem compatibility
+- **Error Handling**: Custom error types with user-friendly messaging improves UX

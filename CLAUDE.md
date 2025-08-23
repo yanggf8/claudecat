@@ -153,7 +153,20 @@ Since this is a documentation-only project:
 - This is a fully tested MCP server ready for production use
 - Focus is on implementation details over technology detection
 - Expert-validated approach with proven reliability
-- Prevention-focused: solve context problems before they happen\n\n<!-- claudecat:auto:begin:project-context -->
+- Prevention-focused: solve context problems before they happen
+
+## Work In Progress
+
+**⚠️ WIP Items Available**: See `WIP-ARCHITECTURE-STUDY.md` for actionable architectural improvements and implementation plan.
+
+**Current WIP Content**:
+- Detailed chat-cli architecture analysis with proven patterns
+- 6 actionable implementation items (prioritized High/Medium/Low)
+- 4-phase implementation plan with 5-6 week timeline
+- CLAUDE.md auto-generated section example
+
+**Last Updated**: 2025-08-23
+\n\n<!-- claudecat:auto:begin:project-context -->
 ## Project Context (Auto-Maintained by ClaudeCat)
 
 **Project Type**: Node.js Project  

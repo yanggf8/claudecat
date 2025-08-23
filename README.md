@@ -324,3 +324,4 @@ MIT License - see LICENSE file for details.
 - [Claude Code Documentation](https://docs.anthropic.com/en/docs/claude-code)
 - [MCP Protocol Specification](https://modelcontextprotocol.io/)
 - [ClaudeCat Architecture Documentation](./CLAUDECAT-ARCHITECTURE.md)
+- [Architecture Study Report & WIP Items](./WIP-ARCHITECTURE-STUDY.md) - Chat-cli analysis and implementation roadmap
