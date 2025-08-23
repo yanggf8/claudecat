@@ -24,6 +24,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.6.0",
+    "@typescript-eslint/typescript-estree": "^8.40.0",
     "chokidar": "^3.6.0",
     "glob": "^10.3.10",
     "zod": "^3.22.4"
