@@ -157,13 +157,16 @@ Since this is a documentation-only project:
 
 ## Work In Progress
 
-**⚠️ WIP Items Available**: See `WIP-ARCHITECTURE-STUDY.md` for actionable architectural improvements and implementation plan.
+**⚠️ WIP Items Available**: See `WIP-ARCHITECTURE-STUDY.md` for accuracy-focused implementation plan and critical review findings.
 
 **Current WIP Content**:
-- Detailed chat-cli architecture analysis with proven patterns
-- 6 actionable implementation items (prioritized High/Medium/Low)
-- 4-phase implementation plan with 5-6 week timeline
-- CLAUDE.md auto-generated section example
+- Claude Code accuracy improvement plan with measurement-first approach
+- Expert review findings (Amazon Q CLI analysis) identifying critical flaws
+- 3-phase implementation plan: Establish Reality → Core Accuracy Engine → Validation
+- 12 focused tasks eliminating scope creep (16-22 week realistic timeline)
+- Strict discipline: "Does this directly make Claude Code's suggestions more accurate?"
+
+**Key Shift**: From generic architecture improvements to laser-focused accuracy enhancements that solve the fundamental pattern detection problem.
 
 **Last Updated**: 2025-08-23
 \n\n<!-- claudecat:auto:begin:project-context -->
