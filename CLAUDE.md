@@ -121,7 +121,7 @@ Since this is a documentation-only project:
 
 ## Testing Validation ✅
 
-**Comprehensive testing completed with 100% success rate:**
+**Comprehensive testing completed with accuracy improvements implemented:**
 
 ### Pattern Detection Tests
 - ✅ **Express API Projects**: 100% confidence detection
@@ -130,6 +130,12 @@ Since this is a documentation-only project:
   - Error Handling: try/catch blocks + global middleware patterns
 - ✅ **Real-time Updates**: File changes detected and patterns updated within seconds
 - ✅ **Evidence Citations**: All patterns backed by specific file paths
+
+### Accuracy Improvements ✅
+- ✅ **Broadened File Scanning**: All .js/.ts files instead of specific directories
+- ✅ **Main File Detection**: Detects server.js, app.js, index.js, main.ts automatically  
+- ✅ **Flexible Pattern Matching**: Works across any file structure with confidence scoring
+- 🔄 **Real Project Testing**: Framework ready for validation on 10+ diverse projects
 
 ### MCP Server Tests  
 - ✅ **All 5 MCP Tools**: Perfect functionality with JSON-RPC 2.0
