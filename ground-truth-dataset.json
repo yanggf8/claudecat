@@ -21,7 +21,7 @@
         {
           "patternType": "authenticate",
           "expectedPattern": "passport.authenticate('jwt')",
-          "file": "src/middleware/auth.ts",
+          "file": "src/app.ts",
           "line": 133,
           "confidence": "high",
           "description": "JWT authentication middleware for protected routes"

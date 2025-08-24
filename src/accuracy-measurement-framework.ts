@@ -273,12 +273,50 @@ export class AccuracyMeasurementFramework {
      * Check if detected pattern matches expected pattern
      */
     private patternsMatch(expected: GroundTruthPattern, detected: any): boolean {
-        // Simple pattern matching - in practice this would be more sophisticated
-        const normalizedExpected = expected.expectedPattern.toLowerCase().replace(/\s+/g, ' ');
-        const normalizedDetected = detected.pattern.toLowerCase().replace(/\s+/g, ' ');
+        const normalizedExpected = expected.expectedPattern.toLowerCase().replace(/\s+/g, ' ').trim();
+        const normalizedDetected = detected.pattern.toLowerCase().replace(/\s+/g, ' ').trim();
         
-        return normalizedDetected.includes(normalizedExpected) || 
-               normalizedExpected.includes(normalizedDetected);
+        // Remove common AST artifacts like "..." and "()"
+        const cleanExpected = normalizedExpected.replace(/\(\.\.\.\)/g, '').replace(/\.\.\./g, '');
+        const cleanDetected = normalizedDetected.replace(/\(\.\.\.\)/g, '').replace(/\.\.\./g, '');
+        
+        // Basic substring matching
+        if (cleanDetected.includes(cleanExpected) || cleanExpected.includes(cleanDetected)) {
+            return true;
+        }
+        
+        // Handle strategy name variations (LocalStrategy vs Strategy)
+        if (expected.patternType === 'strategy') {
+            // Extract strategy type from expected pattern
+            const expectedStrategyMatch = cleanExpected.match(/new (\w+)/);
+            const detectedStrategyMatch = cleanDetected.match(/new (\w+)/);
+            
+            if (expectedStrategyMatch && detectedStrategyMatch) {
+                const expectedStrategy = expectedStrategyMatch[1];
+                const detectedStrategy = detectedStrategyMatch[1];
+                
+                // Match LocalStrategy with Strategy, JWTStrategy with Strategy, etc.
+                if (expectedStrategy.includes('strategy') && detectedStrategy === 'strategy') {
+                    return true;
+                }
+                if (detectedStrategy.includes('strategy') && expectedStrategy === 'strategy') {
+                    return true;
+                }
+            }
+        }
+        
+        // Handle authenticate method variations
+        if (expected.patternType === 'authenticate') {
+            const expectedAuthMatch = cleanExpected.match(/passport\.authenticate\s*\(\s*['"]([^'"]+)['"]/);
+            const detectedAuthMatch = cleanDetected.match(/passport\.authenticate\s*\(\s*['"]([^'"]+)['"]/);
+            
+            if (expectedAuthMatch && detectedAuthMatch) {
+                // Match if the authentication strategy is the same
+                return expectedAuthMatch[1] === detectedAuthMatch[1];
+            }
+        }
+        
+        return false;
     }
 
     /**

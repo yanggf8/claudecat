@@ -124,7 +124,7 @@ export class ASTPassportDetector {
         if (this.isPassportAuthenticate(node)) {
             const strategy = this.extractAuthStrategy(node);
             this.addPattern({
-                type: 'route-protection',
+                type: 'authenticate',
                 pattern: `passport.authenticate('${strategy}', ...)`,
                 file: fileName,
                 line: node.loc?.start.line || 0,
