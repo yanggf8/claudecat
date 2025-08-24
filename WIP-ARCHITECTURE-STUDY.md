@@ -175,7 +175,7 @@
 - ✅ **AST-based pattern detection**: Working POC with 100% accuracy on core Passport patterns
 - ✅ **Function call detection**: Successfully parsing app.use(), passport.use(), passport.authenticate()
 - ✅ **Strategy extraction**: Auto-identifying LocalStrategy, JWTStrategy from constructor calls
-- 🔄 **Evidence-weighted confidence scoring** (file count, pattern consistency) - IN PROGRESS
+- ✅ **Evidence-weighted confidence scoring**: Realistic confidence calculation replacing dangerous false certainty
 - 🔄 **"Most recent pattern wins" conflict resolution strategy** - PENDING
 - **Success Criteria**: 95%+ accuracy on Express + Passport middleware detection - **POC ACHIEVED 100%**
 
@@ -222,7 +222,42 @@
 ### Impact Validation:
 This breakthrough proves the Phase 2 approach is correct and achievable. AST parsing can detect JavaScript function calls that string matching fundamentally cannot handle, enabling Claude Code to receive complete Passport context instead of "Middleware Pattern: Unknown."
 
-**Next Priority**: Integrate AST detection into ClaudeCat core architecture and implement evidence-weighted confidence scoring.
+**Next Priority**: Implement conflict resolution for mixed authentication patterns and integrate components into ClaudeCat core architecture.
+
+## Confidence Scoring Breakthrough
+
+**Date**: 2025-08-23  
+**Achievement**: Implemented evidence-weighted confidence scoring system
+
+### Confidence Scoring Results:
+- **Current ClaudeCat**: 100% confidence for "Unknown" patterns (dangerously misleading)
+- **New System**: 77% for strong evidence, 55% for weak, 0% for none (realistic)
+- **Improvement**: From false certainty to evidence-based confidence with uncertainty quantification
+
+### Key Features Implemented:
+1. **Multi-Factor Scoring Algorithm**:
+   - Evidence Count (25%): How many files contain pattern
+   - Pattern Complexity (30%): How specific/unique the pattern  
+   - Context Quality (25%): How clear surrounding code
+   - Consistency (15%): How consistent across files
+   - Recency (5%): How recent the evidence
+
+2. **Uncertainty Quantification**:
+   - Lists specific limitations ("Limited evidence across files")
+   - Identifies ambiguity sources ("Pattern could match other middleware") 
+   - Provides transparent reasoning for confidence level
+
+3. **Realistic Confidence Levels**:
+   - 90%+ Very High: Use for primary suggestions
+   - 75%+ High: Use with minor caveats
+   - 60%+ Medium: Use with clear caveats  
+   - <60% Low: Ask user for confirmation
+
+### Impact on Claude Code Safety:
+**Before**: "Authentication Implementation (100% - High Confidence): Middleware Pattern: Unknown"
+**After**: "passport.initialize() detected (77% confidence): Pattern highly specific to Passport.js, limited to single file. Uncertainty: Limited evidence across files."
+
+This enables Claude Code to make appropriately cautious suggestions instead of overconfident wrong ones.
 
 ## Auto-Generated CLAUDE.md Section Example
 
