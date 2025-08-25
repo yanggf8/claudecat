@@ -324,3 +324,8 @@ MIT License - see LICENSE file for details.
 - [Claude Code Documentation](https://docs.anthropic.com/en/docs/claude-code)
 - [MCP Protocol Specification](https://modelcontextprotocol.io/)
 - [ClaudeCat Architecture Documentation](./CLAUDECAT-ARCHITECTURE.md)
+- [Architecture Study Report & WIP Items](./WIP-ARCHITECTURE-STUDY.md) - Accuracy-focused implementation plan with AST and confidence scoring breakthroughs
+- [Baseline Accuracy Report](./baseline-accuracy-report.md) - Current ClaudeCat accuracy analysis (29% on Express + Passport)
+- [AST vs Baseline Comparison](./ast-vs-baseline-comparison.md) - Proof that AST parsing achieves 100% pattern detection
+- [Confidence Scoring Comparison](./confidence-scoring-comparison.md) - Evidence-weighted confidence vs dangerous false certainty
+- [Express + Passport Projects Dataset](./express-passport-projects.md) - Ground truth dataset for accuracy testing

@@ -34,9 +34,12 @@ export class EnhancedProjectDetector {
    */
   private detectBasicProjectInfo() {
     const pkg = this.readPackageJson();
-    const projectType = this.determineProjectType(pkg);
+    const allFiles = this.findAllJSTSFiles();
+    const mainFiles = this.detectMainFiles(allFiles);
+    
+    const projectType = this.determineProjectType(pkg, mainFiles);
     const language = this.determineLanguage(pkg);
-    const framework = this.determineFramework(pkg);
+    const framework = this.determineFramework(pkg, mainFiles);
     const packageManager = this.determinePackageManager();
     
     return {
@@ -46,7 +49,8 @@ export class EnhancedProjectDetector {
       packageManager,
       directories: this.mapKeyDirectories(),
       dependencies: Object.keys(pkg.dependencies || {}),
-      scripts: pkg.scripts || {}
+      scripts: pkg.scripts || {},
+      mainFiles: mainFiles.map(f => f.replace(this.projectRoot, ''))
     };
   }
 
@@ -65,7 +69,9 @@ export class EnhancedProjectDetector {
    * Detect authentication implementation patterns
    */
   private detectAuthImplementation() {
-    const authFiles = this.findFiles(['**/auth/**/*.{ts,js}', '**/middleware/auth*.{ts,js}', '**/guards/**/*.{ts,js}']);
+    // Broader file scanning - search all JS/TS files for auth patterns
+    const allFiles = this.findAllJSTSFiles();
+    const authFiles = this.filterFilesByAuthPatterns(allFiles);
     const evidence: string[] = [];
     const signals: PatternDetectionSignal[] = [];
     
@@ -80,19 +86,15 @@ export class EnhancedProjectDetector {
         const content = this.readFileContent(file);
         const relativeFile = file.replace(this.projectRoot, '');
 
-        // Detect user property pattern
-        if (this.validatePatternInContext(content, 'req.user', ['req', 'user', 'auth'])) {
-          userProperty = 'req.user';
-          evidence.push(`${relativeFile}: req.user usage`);
-          signals.push({ weight: 30, detected: true, evidence: `${relativeFile}: req.user` });
-        } else if (this.validatePatternInContext(content, 'req.context.user', ['req', 'context', 'user'])) {
-          userProperty = 'req.context.user';
-          evidence.push(`${relativeFile}: req.context.user usage`);
-          signals.push({ weight: 30, detected: true, evidence: `${relativeFile}: req.context.user` });
-        } else if (this.validatePatternInContext(content, 'req.auth', ['req', 'auth'])) {
-          userProperty = 'req.auth';
-          evidence.push(`${relativeFile}: req.auth usage`);
-          signals.push({ weight: 30, detected: true, evidence: `${relativeFile}: req.auth` });
+        // Detect user property pattern with flexible matching
+        const userPatterns = ['req.user', 'req.context.user', 'req.auth', 'request.user', 'ctx.user', 'context.user'];
+        const userDetection = this.detectFlexiblePattern(content, userPatterns);
+        
+        if (userDetection) {
+          userProperty = userDetection.pattern;
+          const confidenceWeight = Math.round(30 * userDetection.confidence);
+          evidence.push(`${relativeFile}: ${userDetection.pattern} usage (${Math.round(userDetection.confidence * 100)}% confidence)`);
+          signals.push({ weight: confidenceWeight, detected: true, evidence: `${relativeFile}: ${userDetection.pattern}` });
         }
 
         // Detect token location
@@ -106,13 +108,18 @@ export class EnhancedProjectDetector {
           signals.push({ weight: 25, detected: true });
         }
 
-        // Detect error response format
-        if (content.includes('{error:') || content.includes('{ error:')) {
-          errorFormat = '{error: string}';
-          signals.push({ weight: 20, detected: true });
-        } else if (content.includes('{message:') || content.includes('{ message:')) {
-          errorFormat = '{message: string}';
-          signals.push({ weight: 20, detected: true });
+        // Detect error response format with flexible patterns
+        const errorPatterns = ['{error:', '{ error:', '{message:', '{ message:', 'error:', 'message:'];
+        const errorDetection = this.detectFlexiblePattern(content, errorPatterns);
+        
+        if (errorDetection) {
+          if (errorDetection.pattern.includes('error')) {
+            errorFormat = '{error: string}';
+          } else if (errorDetection.pattern.includes('message')) {
+            errorFormat = '{message: string}';
+          }
+          const confidenceWeight = Math.round(20 * errorDetection.confidence);
+          signals.push({ weight: confidenceWeight, detected: true });
         }
 
         // Detect status codes
@@ -156,7 +163,9 @@ export class EnhancedProjectDetector {
    * Detect API response implementation patterns
    */
   private detectAPIResponseImplementation() {
-    const apiFiles = this.findFiles(['**/controllers/**/*.{ts,js}', '**/routes/**/*.{ts,js}', '**/handlers/**/*.{ts,js}']);
+    // Broader file scanning - search all JS/TS files for API patterns
+    const allFiles = this.findAllJSTSFiles();
+    const apiFiles = this.filterFilesByAPIPatterns(allFiles);
     const evidence: string[] = [];
     const signals: PatternDetectionSignal[] = [];
     
@@ -175,27 +184,39 @@ export class EnhancedProjectDetector {
         const content = this.readFileContent(file);
         const relativeFile = file.replace(this.projectRoot, '');
 
-        // Detect success response format
-        if (content.includes('{data:') || content.includes('{ data:')) {
+        // Detect success response format with flexible patterns
+        const dataPatterns = ['{data:', '{ data:', 'data:'];
+        const resultPatterns = ['{result:', '{ result:', 'result:'];
+        const responsePatterns = ['res.json(', 'response.json(', 'return '];
+        
+        const dataDetection = this.detectFlexiblePattern(content, dataPatterns);
+        const resultDetection = this.detectFlexiblePattern(content, resultPatterns);
+        const responseDetection = this.detectFlexiblePattern(content, responsePatterns);
+        
+        if (dataDetection) {
           dataWrapperCount++;
-          evidence.push(`${relativeFile}: {data: any} format`);
-        } else if (content.includes('{result:') || content.includes('{ result:')) {
+          evidence.push(`${relativeFile}: {data: any} format (${Math.round(dataDetection.confidence * 100)}% confidence)`);
+        } else if (resultDetection) {
           resultWrapperCount++;
-          evidence.push(`${relativeFile}: {result: any} format`);
-        } else if (content.includes('res.json(') || content.includes('return ')) {
+          evidence.push(`${relativeFile}: {result: any} format (${Math.round(resultDetection.confidence * 100)}% confidence)`);
+        } else if (responseDetection) {
           bareObjectCount++;
-          evidence.push(`${relativeFile}: bare object response`);
+          evidence.push(`${relativeFile}: bare object response (${Math.round(responseDetection.confidence * 100)}% confidence)`);
         }
 
-        // Detect error response format  
-        if (content.includes('{error:') || content.includes('{ error:')) {
-          errorFormat = '{error: string}';
-          evidence.push(`${relativeFile}: {error: string} format`);
-          signals.push({ weight: 15, detected: true });
-        } else if (content.includes('{message:') || content.includes('{ message:')) {
-          errorFormat = '{message: string}';
-          evidence.push(`${relativeFile}: {message: string} format`);
-          signals.push({ weight: 15, detected: true });
+        // Detect error response format with flexible patterns
+        const errorResponsePatterns = ['{error:', '{ error:', '{message:', '{ message:', 'error:', 'message:'];
+        const errorResponseDetection = this.detectFlexiblePattern(content, errorResponsePatterns);
+        
+        if (errorResponseDetection) {
+          if (errorResponseDetection.pattern.includes('error')) {
+            errorFormat = '{error: string}';
+          } else if (errorResponseDetection.pattern.includes('message')) {
+            errorFormat = '{message: string}';
+          }
+          evidence.push(`${relativeFile}: ${errorFormat} format (${Math.round(errorResponseDetection.confidence * 100)}% confidence)`);
+          const confidenceWeight = Math.round(15 * errorResponseDetection.confidence);
+          signals.push({ weight: confidenceWeight, detected: true });
         }
 
         // Detect status code usage
@@ -244,8 +265,10 @@ export class EnhancedProjectDetector {
    * Detect error handling implementation patterns
    */
   private detectErrorHandlingImplementation() {
-    const errorFiles = this.findFiles(['**/error*.{ts,js}', '**/middleware/error*.{ts,js}', '**/exception*.{ts,js}']);
-    const apiFiles = this.findFiles(['**/controllers/**/*.{ts,js}', '**/routes/**/*.{ts,js}']);
+    // Broader file scanning - search all JS/TS files for error patterns
+    const allFiles = this.findAllJSTSFiles();
+    const errorFiles = this.filterFilesByErrorPatterns(allFiles);
+    const mainFiles = this.detectMainFiles(allFiles);
     const evidence: string[] = [];
     const signals: PatternDetectionSignal[] = [];
     
@@ -279,24 +302,26 @@ export class EnhancedProjectDetector {
       }
     }
 
-    // Check API files for try/catch patterns
-    if (apiFiles.length > 0 && catchPattern === 'Unknown') {
-      const apiContent = this.readFileContent(apiFiles[0]);
-      const relativeFile = apiFiles[0].replace(this.projectRoot, '');
+    // Check main files and other files for try/catch patterns
+    const filesToCheck = catchPattern === 'Unknown' ? [...mainFiles, ...errorFiles.filter(f => !mainFiles.includes(f))] : [];
+    
+    if (filesToCheck.length > 0 && catchPattern === 'Unknown') {
+      const fileContent = this.readFileContent(filesToCheck[0]);
+      const relativeFile = filesToCheck[0].replace(this.projectRoot, '');
       
-      if (apiContent.includes('try {') && apiContent.includes('catch')) {
+      if (fileContent.includes('try {') && fileContent.includes('catch')) {
         catchPattern = 'try/catch blocks';
         evidence.push(`${relativeFile}: try/catch usage`);
         signals.push({ weight: 30, detected: true });
       }
 
       // Check for Result type patterns
-      if (apiContent.includes('Result<') || apiContent.includes('Either<')) {
+      if (fileContent.includes('Result<') || fileContent.includes('Either<')) {
         catchPattern = 'Result types';
         propagationStyle = 'return errors';
         evidence.push(`${relativeFile}: Result type usage`);
         signals.push({ weight: 35, detected: true });
-      } else if (apiContent.includes('throw')) {
+      } else if (fileContent.includes('throw')) {
         propagationStyle = 'throw exceptions';
         signals.push({ weight: 15, detected: true });
       }
@@ -320,7 +345,7 @@ export class EnhancedProjectDetector {
   }
 
   /**
-   * Enhanced pattern matching with context validation
+   * Enhanced pattern matching with context validation and flexible detection
    */
   private validatePatternInContext(content: string, pattern: string, contextKeywords: string[]): boolean {
     const lines = content.split('\n');
@@ -328,11 +353,71 @@ export class EnhancedProjectDetector {
       if (lines[i].includes(pattern)) {
         // Check surrounding context for validation
         const contextLines = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3));
-        const contextText = contextLines.join(' ');
-        return contextKeywords.some(keyword => contextText.includes(keyword));
+        const contextText = contextLines.join(' ').toLowerCase();
+        return contextKeywords.some(keyword => contextText.includes(keyword.toLowerCase()));
       }
     }
     return false;
+  }
+
+  /**
+   * Flexible pattern detection that works across different code styles
+   */
+  private detectFlexiblePattern(content: string, patterns: string[]): { pattern: string; confidence: number } | null {
+    const normalizedContent = content.replace(/\s+/g, ' ').toLowerCase();
+    
+    for (const pattern of patterns) {
+      // Direct match
+      if (normalizedContent.includes(pattern.toLowerCase())) {
+        return { pattern, confidence: 1.0 };
+      }
+      
+      // Partial match with variations
+      const patternParts = pattern.split('.');
+      if (patternParts.length > 1) {
+        const lastPart = patternParts[patternParts.length - 1];
+        if (normalizedContent.includes(lastPart.toLowerCase())) {
+          return { pattern, confidence: 0.7 };
+        }
+      }
+      
+      // Similar pattern detection (e.g., request.user vs req.user)
+      const variations = this.generatePatternVariations(pattern);
+      for (const variation of variations) {
+        if (normalizedContent.includes(variation.toLowerCase())) {
+          return { pattern, confidence: 0.8 };
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Generate common variations of a pattern
+   */
+  private generatePatternVariations(pattern: string): string[] {
+    const variations: string[] = [];
+    
+    // Common abbreviations and expansions
+    const replacements = [
+      { from: 'req', to: 'request' },
+      { from: 'request', to: 'req' },
+      { from: 'res', to: 'response' },
+      { from: 'response', to: 'res' },
+      { from: 'auth', to: 'authentication' },
+      { from: 'authentication', to: 'auth' },
+      { from: 'ctx', to: 'context' },
+      { from: 'context', to: 'ctx' }
+    ];
+    
+    for (const replacement of replacements) {
+      if (pattern.includes(replacement.from)) {
+        variations.push(pattern.replace(replacement.from, replacement.to));
+      }
+    }
+    
+    return variations;
   }
 
   /**
@@ -357,6 +442,141 @@ export class EnhancedProjectDetector {
       totalConfidence: Math.min(totalConfidence, 100),
       uncertaintyWarning
     };
+  }
+
+  /**
+   * Find all JavaScript and TypeScript files in the project
+   */
+  private findAllJSTSFiles(): string[] {
+    try {
+      // Scan entire project for all JS/TS files, excluding node_modules and common build dirs
+      const allFiles = glob.sync('**/*.{js,ts,jsx,tsx}', {
+        cwd: this.projectRoot,
+        absolute: true,
+        ignore: [
+          'node_modules/**',
+          'dist/**',
+          'build/**',
+          '.next/**',
+          'coverage/**',
+          '*.d.ts' // Exclude type definition files
+        ]
+      });
+      return allFiles;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /**
+   * Filter files that likely contain authentication patterns
+   */
+  private filterFilesByAuthPatterns(files: string[]): string[] {
+    return files.filter(file => {
+      const fileName = file.toLowerCase();
+      const content = this.readFileContent(file);
+      
+      // File name suggests auth functionality
+      const hasAuthFileName = fileName.includes('auth') || 
+        fileName.includes('middleware') || 
+        fileName.includes('guard') ||
+        fileName.includes('jwt') ||
+        fileName.includes('passport') ||
+        fileName.includes('session');
+      
+      // Content suggests auth functionality
+      const hasAuthContent = content.includes('req.user') ||
+        content.includes('req.auth') ||
+        content.includes('req.context.user') ||
+        content.includes('authorization') ||
+        content.includes('Bearer') ||
+        content.includes('jwt') ||
+        content.includes('passport') ||
+        content.includes('authenticate');
+      
+      return hasAuthFileName || hasAuthContent;
+    });
+  }
+
+  /**
+   * Filter files that likely contain API response patterns
+   */
+  private filterFilesByAPIPatterns(files: string[]): string[] {
+    return files.filter(file => {
+      const fileName = file.toLowerCase();
+      const content = this.readFileContent(file);
+      
+      // File name suggests API functionality
+      const hasAPIFileName = fileName.includes('controller') ||
+        fileName.includes('route') ||
+        fileName.includes('handler') ||
+        fileName.includes('api') ||
+        fileName.includes('endpoint');
+      
+      // Content suggests API functionality
+      const hasAPIContent = content.includes('res.json') ||
+        content.includes('res.send') ||
+        content.includes('response') ||
+        content.includes('req.') ||
+        content.includes('app.get') ||
+        content.includes('app.post') ||
+        content.includes('router.') ||
+        content.includes('express') ||
+        content.includes('fastify') ||
+        content.includes('return ') && (content.includes('{data:') || content.includes('{result:'));
+      
+      return hasAPIFileName || hasAPIContent;
+    });
+  }
+
+  /**
+   * Filter files that likely contain error handling patterns
+   */
+  private filterFilesByErrorPatterns(files: string[]): string[] {
+    return files.filter(file => {
+      const fileName = file.toLowerCase();
+      const content = this.readFileContent(file);
+      
+      // File name suggests error handling
+      const hasErrorFileName = fileName.includes('error') ||
+        fileName.includes('exception') ||
+        fileName.includes('catch');
+      
+      // Content suggests error handling
+      const hasErrorContent = content.includes('try {') ||
+        content.includes('catch') ||
+        content.includes('throw') ||
+        content.includes('Error') ||
+        content.includes('app.use((err') ||
+        content.includes('(error, req, res') ||
+        content.includes('Result<') ||
+        content.includes('Either<');
+      
+      return hasErrorFileName || hasErrorContent;
+    });
+  }
+
+  /**
+   * Detect main application files (server.js, app.js, index.js, main.ts, etc.)
+   */
+  private detectMainFiles(files: string[]): string[] {
+    const mainFileNames = ['server', 'app', 'index', 'main'];
+    const mainFiles: string[] = [];
+    
+    for (const file of files) {
+      const fileName = file.split('/').pop()?.split('.')[0]?.toLowerCase();
+      
+      if (fileName && mainFileNames.includes(fileName)) {
+        // Prioritize files in root or src directory
+        if (file.includes('/src/') || !file.includes('/')) {
+          mainFiles.unshift(file); // Add to beginning
+        } else {
+          mainFiles.push(file);
+        }
+      }
+    }
+    
+    return mainFiles;
   }
 
   /**
@@ -392,12 +612,33 @@ export class EnhancedProjectDetector {
     }
   }
 
-  private determineProjectType(pkg: any): string {
+  private determineProjectType(pkg: any, mainFiles: string[] = []): string {
+    // Check package.json dependencies first
     if (pkg.dependencies?.express || pkg.devDependencies?.express) return 'Express API';
     if (pkg.dependencies?.react || pkg.devDependencies?.react) return 'React Application';
     if (pkg.dependencies?.['@nestjs/core']) return 'NestJS API';
     if (pkg.dependencies?.next || pkg.devDependencies?.next) return 'Next.js Application';
     if (pkg.dependencies?.vue || pkg.devDependencies?.vue) return 'Vue Application';
+    if (pkg.dependencies?.fastify || pkg.devDependencies?.fastify) return 'Fastify API';
+    if (pkg.dependencies?.koa || pkg.devDependencies?.koa) return 'Koa API';
+    
+    // Analyze main files for additional clues
+    for (const file of mainFiles) {
+      const content = this.readFileContent(file);
+      if (content.includes('express()') || content.includes('app.listen') || content.includes('app.use')) {
+        return 'Express API';
+      }
+      if (content.includes('fastify') || content.includes('fastify()')) {
+        return 'Fastify API';  
+      }
+      if (content.includes('new Koa') || content.includes('koa')) {
+        return 'Koa API';
+      }
+      if (content.includes('createServer') || content.includes('http.')) {
+        return 'HTTP Server';
+      }
+    }
+    
     return 'Node.js Project';
   }
 
@@ -408,12 +649,30 @@ export class EnhancedProjectDetector {
     return 'JavaScript';
   }
 
-  private determineFramework(pkg: any): string {
+  private determineFramework(pkg: any, mainFiles: string[] = []): string {
+    // Check package.json dependencies first
     if (pkg.dependencies?.express) return 'Express.js';
     if (pkg.dependencies?.['@nestjs/core']) return 'NestJS';
     if (pkg.dependencies?.react) return 'React';
     if (pkg.dependencies?.next) return 'Next.js';
     if (pkg.dependencies?.vue) return 'Vue.js';
+    if (pkg.dependencies?.fastify) return 'Fastify';
+    if (pkg.dependencies?.koa) return 'Koa';
+    
+    // Analyze main files for framework usage patterns
+    for (const file of mainFiles) {
+      const content = this.readFileContent(file);
+      if (content.includes('express()') || content.includes('require("express")') || content.includes('import express')) {
+        return 'Express.js';
+      }
+      if (content.includes('fastify') || content.includes('require("fastify")') || content.includes('import fastify')) {
+        return 'Fastify';
+      }
+      if (content.includes('new Koa') || content.includes('require("koa")') || content.includes('import Koa')) {
+        return 'Koa';
+      }
+    }
+    
     return 'None detected';
   }
 
