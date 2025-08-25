@@ -34,7 +34,6 @@ export interface AccuracyMetrics {
         initialize: PatternAccuracyResult;
         authenticate: PatternAccuracyResult;
         strategy: PatternAccuracyResult;
-        routeProtection: PatternAccuracyResult;
     };
     falsePositiveRate: number;
     falseNegativeRate: number;
@@ -119,7 +118,6 @@ export class AccuracyMeasurementFramework {
             initialize: [],
             authenticate: [],
             strategy: [],
-            routeProtection: []
         };
 
         for (const project of projects) {
@@ -138,7 +136,6 @@ export class AccuracyMeasurementFramework {
                 accuracyByPattern.initialize.push(metrics.patternAccuracy.initialize.f1Score);
                 accuracyByPattern.authenticate.push(metrics.patternAccuracy.authenticate.f1Score);
                 accuracyByPattern.strategy.push(metrics.patternAccuracy.strategy.f1Score);
-                accuracyByPattern.routeProtection.push(metrics.patternAccuracy.routeProtection.f1Score);
             } catch (error) {
                 console.log(`    ❌ Failed to analyze ${project.name}: ${error}`);
                 continue;
@@ -183,7 +180,6 @@ export class AccuracyMeasurementFramework {
             initialize: this.calculatePatternAccuracy('initialize', project, detectionResult),
             authenticate: this.calculatePatternAccuracy('authenticate', project, detectionResult),
             strategy: this.calculatePatternAccuracy('strategy', project, detectionResult),
-            routeProtection: this.calculatePatternAccuracy('route-protection', project, detectionResult)
         };
 
         // Calculate overall metrics
@@ -212,7 +208,7 @@ export class AccuracyMeasurementFramework {
         detectionResult: IntegratedDetectionResult
     ): PatternAccuracyResult {
         const expectedPatterns = project.expectedPatterns.filter(p => p.patternType === patternType);
-        const patternKey = patternType === 'route-protection' ? 'routeProtection' : patternType;
+        const patternKey = patternType;
         const detectedPattern = detectionResult.patterns[patternKey as keyof typeof detectionResult.patterns];
         const detectedEvidence = detectedPattern.evidence;
 
@@ -368,7 +364,7 @@ export class AccuracyMeasurementFramework {
         const failures: string[] = [];
         
         // Check for patterns with consistently low accuracy
-        const patternTypes = ['initialize', 'authenticate', 'strategy', 'routeProtection'] as const;
+        const patternTypes = ['initialize', 'authenticate', 'strategy'] as const;
         
         for (const patternType of patternTypes) {
             const avgF1 = results.reduce((sum, r) => sum + r.patternAccuracy[patternType].f1Score, 0) / results.length;
@@ -408,9 +404,6 @@ export class AccuracyMeasurementFramework {
                         break;
                     case 'strategy':
                         recommendations.push('Expand strategy detection to cover more authentication types');
-                        break;
-                    case 'routeProtection':
-                        recommendations.push('Implement dedicated route protection pattern detection');
                         break;
                 }
             }

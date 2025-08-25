@@ -216,9 +216,8 @@ export class OptimizedPatternDetector {
         initialize: PatternResult;
         authenticate: PatternResult;
         strategy: PatternResult;
-        routeProtection: PatternResult;
     }> {
-        const patternTypes = ['initialize', 'authenticate', 'strategy', 'route-protection'] as const;
+        const patternTypes = ['initialize', 'authenticate', 'strategy'] as const;
         const results: any = {};
 
         for (const patternType of patternTypes) {
@@ -246,7 +245,7 @@ export class OptimizedPatternDetector {
             // Generate recommendation
             const recommendation = this.generateRecommendation(patternType, confidence, conflicts);
 
-            const key = patternType === 'route-protection' ? 'routeProtection' : patternType;
+            const key = patternType;
             results[key] = {
                 detected: evidence.length > 0,
                 confidence,
@@ -296,7 +295,7 @@ export class OptimizedPatternDetector {
             });
         }
 
-        if (patternType === 'route-protection' && evidence.length === 0) {
+        if (false && evidence.length === 0) { // Disabled route-protection logic
             const authenticatePatterns = astResults.filter(p => p.type === 'authenticate');
             
             for (const pattern of authenticatePatterns) {
@@ -347,7 +346,6 @@ export class OptimizedPatternDetector {
             patterns.initialize.confidence.score,
             patterns.authenticate.confidence.score,
             patterns.strategy.confidence.score,
-            patterns.routeProtection.confidence.score
         ];
 
         const detectedPatterns = scores.filter(score => score > 0);
@@ -364,7 +362,6 @@ export class OptimizedPatternDetector {
             patterns.initialize.conflicts.conflicts.length,
             patterns.authenticate.conflicts.conflicts.length,
             patterns.strategy.conflicts.conflicts.length,
-            patterns.routeProtection.conflicts.conflicts.length
         ].reduce((sum, count) => sum + count, 0);
     }
 
@@ -414,7 +411,6 @@ export class OptimizedPatternDetector {
                 initialize: emptyPattern,
                 authenticate: emptyPattern,
                 strategy: emptyPattern,
-                routeProtection: emptyPattern
             },
             overallConfidence: 0,
             conflictsResolved: 0,

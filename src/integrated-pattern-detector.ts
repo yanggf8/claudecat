@@ -14,7 +14,6 @@ export interface IntegratedDetectionResult {
         initialize: PatternResult;
         authenticate: PatternResult;
         strategy: PatternResult;
-        routeProtection: PatternResult;
     };
     overallConfidence: number;
     conflictsResolved: number;
@@ -55,7 +54,6 @@ export class IntegratedPatternDetector {
             initialize: await this.processPattern('initialize', astResults, projectPath),
             authenticate: await this.processPattern('authenticate', astResults, projectPath),
             strategy: await this.processPattern('strategy', astResults, projectPath),
-            routeProtection: await this.processPattern('route-protection', astResults, projectPath)
         };
 
         // Step 3: Calculate overall metrics
@@ -297,13 +295,11 @@ export class IntegratedPatternDetector {
         initialize: PatternResult;
         authenticate: PatternResult;
         strategy: PatternResult;
-        routeProtection: PatternResult;
     }): number {
         const scores = [
             patterns.initialize.confidence.score,
             patterns.authenticate.confidence.score,
             patterns.strategy.confidence.score,
-            patterns.routeProtection.confidence.score
         ];
 
         const detectedPatterns = scores.filter(score => score > 0);
@@ -322,13 +318,11 @@ export class IntegratedPatternDetector {
         initialize: PatternResult;
         authenticate: PatternResult;
         strategy: PatternResult;
-        routeProtection: PatternResult;
     }): number {
         return [
             patterns.initialize.conflicts.conflicts.length,
             patterns.authenticate.conflicts.conflicts.length,
             patterns.strategy.conflicts.conflicts.length,
-            patterns.routeProtection.conflicts.conflicts.length
         ].reduce((sum, count) => sum + count, 0);
     }
 
@@ -340,8 +334,7 @@ export class IntegratedPatternDetector {
             initialize: PatternResult;
             authenticate: PatternResult;
             strategy: PatternResult;
-            routeProtection: PatternResult;
-        },
+            },
         conflictsResolved: number
     ): string {
         const detectedCount = Object.values(patterns).filter(p => p.detected).length;
@@ -408,7 +401,7 @@ export async function testIntegratedDetection(projectPath: string = 'test/sample
     console.log(`Summary: ${result.summary}\n`);
     
     // Display detailed results for each pattern
-    const patternTypes = ['initialize', 'authenticate', 'strategy', 'routeProtection'] as const;
+    const patternTypes = ['initialize', 'authenticate', 'strategy'] as const;
     
     for (const patternType of patternTypes) {
         const pattern = result.patterns[patternType];
