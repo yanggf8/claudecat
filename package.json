@@ -7,8 +7,11 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/server.ts",
+    "dev:multi": "tsx watch src/multi-instance-server.ts",
     "start": "node dist/server.js",
+    "start:multi": "node dist/multi-instance-server.js",
     "server:stdio": "tsx src/server.ts",
+    "server:multi": "tsx src/multi-instance-server.ts",
     "test": "jest",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"

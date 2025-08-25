@@ -16,16 +16,25 @@
 
 ## 🚀 Quick Start
 
-### Option A: Automated Installation (Recommended)
+### Option A: Multi-Instance Installation (Recommended)
 
 ```bash
-# Clone and install in one command
+# Clone and install with multi-instance support
+git clone https://github.com/yanggf8/claudecat.git
+cd claudecat
+./scripts/install-multi.sh
+```
+
+### Option B: Single Instance Installation
+
+```bash
+# Traditional single-instance setup
 git clone https://github.com/yanggf8/claudecat.git
 cd claudecat
 ./scripts/install.sh
 ```
 
-### Option B: Manual Installation
+### Option C: Manual Installation
 
 ```bash
 # 1. Install dependencies and build
@@ -54,11 +63,17 @@ claude chat --mcp
 ### 5. Development Mode
 
 ```bash
-# For development with hot reload
+# Single instance development mode
 npm run dev
 
-# Register development server
+# Multi-instance development mode (recommended)
+npm run dev:multi
+
+# Register development server (single-instance)
 claude mcp add claudecat-dev "tsx $(pwd)/src/server.ts"
+
+# Register development server (multi-instance)
+claude mcp add claudecat-multi-dev "tsx $(pwd)/src/multi-instance-server.ts"
 ```
 
 ### 6. Testing & Validation
@@ -147,6 +162,8 @@ Monitors project files and updates context when implementation patterns change:
 
 ## 🛠️ Available MCP Tools
 
+### Core ClaudeCat Tools
+
 ### `get_project_context`
 Get current project information including type, language, framework, and directory structure.
 
@@ -162,18 +179,28 @@ Force immediate re-detection of project patterns and CLAUDE.md update.
 ### `get_engine_status`
 Get status information about file watching, pattern detection, and update processes.
 
+### Multi-Instance Tools (Available in Multi-Instance Mode)
+
+### `multi_instance_health`
+Monitor health status of all Claude Code instances, memory usage, and session information.
+
+### `session_analysis`
+Analyze active Claude Code sessions, process management, and troubleshoot multi-instance issues.
+
 ## 📁 Project Structure
 
 ```
 src/
 ├── core/
-│   ├── project-detector.ts      # Implementation pattern detection
-│   ├── claude-md-maintainer.ts  # Atomic CLAUDE.md updates
-│   ├── context-watcher.ts       # File monitoring and debouncing
+│   ├── project-detector.ts         # Implementation pattern detection
+│   ├── claude-md-maintainer.ts     # Atomic CLAUDE.md updates
+│   ├── context-watcher.ts          # File monitoring and debouncing
 │   └── proactive-context-engine.ts # Main engine coordination
 ├── types/
-│   └── patterns.ts              # TypeScript type definitions
-└── server.ts                    # MCP server with stdio transport
+│   └── patterns.ts                 # TypeScript type definitions
+├── server.ts                       # Single-instance MCP server
+├── multi-instance-server.ts        # Multi-instance MCP server (recommended)
+└── multi-instance-logger.ts        # Session tracking and multi-instance logging
 ```
 
 ## 🎛️ Configuration
@@ -258,13 +285,32 @@ node scripts/test-mcp-tools.js [project-path]
 
 ## 🐛 Troubleshooting
 
+### Multi-Instance Issues
+
+```bash
+# Check active sessions
+~/.claudecat/check-sessions.sh
+
+# Clean up stale sessions
+~/.claudecat/cleanup-sessions.sh
+
+# Monitor session logs
+tail -f ~/.claudecat/multi-instance-logs/*.log
+
+# Analyze sessions in Claude Code
+# Use multi_instance_health and session_analysis tools
+```
+
 ### Server Won't Start
 ```bash
 # Check if TypeScript builds correctly
 npm run build
 
-# Check for permission issues
+# Check for permission issues (single-instance)
 ls -la dist/server.js
+
+# Check for permission issues (multi-instance)
+ls -la dist/multi-instance-server.js
 
 # Verify dependencies
 npm install
@@ -280,12 +326,16 @@ npm install
 
 # Check file watching
 tail -f ~/.claude/logs/claudecat.log
+
+# Multi-instance health check
+# In Claude Code with MCP: use multi_instance_health tool
 ```
 
 ### CLAUDE.md Not Updating
 - Check file permissions on CLAUDE.md
 - Verify project root directory detection
 - Look for `.claudecat.tmp` files (indicates atomic write issues)
+- In multi-instance mode: Check `~/.claudecat/multi-instance-logs/active-sessions.json`
 
 ## 📊 Proven Results
 

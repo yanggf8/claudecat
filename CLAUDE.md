@@ -19,7 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 │   │   ├── context-watcher.ts       # File monitoring
 │   │   └── proactive-context-engine.ts # Main engine
 │   ├── types/                # TypeScript type definitions
-│   └── server.ts             # MCP server with stdio transport
+│   ├── server.ts             # Single-instance MCP server
+│   ├── multi-instance-server.ts     # Multi-instance MCP server (recommended)
+│   └── multi-instance-logger.ts     # Session tracking and logging
 ├── scripts/                  # Installation and testing scripts
 ├── dist/                     # Compiled JavaScript output
 ├── CLAUDECAT-PROPOSAL.md     # Original proposal documentation
@@ -65,23 +67,58 @@ The project proposes transforming Claude Code from a "context-lacking assistant"
 
 ## Installation & Usage
 
+### Multi-Instance Installation (Recommended)
+
 ```bash
 # Install dependencies and build
 npm install
 npm run build
 
-# Install and register with Claude Code
+# Install and register multi-instance server with Claude Code
+./scripts/install-multi.sh
+
+# Start Claude Code (MCP tools are auto-detected, supports multiple instances)
+claude
+```
+
+### Single Instance Installation
+
+```bash
+# Install dependencies and build  
+npm install
+npm run build
+
+# Install and register single-instance server with Claude Code
 ./scripts/install.sh
 
 # Start Claude Code (MCP tools are auto-detected)
 claude
+```
+
+### Development Mode
+
+```bash
+# Multi-instance development mode (recommended)
+npm run dev:multi
+
+# Single instance development mode
+npm run dev
 
 # Test pattern detection
 ./scripts/test-detection.js
+```
 
-# Development mode with hot reload
-npm run dev
-./scripts/register-dev.sh
+### Multi-Instance Monitoring
+
+```bash
+# Check active Claude Code sessions
+~/.claudecat/check-sessions.sh
+
+# Clean up stale sessions
+~/.claudecat/cleanup-sessions.sh
+
+# Monitor session logs
+tail -f ~/.claudecat/multi-instance-logs/*.log
 ```
 
 ## Expert Validation Status
@@ -186,30 +223,30 @@ This is a complete accuracy improvement system with production-ready implementat
 \n\n<!-- claudecat:auto:begin:project-context -->
 ## Project Context (Auto-Maintained by ClaudeCat)
 
-**Project Type**: Node.js Project  
+**Project Type**: Express API  
 **Language**: TypeScript  
-**Framework**: None detected  
+**Framework**: Express.js  
 **Package Manager**: npm
 
 ### Implementation Patterns
 
-#### Authentication Implementation (0% - Low Confidence)
-- **User Property**: `Unknown`
+#### Authentication Implementation (100% - High Confidence)
+- **User Property**: `req.auth`
 - **Token Storage**: Unknown
 - **Error Response**: Unknown
-- **Middleware Pattern**: Unknown\n  ⚠️ **Low confidence** - Ask before making assumptions about this pattern
+- **Middleware Pattern**: app.use(auth)\n  Evidence: /debug-pattern-matching.js: req.auth usage (70% confidence)
 
-#### API Response Implementation (0% - Low Confidence)
-- **Success Format**: Unknown
-- **Error Format**: Unknown
-- **Status Codes**: Unknown
-- **Wrapper Pattern**: Unknown\n  ⚠️ **Low confidence** - Ask before making assumptions about this pattern
+#### API Response Implementation (100% - High Confidence)
+- **Success Format**: bare object
+- **Error Format**: {message: string}
+- **Status Codes**: default 200/500
+- **Wrapper Pattern**: conditional\n  Evidence: /test-performance.js: bare object response (100% confidence), /final-validation.js: bare object response (100% confidence), /debug-ast-detection.js: bare object response (100% confidence)
 
 #### Error Handling Implementation (100% - High Confidence)
 - **Catch Pattern**: global middleware
 - **Error Structure**: Unknown
-- **Logging Integration**: separate
-- **Propagation Style**: Unknown\n  Evidence: /node_modules/zod/v4/core/errors.js: global error handler
+- **Logging Integration**: integrated
+- **Propagation Style**: Unknown\n  Evidence: /test-performance.js: global error handler
 
 ### Development Information
 
@@ -226,9 +263,9 @@ This is a complete accuracy improvement system with production-ready implementat
 
 ### Critical Guardrails
 
-✅ **Follow `global middleware`** error handling pattern
+✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Use `{message: string}`** for error responses\n✅ **Follow `global middleware`** error handling pattern
 
-**Last Updated**: 2025-08-25T01:45:10.166Z  
+**Last Updated**: 2025-08-25T17:25:18.216Z  
 **Detection Quality**: Implementation patterns auto-detected with confidence scoring
 
 *This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
