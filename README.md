@@ -16,25 +16,16 @@
 
 ## 🚀 Quick Start
 
-### Option A: Multi-Instance Installation (Recommended)
+### Automatic Installation (Recommended)
 
 ```bash
-# Clone and install with multi-instance support
-git clone https://github.com/yanggf8/claudecat.git
-cd claudecat
-./scripts/install-multi.sh
-```
-
-### Option B: Single Instance Installation
-
-```bash
-# Traditional single-instance setup
+# Clone and install
 git clone https://github.com/yanggf8/claudecat.git
 cd claudecat
 ./scripts/install.sh
 ```
 
-### Option C: Manual Installation
+### Manual Installation
 
 ```bash
 # 1. Install dependencies and build
@@ -60,23 +51,17 @@ claude chat --mcp
 # ✅ Provides 5 MCP tools for Claude Code
 ```
 
-### 5. Development Mode
+### Development Mode
 
 ```bash
-# Single instance development mode
+# Development mode with hot reload
 npm run dev
 
-# Multi-instance development mode (recommended)
-npm run dev:multi
-
-# Register development server (single-instance) 
-claude mcp add claudecat-dev "$(which node)" "$(which tsx)" "$(pwd)/src/server.ts"
-
-# Register development server (multi-instance)
-claude mcp add claudecat-multi-dev "$(which node)" "$(which tsx)" "$(pwd)/src/multi-instance-server.ts"
+# Register development server
+claude mcp add claudecat-dev "$(which node)" "$(which tsx)" "$(pwd)/src/multi-instance-server.ts"
 ```
 
-### 6. Testing & Validation
+### Testing & Validation
 
 ```bash
 # Test pattern detection on your project
@@ -198,8 +183,7 @@ src/
 │   └── proactive-context-engine.ts # Main engine coordination
 ├── types/
 │   └── patterns.ts                 # TypeScript type definitions
-├── server.ts                       # Single-instance MCP server
-├── multi-instance-server.ts        # Multi-instance MCP server (recommended)
+├── multi-instance-server.ts        # MCP server with session tracking
 └── multi-instance-logger.ts        # Session tracking and multi-instance logging
 ```
 
@@ -306,10 +290,7 @@ tail -f ~/.claudecat/multi-instance-logs/*.log
 # Check if TypeScript builds correctly
 npm run build
 
-# Check for permission issues (single-instance)
-ls -la dist/server.js
-
-# Check for permission issues (multi-instance)
+# Check for permission issues
 ls -la dist/multi-instance-server.js
 
 # Verify dependencies

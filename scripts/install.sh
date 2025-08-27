@@ -1,159 +1,115 @@
 #!/bin/bash
 
-# Cortex MCP Server Installation Script
+# ClaudeCat MCP Server Installation Script
+# Based on Cortex multi-instance approach
+
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLAUDECAT_HOME="$HOME/.claudecat"
+
 echo "🚀 Installing ClaudeCat MCP Server..."
+echo "Project root: $PROJECT_ROOT"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Function to print colored output
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Check if Node.js is installed
-if ! command -v node &> /dev/null; then
-    print_error "Node.js is not installed. Please install Node.js 18+ first."
-    exit 1
-fi
-
-# Check Node.js version
-NODE_VERSION=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-    print_error "Node.js version 18+ is required. Current version: $(node --version)"
-    exit 1
-fi
-
-# Check if npm is installed
-if ! command -v npm &> /dev/null; then
-    print_error "npm is not installed. Please install npm first."
-    exit 1
-fi
-
-# Check if Claude Code is installed
-if ! command -v claude &> /dev/null; then
-    print_warning "Claude Code CLI not found. Please install Claude Code first."
-    print_status "Visit: https://docs.anthropic.com/en/docs/claude-code"
-fi
-
-# Install dependencies
-print_status "Installing dependencies..."
-npm install
+# Create ClaudeCat home directory
+mkdir -p "$CLAUDECAT_HOME/multi-instance-logs"
 
 # Build the project
-print_status "Building TypeScript..."
+echo "📦 Building ClaudeCat..."
+cd "$PROJECT_ROOT"
 npm run build
 
-# Verify build output
-if [ ! -f "dist/server.js" ]; then
-    print_error "Build failed - dist/server.js not found"
+# Check if build succeeded
+if [ ! -f "$PROJECT_ROOT/dist/multi-instance-server.js" ]; then
+    echo "❌ Build failed - multi-instance-server.js not found"
     exit 1
 fi
 
-# Get absolute path
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-SERVER_PATH="$PROJECT_DIR/dist/server.js"
+# Make the server executable
+chmod +x "$PROJECT_ROOT/dist/multi-instance-server.js"
 
-print_success "Build completed successfully"
-
-# Register with Claude Code if available
-if command -v claude &> /dev/null; then
-    print_status "Registering with Claude Code..."
-    
-    # Remove existing registration if it exists
-    claude mcp remove claudecat -s user 2>/dev/null || true
-    claude mcp remove claudecat -s local 2>/dev/null || true
-    
-    # Get full node path to avoid ENOENT errors
-    NODE_PATH=$(which node)
-    if [ -z "$NODE_PATH" ]; then
-        print_error "node command not found in PATH"
-        exit 1
-    fi
-    
-    print_status "Using node path: $NODE_PATH"
-    
-    # Add new registration with full node path
-    if claude mcp add claudecat "$NODE_PATH" "$SERVER_PATH"; then
-        print_success "MCP server registered with Claude Code"
-        
-        # Verify registration
-        if claude mcp list | grep -q "claudecat"; then
-            print_success "Registration verified"
-        else
-            print_warning "Registration may have failed - please verify with 'claude mcp list'"
-        fi
-    else
-        print_error "Failed to register MCP server with Claude Code"
-        exit 1
-    fi
-else
-    print_warning "Claude Code not found - skipping registration"
-    print_status "Manual registration command:"
-    echo "  claude mcp add claudecat \"\$(which node)\" \"$SERVER_PATH\""
+# Create a symbolic link in ~/.local/bin if it exists
+LOCAL_BIN="$HOME/.local/bin"
+if [ -d "$LOCAL_BIN" ]; then
+    ln -sf "$PROJECT_ROOT/dist/multi-instance-server.js" "$LOCAL_BIN/claudecat"
+    echo "✅ Created symbolic link: ~/.local/bin/claudecat"
 fi
 
-# Create development registration script
-print_status "Creating development scripts..."
-cat > "$PROJECT_DIR/scripts/register-dev.sh" << EOF
-#!/bin/bash
-# Register development version with hot reload
-claude mcp remove claudecat-dev -s user 2>/dev/null || true
-claude mcp remove claudecat-dev -s local 2>/dev/null || true
-claude mcp add claudecat-dev "\$(which node)" "\$(which tsx)" "$PROJECT_DIR/src/server.ts"
-echo "Development server registered. Use 'npm run dev' to start with hot reload."
-EOF
+# Register with Claude Code MCP system
+echo "🔧 Registering ClaudeCat MCP server with Claude Code..."
 
-chmod +x "$PROJECT_DIR/scripts/register-dev.sh"
-
-# Create uninstall script
-cat > "$PROJECT_DIR/scripts/uninstall.sh" << EOF
-#!/bin/bash
-# Uninstall ClaudeCat MCP Server
+# Remove any existing registration
 claude mcp remove claudecat -s user 2>/dev/null || true
 claude mcp remove claudecat -s local 2>/dev/null || true
-claude mcp remove claudecat-dev -s user 2>/dev/null || true
-claude mcp remove claudecat-dev -s local 2>/dev/null || true
-echo "ClaudeCat MCP server unregistered from Claude Code"
+
+# Add with full node path to avoid ENOENT errors
+NODE_PATH=$(which node)
+if [ -z "$NODE_PATH" ]; then
+    echo "❌ Error: node command not found in PATH"
+    exit 1
+fi
+
+echo "📍 Using node path: $NODE_PATH"
+claude mcp add claudecat "$NODE_PATH" "$PROJECT_ROOT/dist/multi-instance-server.js"
+
+echo "✅ Claude Code MCP server registered"
+
+# Create session monitoring script
+cat > "$CLAUDECAT_HOME/check-sessions.sh" << 'EOF'
+#!/bin/bash
+# ClaudeCat Multi-Instance Session Monitor
+
+SESSIONS_FILE="$HOME/.claudecat/multi-instance-logs/active-sessions.json"
+
+if [ -f "$SESSIONS_FILE" ]; then
+    echo "🔍 Active ClaudeCat Sessions:"
+    echo "=============================="
+    cat "$SESSIONS_FILE" | jq -r '.[] | "Session: \(.sessionId)\nClaude: \(.claudeSession)\nPID: \(.pid)\nStatus: \(.status)\nUptime: \((now - (.startTime/1000)) / 60 | floor)m\n"'
+else
+    echo "❌ No active sessions file found"
+fi
 EOF
 
-chmod +x "$PROJECT_DIR/scripts/uninstall.sh"
+chmod +x "$CLAUDECAT_HOME/check-sessions.sh"
 
-print_success "Installation completed!"
-print_status ""
-print_status "Next steps:"
-print_status "1. Start Claude Code with MCP: claude chat --mcp"
-print_status "2. Use Cortex tools to get project context and patterns"
-print_status ""
-print_status "Available tools:"
-print_status "- get_project_context: Get project information"
-print_status "- get_implementation_patterns: Get detected patterns"
-print_status "- get_critical_guardrails: Get project-specific rules"
-print_status "- force_context_update: Force pattern re-detection"
-print_status "- get_engine_status: Check engine status"
-print_status ""
-print_status "Development mode:"
-print_status "- Run: npm run dev"
-print_status "- Register dev server: ./scripts/register-dev.sh"
-print_status ""
-print_status "Uninstall:"
-print_status "- Run: ./scripts/uninstall.sh"
+# Create cleanup script
+cat > "$CLAUDECAT_HOME/cleanup-sessions.sh" << 'EOF'
+#!/bin/bash
+# ClaudeCat Multi-Instance Session Cleanup
+
+SESSIONS_FILE="$HOME/.claudecat/multi-instance-logs/active-sessions.json"
+
+if [ -f "$SESSIONS_FILE" ]; then
+    echo "🧹 Cleaning up stale sessions..."
+    
+    # Create backup
+    cp "$SESSIONS_FILE" "$SESSIONS_FILE.backup.$(date +%s)"
+    
+    # Remove sessions for non-existent processes
+    jq 'with_entries(select(.value.pid as $pid | [$pid] | map(. as $p | ["ps", "-p", ($p | tostring)] | @sh) | .[0] as $cmd | ($cmd | split(" ") | .[0]) as $ps | ([$ps, "-p", ($p | tostring)] | @csv | gsub("\""; "") | . as $command | ($command | @sh) | . as $shellcmd | ($shellcmd | system) == 0)))' "$SESSIONS_FILE" > "$SESSIONS_FILE.tmp"
+    
+    mv "$SESSIONS_FILE.tmp" "$SESSIONS_FILE"
+    echo "✅ Session cleanup complete"
+else
+    echo "❌ No active sessions file found"
+fi
+EOF
+
+chmod +x "$CLAUDECAT_HOME/cleanup-sessions.sh"
+
+echo ""
+echo "✅ ClaudeCat MCP Server installation complete!"
+echo ""
+echo "📖 Usage Instructions:"
+echo "1. Start Claude Code - it will automatically use the MCP server"
+echo "2. Each Claude Code instance spawns its own ClaudeCat server instance"
+echo "3. Monitor sessions with: ~/.claudecat/check-sessions.sh"
+echo "4. Clean up stale sessions with: ~/.claudecat/cleanup-sessions.sh"
+echo ""
+echo "🔍 Troubleshooting:"
+echo "- Check logs in: ~/.claudecat/multi-instance-logs/"
+echo "- Session tracking: ~/.claudecat/multi-instance-logs/active-sessions.json"
+echo "- Use 'session_analysis' tool in Claude Code to debug issues"
+echo ""
+echo "🎯 Ready for Claude Code usage!"
