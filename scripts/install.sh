@@ -80,10 +80,20 @@ if command -v claude &> /dev/null; then
     print_status "Registering with Claude Code..."
     
     # Remove existing registration if it exists
-    claude mcp remove claudecat 2>/dev/null || true
+    claude mcp remove claudecat -s user 2>/dev/null || true
+    claude mcp remove claudecat -s local 2>/dev/null || true
     
-    # Add new registration
-    if claude mcp add claudecat "$SERVER_PATH"; then
+    # Get full node path to avoid ENOENT errors
+    NODE_PATH=$(which node)
+    if [ -z "$NODE_PATH" ]; then
+        print_error "node command not found in PATH"
+        exit 1
+    fi
+    
+    print_status "Using node path: $NODE_PATH"
+    
+    # Add new registration with full node path
+    if claude mcp add claudecat "$NODE_PATH" "$SERVER_PATH"; then
         print_success "MCP server registered with Claude Code"
         
         # Verify registration
@@ -99,7 +109,7 @@ if command -v claude &> /dev/null; then
 else
     print_warning "Claude Code not found - skipping registration"
     print_status "Manual registration command:"
-    echo "  claude mcp add claudecat \"$SERVER_PATH\""
+    echo "  claude mcp add claudecat \"\$(which node)\" \"$SERVER_PATH\""
 fi
 
 # Create development registration script
@@ -107,8 +117,9 @@ print_status "Creating development scripts..."
 cat > "$PROJECT_DIR/scripts/register-dev.sh" << EOF
 #!/bin/bash
 # Register development version with hot reload
-claude mcp remove claudecat-dev 2>/dev/null || true
-claude mcp add claudecat-dev "tsx $PROJECT_DIR/src/server.ts"
+claude mcp remove claudecat-dev -s user 2>/dev/null || true
+claude mcp remove claudecat-dev -s local 2>/dev/null || true
+claude mcp add claudecat-dev "\$(which node)" "\$(which tsx)" "$PROJECT_DIR/src/server.ts"
 echo "Development server registered. Use 'npm run dev' to start with hot reload."
 EOF
 
@@ -118,8 +129,10 @@ chmod +x "$PROJECT_DIR/scripts/register-dev.sh"
 cat > "$PROJECT_DIR/scripts/uninstall.sh" << EOF
 #!/bin/bash
 # Uninstall ClaudeCat MCP Server
-claude mcp remove claudecat 2>/dev/null || true
-claude mcp remove claudecat-dev 2>/dev/null || true
+claude mcp remove claudecat -s user 2>/dev/null || true
+claude mcp remove claudecat -s local 2>/dev/null || true
+claude mcp remove claudecat-dev -s user 2>/dev/null || true
+claude mcp remove claudecat-dev -s local 2>/dev/null || true
 echo "ClaudeCat MCP server unregistered from Claude Code"
 EOF
 
