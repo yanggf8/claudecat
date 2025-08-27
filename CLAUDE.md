@@ -265,7 +265,7 @@ This is a complete accuracy improvement system with production-ready implementat
 
 ✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Use `{message: string}`** for error responses\n✅ **Follow `global middleware`** error handling pattern
 
-**Last Updated**: 2025-08-25T17:36:40.439Z  
+**Last Updated**: 2025-08-27T16:11:54.941Z  
 **Detection Quality**: Implementation patterns auto-detected with confidence scoring
 
 *This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*

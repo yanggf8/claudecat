@@ -4,6 +4,10 @@
   "description": "ClaudeCat Proactive Context Engine - MCP Server for Claude Code accuracy improvement",
   "main": "dist/server.js",
   "type": "module",
+  "bin": {
+    "claudecat": "dist/multi-instance-server.js",
+    "claudecat-single": "dist/server.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/server.ts",

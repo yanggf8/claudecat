@@ -674,8 +674,18 @@ async function main() {
 
 // Run the server if this file is executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // Add specific debugging for Claude Code MCP connection issues
+  console.error(`[DEBUG] MCP server startup: PID=${process.pid}, PPID=${process.ppid}`);
+  console.error(`[DEBUG] Node path: ${process.execPath}`);
+  console.error(`[DEBUG] Working directory: ${process.cwd()}`);
+  console.error(`[DEBUG] Args: ${JSON.stringify(process.argv)}`);
+  console.error(`[DEBUG] Environment: CLAUDE_SESSION_ID=${process.env.CLAUDE_SESSION_ID}`);
+  console.error(`[DEBUG] stdio: stdin.readable=${process.stdin.readable}, stdout.writable=${process.stdout.writable}`);
+  
   main().catch((error) => {
     console.error('💥 Fatal error:', error);
+    console.error(`[DEBUG] Error type: ${error.constructor.name}`);
+    console.error(`[DEBUG] Error stack: ${error.stack}`);
     process.exit(1);
   });
 }

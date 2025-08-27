@@ -41,8 +41,8 @@ cd claudecat
 npm install
 npm run build
 
-# 2. Register the MCP server
-claude mcp add claudecat "$(pwd)/dist/server.js"
+# 2. Register the MCP server (use full node path to avoid ENOENT errors)
+claude mcp add claudecat "$(which node)" "$(pwd)/dist/multi-instance-server.js"
 
 # 3. Verify registration
 claude mcp list
@@ -69,11 +69,11 @@ npm run dev
 # Multi-instance development mode (recommended)
 npm run dev:multi
 
-# Register development server (single-instance)
-claude mcp add claudecat-dev "tsx $(pwd)/src/server.ts"
+# Register development server (single-instance) 
+claude mcp add claudecat-dev "$(which node)" "$(which tsx)" "$(pwd)/src/server.ts"
 
 # Register development server (multi-instance)
-claude mcp add claudecat-multi-dev "tsx $(pwd)/src/multi-instance-server.ts"
+claude mcp add claudecat-multi-dev "$(which node)" "$(which tsx)" "$(pwd)/src/multi-instance-server.ts"
 ```
 
 ### 6. Testing & Validation
@@ -315,6 +315,22 @@ ls -la dist/multi-instance-server.js
 # Verify dependencies
 npm install
 ```
+
+### "spawn node ENOENT" Error
+If you see connection failures with "ENOENT" errors, use the full node path:
+
+```bash
+# Remove existing registration
+claude mcp remove claudecat -s local
+
+# Add with full node path to fix ENOENT
+claude mcp add claudecat "$(which node)" "$(pwd)/dist/multi-instance-server.js"
+
+# Verify connection
+claude mcp list
+```
+
+This is required when `node` is not in the system PATH when Claude Code spawns MCP processes.
 
 ### Pattern Detection Issues
 ```bash

@@ -36,38 +36,24 @@ if [ -d "$LOCAL_BIN" ]; then
     echo "✅ Created symbolic link: ~/.local/bin/claudecat-multi"
 fi
 
-# Update Claude Code MCP configuration
-CLAUDE_CONFIG_DIR="$HOME/.config/claude-code"
-CLAUDE_CONFIG="$CLAUDE_CONFIG_DIR/claude_desktop_config.json"
+# Register with Claude Code MCP system
+echo "🔧 Registering ClaudeCat MCP server with Claude Code..."
 
-echo "🔧 Updating Claude Code MCP configuration..."
+# Remove any existing registration
+claude mcp remove claudecat -s user 2>/dev/null || true
+claude mcp remove claudecat -s local 2>/dev/null || true
 
-# Create config directory if it doesn't exist
-mkdir -p "$CLAUDE_CONFIG_DIR"
-
-# Create or update the config file
-if [ -f "$CLAUDE_CONFIG" ]; then
-    echo "📝 Backing up existing configuration..."
-    cp "$CLAUDE_CONFIG" "$CLAUDE_CONFIG.backup.$(date +%s)"
+# Add with full node path to avoid ENOENT errors
+NODE_PATH=$(which node)
+if [ -z "$NODE_PATH" ]; then
+    echo "❌ Error: node command not found in PATH"
+    exit 1
 fi
 
-# Generate the new configuration
-cat > "$CLAUDE_CONFIG" << EOF
-{
-  "mcpServers": {
-    "claudecat": {
-      "command": "node",
-      "args": ["$PROJECT_ROOT/dist/multi-instance-server.js"],
-      "env": {
-        "CLAUDE_SESSION_ID": "\$\$CLAUDE_SESSION_ID"
-      }
-    }
-  }
-}
-EOF
+echo "📍 Using node path: $NODE_PATH"
+claude mcp add claudecat "$NODE_PATH" "$PROJECT_ROOT/dist/multi-instance-server.js"
 
-echo "✅ Claude Code MCP configuration updated"
-echo "📁 Configuration file: $CLAUDE_CONFIG"
+echo "✅ Claude Code MCP server registered"
 
 # Create session monitoring script
 cat > "$CLAUDECAT_HOME/check-sessions.sh" << 'EOF'
