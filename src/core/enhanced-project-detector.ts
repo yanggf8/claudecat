@@ -39,10 +39,32 @@ export class CrossFileEnhancedProjectDetector {
   }
 
   /**
-   * Main detection method with both single-file and cross-file analysis
+   * Main detection method, refocused on robust, single-file analysis for core accuracy.
+   * This is the primary method for generating reliable context for Claude.
    */
-  async detectComprehensiveContext(): Promise<EnhancedProjectContext> {
-    console.log('🔍 Starting comprehensive project analysis...');
+  async detectProjectContext(): Promise<ProjectContextInfo> {
+    console.log('🔍 Starting robust project context analysis...');
+    
+    // Use the reliable single-file detector as the primary source of truth.
+    // This avoids the complexity and potential fragility of full cross-file analysis
+    // for generating the core implementation patterns.
+    const singleFileContext = this.singleFileDetector.detectCurrentContext();
+    console.log('✅ Robust single-file analysis complete.');
+
+    return {
+      ...singleFileContext,
+      lastUpdated: new Date().toISOString()
+    };
+  }
+
+  /**
+   * EXPERIMENTAL: Runs the full cross-file architectural analysis.
+   * This is a heavy, complex operation intended for deep architectural insights,
+   * not for generating the primary, most reliable implementation patterns for Claude.
+   * The results are more experimental and should be treated with caution.
+   */
+  async runExperimentalCrossFileAnalysis(): Promise<EnhancedProjectContext> {
+    console.log('🔬 Starting EXPERIMENTAL cross-file architectural analysis...');
     
     // Step 1: Traditional single-file detection
     const singleFileContext = this.singleFileDetector.detectCurrentContext();
@@ -74,17 +96,18 @@ export class CrossFileEnhancedProjectDetector {
       lastUpdated: new Date().toISOString()
     };
 
-    console.log(`🚀 Comprehensive analysis complete with ${enhancedConfidence.overallAccuracy}% accuracy`);
+    console.log(`🚀 EXPERIMENTAL analysis complete with ${enhancedConfidence.overallAccuracy}% accuracy`);
     return result;
   }
 
   /**
-   * Quick detection using cached cross-file analysis when available
+   * Quick detection using cached analysis.
+   * Refocused to use the primary, robust detection method.
    */
-  async detectWithCache(): Promise<EnhancedProjectContext> {
-    // In a real implementation, this would check for cached cross-file analysis
-    // and only perform full analysis if cache is stale
-    return this.detectComprehensiveContext();
+  async detectWithCache(): Promise<ProjectContextInfo> {
+    // In a real implementation, this would use a cache.
+    // For now, it calls the main detection logic.
+    return this.detectProjectContext();
   }
 
   /**

@@ -156,9 +156,15 @@ export class CrossFilePatternDetector {
   }
 
   /**
-   * Convert cross-file analysis to implementation patterns format
+   * Derives implementation patterns from the results of a full cross-file analysis.
+   * WARNING: This is an indirect method. The generated patterns are inferred from
+   * architectural analysis and may be less accurate than direct pattern detection.
+   * This is kept for experimental and comparison purposes.
    */
   async generateImplementationPatterns(): Promise<ImplementationPatterns> {
+    console.warn(
+      `[ClaudeCat] WARNING: Generating implementation patterns from cross-file analysis. This is an indirect, experimental method and may be less accurate than direct detection.`
+    );
     const crossFileResult = await this.detectCrossFilePatterns();
     
     // Extract authentication patterns from cross-file analysis

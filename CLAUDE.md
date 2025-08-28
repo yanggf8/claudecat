@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**ClaudeCat** is a "Proactive Context Engine" - a production-ready MCP server that solves Claude Code's context accuracy problems through advanced cross-file pattern detection and automatic CLAUDE.md maintenance.
+**ClaudeCat** is a "Proactive Context Engine" - a production-ready MCP server that improves Claude Code's accuracy by detecting key implementation patterns and automatically maintaining this `CLAUDE.md` file.
 
-**Current Status**: 🚀 **CROSS-FILE ANALYSIS READY** - Complete architectural analysis with 43+ files/sec performance and full dependency graph construction
+**Current Status**: 🚀 **FOCUSED ON ACCURACY** - Prioritizing reliable, high-confidence pattern detection to provide Claude with the most useful context.
 
 ## Project Structure
 
@@ -33,13 +33,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Core Concept
 
-ClaudeCat transforms Claude Code from a "context-lacking assistant" to a "project-aware development partner" through:
+ClaudeCat transforms Claude Code from a "context-lacking assistant" to a "project-aware development partner" by focusing on what matters most: the concrete implementation patterns in your code.
 
-1. **Cross-File Architecture Analysis** - Complete dependency graph analysis and execution flow tracing across all files
-2. **Advanced Pattern Detection** - Detects MVC flows, layered architecture, service composition, and middleware chains
-3. **Symbol Resolution** - Tracks symbol definitions and usage across module boundaries  
-4. **Traditional Pattern Detection** - HOW projects implement auth, API responses, error handling
-5. **Real-time Context Maintenance** - Updates project awareness as architectural patterns evolve
+1. **Pragmatic Pattern Detection** - Focuses on detecting HOW your project implements critical features like authentication, API responses, and error handling.
+2. **AST-Based Accuracy** - Uses Abstract Syntax Tree (AST) parsing for fast, precise, and reliable detection within files.
+3. **Automatic `CLAUDE.md` Maintenance** - Keeps this file updated with high-confidence patterns, providing Claude with instant project awareness.
+4. **Focus on Prevention** - The goal is to provide proactive context to *prevent* inaccurate suggestions before they happen.
 
 ## Key Technical Components (Implemented)
 

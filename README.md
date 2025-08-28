@@ -1,9 +1,9 @@
 # ClaudeCat Proactive Context Engine - MCP Server
 
-**🎯 CROSS-FILE ANALYSIS READY** - Transform Claude Code from a context-lacking assistant to a project-aware development partner through advanced cross-file pattern detection and automatic CLAUDE.md maintenance.
+**🎯 Goal: Make Claude Code a Project-Aware Partner** - ClaudeCat improves Claude's accuracy by automatically detecting key implementation patterns in your project and maintaining a `CLAUDE.md` context file.
 
-[![Implementation Status](https://img.shields.io/badge/Status-Cross--File%20Ready-brightgreen)](#)
-[![Analysis Type](https://img.shields.io/badge/Analysis-Cross--File%20Architecture-blue)](#)
+[![Implementation Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen)](#)
+[![Analysis Type](https://img.shields.io/badge/Analysis-Implementation%20Patterns-blue)](#)
 [![Performance](https://img.shields.io/badge/Performance-43%20files%2Fsec-green)](#)
 [![Pattern Detection](https://img.shields.io/badge/Patterns-MVC%20%7C%20Layered%20%7C%20Services-brightgreen)](#)
 [![MCP Tools](https://img.shields.io/badge/MCP%20Tools-5%2F5%20Working-brightgreen)](#)
@@ -119,29 +119,17 @@ vim src/middleware/auth.ts
 
 ## 🔧 How It Works
 
-### Cross-File Architecture Analysis
+### Core Mission: Practical Pattern Detection
 
-ClaudeCat now performs comprehensive cross-file analysis to understand your complete project architecture:
+ClaudeCat's primary goal is to find concrete, high-confidence implementation patterns that directly help Claude generate accurate code. It focuses on *how* your project is built, not just abstract architecture.
 
-**🔗 Dependency Graph Analysis**:
-- Parses all import/export statements across files
-- Builds complete dependency graphs and reverse dependencies
-- Traces symbol definitions and usage across modules
+**Primary Method: AST-Based Single-File Analysis**
+- The core engine uses fast and reliable Abstract Syntax Tree (AST) parsing to analyze individual files.
+- This allows for precise detection of patterns without the complexity of full project-wide analysis.
 
-**🛤️ Execution Flow Tracing**:
-- Maps function calls across file boundaries
-- Identifies entry points (routes, middleware, main functions)
-- Traces execution paths through your entire application
+### Traditional Pattern Detection (Primary Engine)
 
-**🏛️ Architecture Pattern Detection**:
-- **MVC Flows**: Route → Controller → Service → Model patterns
-- **Layered Architecture**: Clear separation between presentation, business, and data layers
-- **Service Composition**: Service-to-service communication patterns
-- **Middleware Chains**: Authentication → Validation → Handler flows
-
-### Traditional Pattern Detection
-
-The engine also performs traditional single-file pattern detection:
+The engine excels at robust, single-file pattern detection:
 
 - **Authentication Patterns**: `req.user` vs `req.context.user`, cookie vs header tokens
 - **API Response Patterns**: `{data: any}` vs `{result: any}` vs bare objects  
