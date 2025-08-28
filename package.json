@@ -10,9 +10,12 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/multi-instance-server.ts",
+    "dev:cross-file": "tsx watch src/core/enhanced-project-detector.ts",
     "start": "node dist/multi-instance-server.js",
     "server:stdio": "tsx src/multi-instance-server.ts",
     "test": "jest",
+    "test:cross-file": "node test-cross-file-analysis.js",
+    "benchmark:cross-file": "node -e \"import('./test-cross-file-analysis.js').then(m => m.testCrossFileAnalysis())\"",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },
