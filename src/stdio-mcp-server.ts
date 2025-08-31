@@ -8,18 +8,18 @@ import {
   Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { ProactiveContextEngine } from './core/proactive-context-engine.js';
-import { MultiInstanceLogger } from './multi-instance-logger.js';
+import { StdioMcpLogger } from './stdio-mcp-logger.js';
 
 class ClaudeCatMultiInstanceServer {
   private server: Server;
   private contextEngine: ProactiveContextEngine;
-  private logger: MultiInstanceLogger;
+  private logger: StdioMcpLogger;
   private isReady: boolean = false;
   private resourceMonitor: NodeJS.Timeout | null = null;
 
   constructor() {
     // Initialize enhanced logging first
-    this.logger = new MultiInstanceLogger();
+    this.logger = new StdioMcpLogger();
     
     // Capture detailed environment information
     this.logger.logToFile(`ENVIRONMENT: Node.js ${process.version}, PID: ${process.pid}, PPID: ${process.ppid}`);

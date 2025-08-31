@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-export class MultiInstanceLogger {
+export class StdioMcpLogger {
   private logDir: string;
   private sessionId: string;
   private claudeSession: string;

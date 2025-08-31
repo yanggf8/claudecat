@@ -13,7 +13,7 @@ echo "🚀 Installing ClaudeCat MCP Server..."
 echo "Project root: $PROJECT_ROOT"
 
 # Create ClaudeCat home directory
-mkdir -p "$CLAUDECAT_HOME/multi-instance-logs"
+mkdir -p "$CLAUDECAT_HOME/logs"
 
 # Build the project
 echo "📦 Building ClaudeCat..."
@@ -21,18 +21,18 @@ cd "$PROJECT_ROOT"
 npm run build
 
 # Check if build succeeded
-if [ ! -f "$PROJECT_ROOT/dist/multi-instance-server.js" ]; then
-    echo "❌ Build failed - multi-instance-server.js not found"
+if [ ! -f "$PROJECT_ROOT/dist/stdio-mcp-server.js" ]; then
+    echo "❌ Build failed - stdio-mcp-server.js not found"
     exit 1
 fi
 
 # Make the server executable
-chmod +x "$PROJECT_ROOT/dist/multi-instance-server.js"
+chmod +x "$PROJECT_ROOT/dist/stdio-mcp-server.js"
 
 # Create a symbolic link in ~/.local/bin if it exists
 LOCAL_BIN="$HOME/.local/bin"
 if [ -d "$LOCAL_BIN" ]; then
-    ln -sf "$PROJECT_ROOT/dist/multi-instance-server.js" "$LOCAL_BIN/claudecat"
+    ln -sf "$PROJECT_ROOT/dist/stdio-mcp-server.js" "$LOCAL_BIN/claudecat"
     echo "✅ Created symbolic link: ~/.local/bin/claudecat"
 fi
 
@@ -51,7 +51,7 @@ if [ -z "$NODE_PATH" ]; then
 fi
 
 echo "📍 Using node path: $NODE_PATH"
-claude mcp add claudecat "$NODE_PATH" "$PROJECT_ROOT/dist/multi-instance-server.js"
+claude mcp add claudecat "$NODE_PATH" "$PROJECT_ROOT/dist/stdio-mcp-server.js"
 
 echo "✅ Claude Code MCP server registered"
 
@@ -60,7 +60,7 @@ cat > "$CLAUDECAT_HOME/check-sessions.sh" << 'EOF'
 #!/bin/bash
 # ClaudeCat Multi-Instance Session Monitor
 
-SESSIONS_FILE="$HOME/.claudecat/multi-instance-logs/active-sessions.json"
+SESSIONS_FILE="$HOME/.claudecat/logs/active-sessions.json"
 
 if [ -f "$SESSIONS_FILE" ]; then
     echo "🔍 Active ClaudeCat Sessions:"
@@ -78,7 +78,7 @@ cat > "$CLAUDECAT_HOME/cleanup-sessions.sh" << 'EOF'
 #!/bin/bash
 # ClaudeCat Multi-Instance Session Cleanup
 
-SESSIONS_FILE="$HOME/.claudecat/multi-instance-logs/active-sessions.json"
+SESSIONS_FILE="$HOME/.claudecat/logs/active-sessions.json"
 
 if [ -f "$SESSIONS_FILE" ]; then
     echo "🧹 Cleaning up stale sessions..."
@@ -108,8 +108,8 @@ echo "3. Monitor sessions with: ~/.claudecat/check-sessions.sh"
 echo "4. Clean up stale sessions with: ~/.claudecat/cleanup-sessions.sh"
 echo ""
 echo "🔍 Troubleshooting:"
-echo "- Check logs in: ~/.claudecat/multi-instance-logs/"
-echo "- Session tracking: ~/.claudecat/multi-instance-logs/active-sessions.json"
+echo "- Check logs in: ~/.claudecat/logs/"
+echo "- Session tracking: ~/.claudecat/logs/active-sessions.json"
 echo "- Use 'session_analysis' tool in Claude Code to debug issues"
 echo ""
 echo "🎯 Ready for Claude Code usage!"

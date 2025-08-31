@@ -36,7 +36,7 @@ npm install
 npm run build
 
 # 2. Register the MCP server (use full node path to avoid ENOENT errors)
-claude mcp add claudecat "$(which node)" "$(pwd)/dist/multi-instance-server.js"
+claude mcp add claudecat "$(which node)" "$(pwd)/dist/stdio-mcp-server.js"
 
 # 3. Verify registration
 claude mcp list
@@ -61,7 +61,7 @@ claude chat --mcp
 npm run dev
 
 # Register development server
-claude mcp add claudecat-dev "$(which node)" "$(which tsx)" "$(pwd)/src/multi-instance-server.ts"
+claude mcp add claudecat-dev "$(which node)" "$(which tsx)" "$(pwd)/src/stdio-mcp-server.ts"
 ```
 
 ### Testing & Validation
@@ -178,13 +178,13 @@ Force immediate re-detection of project patterns and CLAUDE.md update.
 ### `get_engine_status`
 Get status information about file watching, pattern detection, and update processes.
 
-### Multi-Instance Tools (Available in Multi-Instance Mode)
+### Session Management Tools
 
 ### `multi_instance_health`
 Monitor health status of all Claude Code instances, memory usage, and session information.
 
 ### `session_analysis`
-Analyze active Claude Code sessions, process management, and troubleshoot multi-instance issues.
+Analyze active Claude Code sessions, process management, and troubleshoot session issues.
 
 ## ⚡ Performance & Capabilities
 
@@ -218,8 +218,8 @@ src/
 ├── types/
 │   ├── patterns.ts                      # Traditional pattern types
 │   └── cross-file-analysis.ts           # Cross-file analysis types
-├── multi-instance-server.ts             # MCP server with session tracking
-└── multi-instance-logger.ts             # Session tracking and multi-instance logging
+├── stdio-mcp-server.ts             # MCP server with session tracking
+└── stdio-mcp-logger.ts             # Session tracking and logging
 ```
 
 ## 🎛️ Configuration
@@ -304,7 +304,7 @@ node scripts/test-mcp-tools.js [project-path]
 
 ## 🐛 Troubleshooting
 
-### Multi-Instance Issues
+### Session Management Issues
 
 ```bash
 # Check active sessions
@@ -314,7 +314,7 @@ node scripts/test-mcp-tools.js [project-path]
 ~/.claudecat/cleanup-sessions.sh
 
 # Monitor session logs
-tail -f ~/.claudecat/multi-instance-logs/*.log
+tail -f ~/.claudecat/logs/*.log
 
 # Analyze sessions in Claude Code
 # Use multi_instance_health and session_analysis tools
@@ -326,7 +326,7 @@ tail -f ~/.claudecat/multi-instance-logs/*.log
 npm run build
 
 # Check for permission issues
-ls -la dist/multi-instance-server.js
+ls -la dist/stdio-mcp-server.js
 
 # Verify dependencies
 npm install
@@ -340,7 +340,7 @@ If you see connection failures with "ENOENT" errors, use the full node path:
 claude mcp remove claudecat -s local
 
 # Add with full node path to fix ENOENT
-claude mcp add claudecat "$(which node)" "$(pwd)/dist/multi-instance-server.js"
+claude mcp add claudecat "$(which node)" "$(pwd)/dist/stdio-mcp-server.js"
 
 # Verify connection
 claude mcp list
@@ -367,7 +367,7 @@ tail -f ~/.claude/logs/claudecat.log
 - Check file permissions on CLAUDE.md
 - Verify project root directory detection
 - Look for `.claudecat.tmp` files (indicates atomic write issues)
-- In multi-instance mode: Check `~/.claudecat/multi-instance-logs/active-sessions.json`
+- In session mode: Check `~/.claudecat/logs/active-sessions.json`
 
 ## 📊 Proven Results
 

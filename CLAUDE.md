@@ -20,8 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 │   │   └── proactive-context-engine.ts # Main engine
 │   ├── types/                # TypeScript type definitions
 │   ├── server.ts             # Single-instance MCP server
-│   ├── multi-instance-server.ts     # Multi-instance MCP server (recommended)
-│   └── multi-instance-logger.ts     # Session tracking and logging
+│   ├── stdio-mcp-server.ts     # Stdio MCP server (recommended)
+│   └── stdio-mcp-logger.ts     # Session tracking and logging
 ├── scripts/                  # Installation and testing scripts
 ├── dist/                     # Compiled JavaScript output
 ├── CLAUDECAT-PROPOSAL.md     # Original proposal documentation
@@ -77,15 +77,15 @@ ClaudeCat transforms Claude Code from a "context-lacking assistant" to a "projec
 
 ## Installation & Usage
 
-### Multi-Instance Installation (Recommended)
+### Stdio MCP Installation (Recommended)
 
 ```bash
 # Install dependencies and build
 npm install
 npm run build
 
-# Install and register multi-instance server with Claude Code
-./scripts/install-multi.sh
+# Install and register stdio MCP server with Claude Code
+./scripts/install.sh
 
 # Start Claude Code (MCP tools are auto-detected, supports multiple instances)
 claude
@@ -108,17 +108,14 @@ claude
 ### Development Mode
 
 ```bash
-# Multi-instance development mode (recommended)
-npm run dev:multi
-
-# Single instance development mode
+# Development mode
 npm run dev
 
 # Test pattern detection
 ./scripts/test-detection.js
 ```
 
-### Multi-Instance Monitoring
+### Session Monitoring
 
 ```bash
 # Check active Claude Code sessions
@@ -285,7 +282,7 @@ This is a complete accuracy improvement system with production-ready implementat
 ### Development Information
 
 **Scripts**:
-- dev: `tsx watch src/multi-instance-server.ts`
+- dev: `tsx watch src/stdio-mcp-server.ts`
 - build: `tsc`
 - test: `jest`
 

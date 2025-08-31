@@ -2,17 +2,17 @@
   "name": "claudecat-mcp-server",
   "version": "1.0.0",
   "description": "ClaudeCat Proactive Context Engine - MCP Server for Claude Code accuracy improvement",
-  "main": "dist/multi-instance-server.js",
+  "main": "dist/stdio-mcp-server.js",
   "type": "module",
   "bin": {
-    "claudecat": "dist/multi-instance-server.js"
+    "claudecat": "dist/stdio-mcp-server.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/multi-instance-server.ts",
+    "dev": "tsx watch src/stdio-mcp-server.ts",
     "dev:cross-file": "tsx watch src/core/enhanced-project-detector.ts",
-    "start": "node dist/multi-instance-server.js",
-    "server:stdio": "tsx src/multi-instance-server.ts",
+    "start": "node dist/stdio-mcp-server.js",
+    "server:stdio": "tsx src/stdio-mcp-server.ts",
     "test": "jest",
     "test:cross-file": "node test-cross-file-analysis.js",
     "benchmark:cross-file": "node -e \"import('./test-cross-file-analysis.js').then(m => m.testCrossFileAnalysis())\"",
