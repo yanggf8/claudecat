@@ -390,7 +390,7 @@ Project patterns re-analyzed and CLAUDE.md updated.
 
 **Multi-Instance Support**: ✅ Enabled
 **Session Isolation**: ✅ Active
-**Log Directory**: ~/.claudecat/multi-instance-logs/`;
+**Log Directory**: ~/.claude/logs/claudecat/`;
 
     return {
       content: [
@@ -415,7 +415,7 @@ Project patterns re-analyzed and CLAUDE.md updated.
 
 ### System Status
 - **Memory Usage**: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
-- **Log Directory**: ~/.claudecat/multi-instance-logs/
+- **Log Directory**: ~/.claude/logs/claudecat/
 - **Session File**: active-sessions.json
 
 ✅ **Multi-Instance Ready**: Each Claude Code spawns its own MCP server instance  
@@ -447,11 +447,11 @@ ${JSON.stringify(analysis, null, 2)}
 - **Multiple Claude Support**: Each Claude Code instance spawns separate MCP server
 - **Session Isolation**: Tools and data are isolated per Claude session  
 - **Process Management**: Each session runs in its own process
-- **Enhanced Logging**: All sessions tracked in ~/.claudecat/multi-instance-logs/
+- **Enhanced Logging**: All sessions tracked in ~/.claude/logs/claudecat/
 
 ### Troubleshooting
 If a second Claude Code fails to connect:
-1. Check session logs in ~/.claudecat/multi-instance-logs/
+1. Check session logs in ~/.claude/logs/claudecat/
 2. Verify each Claude Code spawns new MCP server process
 3. Look for session conflicts or resource issues
 4. Use this tool to monitor active sessions`;

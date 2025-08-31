@@ -60,14 +60,19 @@ cat > "$CLAUDECAT_HOME/check-sessions.sh" << 'EOF'
 #!/bin/bash
 # ClaudeCat Multi-Instance Session Monitor
 
-SESSIONS_FILE="$HOME/.claudecat/logs/active-sessions.json"
+SESSIONS_FILE="$HOME/.claude/logs/claudecat"
 
-if [ -f "$SESSIONS_FILE" ]; then
+if [ -d "$SESSIONS_FILE" ]; then
     echo "🔍 Active ClaudeCat Sessions:"
     echo "=============================="
-    cat "$SESSIONS_FILE" | jq -r '.[] | "Session: \(.sessionId)\nClaude: \(.claudeSession)\nPID: \(.pid)\nStatus: \(.status)\nUptime: \((now - (.startTime/1000)) / 60 | floor)m\n"'
+    ls -la "$SESSIONS_FILE"/session-*.log 2>/dev/null | while read line; do
+        echo "Session log: $(basename $(echo $line | awk '{print $9}'))"
+        echo "Size: $(echo $line | awk '{print $5}') bytes"
+        echo "Modified: $(echo $line | awk '{print $6, $7, $8}')"
+        echo ""
+    done
 else
-    echo "❌ No active sessions file found"
+    echo "❌ No session logs directory found at $SESSIONS_FILE"
 fi
 EOF
 
@@ -78,7 +83,7 @@ cat > "$CLAUDECAT_HOME/cleanup-sessions.sh" << 'EOF'
 #!/bin/bash
 # ClaudeCat Multi-Instance Session Cleanup
 
-SESSIONS_FILE="$HOME/.claudecat/logs/active-sessions.json"
+SESSIONS_FILE="$HOME/.claude/logs/claudecat"
 
 if [ -f "$SESSIONS_FILE" ]; then
     echo "🧹 Cleaning up stale sessions..."

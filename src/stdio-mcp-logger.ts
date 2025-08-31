@@ -14,15 +14,22 @@ export class StdioMcpLogger {
   private logSizeCheckInterval = 100; // Check every 100 log writes
 
   constructor() {
+    // Create claudecat log directory to avoid conflicts with other MCP servers
+    const claudeDir = path.join(os.homedir(), '.claude');
+    const logsDir = path.join(claudeDir, 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    
     // Each session gets its own isolated log directory
-    this.logDir = path.join(os.homedir(), '.claudecat', 'logs');
+    this.logDir = path.join(logsDir, 'claudecat');
     this.sessionId = this.generateSessionId();
     this.claudeSession = this.detectClaudeSession();
     
     // Session-specific log file (no shared logs)
     this.sessionLogFile = path.join(this.logDir, `session-${this.sessionId}.log`);
     
-    // Create logs directory
+    // Create claudecat-specific logs directory
     if (!fs.existsSync(this.logDir)) {
       fs.mkdirSync(this.logDir, { recursive: true });
     }

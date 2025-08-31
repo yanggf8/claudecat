@@ -314,7 +314,7 @@ node scripts/test-mcp-tools.js [project-path]
 ~/.claudecat/cleanup-sessions.sh
 
 # Monitor session logs
-tail -f ~/.claudecat/logs/*.log
+tail -f ~/.claude/logs/claudecat/*.log
 
 # Analyze sessions in Claude Code
 # Use multi_instance_health and session_analysis tools
@@ -367,7 +367,7 @@ tail -f ~/.claude/logs/claudecat.log
 - Check file permissions on CLAUDE.md
 - Verify project root directory detection
 - Look for `.claudecat.tmp` files (indicates atomic write issues)
-- In session mode: Check `~/.claudecat/logs/active-sessions.json`
+- In session mode: Check session logs in `~/.claude/logs/claudecat/`
 
 ## 📊 Proven Results
 

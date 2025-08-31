@@ -125,7 +125,7 @@ npm run dev
 ~/.claudecat/cleanup-sessions.sh
 
 # Monitor session logs (new isolated structure)
-tail -f ~/.claudecat/logs/session-*.log
+tail -f ~/.claude/logs/claudecat/session-*.log
 ```
 
 ## Expert Validation Status
