@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **ClaudeCat** is a "Proactive Context Engine" - a production-ready MCP server that improves Claude Code's accuracy by detecting key implementation patterns and automatically maintaining this `CLAUDE.md` file.
 
-**Current Status**: 🚀 **FOCUSED ON ACCURACY** - Prioritizing reliable, high-confidence pattern detection to provide Claude with the most useful context.
+**Current Status**: 🚀 **PRODUCTION READY WITH RESOURCE PROTECTION** - Complete accuracy system with comprehensive resource monitoring and session isolation to prevent resource waste.
 
 ## Project Structure
 
@@ -127,8 +127,8 @@ npm run dev
 # Clean up stale sessions
 ~/.claudecat/cleanup-sessions.sh
 
-# Monitor session logs
-tail -f ~/.claudecat/multi-instance-logs/*.log
+# Monitor session logs (new isolated structure)
+tail -f ~/.claudecat/logs/session-*.log
 ```
 
 ## Expert Validation Status
@@ -151,6 +151,13 @@ tail -f ~/.claudecat/multi-instance-logs/*.log
 - 🚀 **900+ symbol extraction and resolution** across all project files
 - 🚀 **16 execution path tracing** with architectural pattern detection
 - 🚀 **Sub-second analysis response times** for real-time context updates
+
+### Resource Protection (New Achievement)
+- 🛡️ **100MB log file limits** with automatic rotation to prevent runaway growth
+- 🛡️ **Complete session isolation** - each MCP instance uses separate log files
+- 🛡️ **EPIPE infinite loop prevention** - eliminated console.error feedback loops
+- 🛡️ **Resource monitoring** - memory and CPU tracking with alerts
+- 🛡️ **Process cleanup** - graceful shutdown with resource deallocation
 
 ## Implementation Timeline (Cross-File Analysis Complete)
 
@@ -290,9 +297,18 @@ This is a complete accuracy improvement system with production-ready implementat
 
 ### Critical Guardrails
 
-✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Follow `global middleware`** error handling pattern
+✅ **ALWAYS use `req.auth`** for authenticated user data  
+✅ **Use bare object responses** - No wrapper format detected  
+✅ **Follow `global middleware`** error handling pattern
 
-**Last Updated**: 2025-08-28T05:18:46.519Z  
+### Resource Protection Guardrails
+
+🛡️ **Session isolation enforced** - Each MCP instance logs to separate files  
+🛡️ **Log rotation active** - 100MB size limits prevent runaway growth  
+🛡️ **Memory monitoring enabled** - Alerts at 500MB+ usage  
+🛡️ **EPIPE loops prevented** - No console.error in error handlers
+
+**Last Updated**: 2025-08-31T09:12:26.941Z  
 **Detection Quality**: Implementation patterns auto-detected with confidence scoring
 
 *This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*

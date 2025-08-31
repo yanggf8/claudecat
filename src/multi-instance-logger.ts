@@ -6,19 +6,34 @@ export class MultiInstanceLogger {
   private logDir: string;
   private sessionId: string;
   private claudeSession: string;
+  private sessionLogFile: string;
+  
+  // Resource protection
+  private maxLogSizeBytes = 100 * 1024 * 1024; // 100MB per log file
+  private logWriteCount = 0;
+  private logSizeCheckInterval = 100; // Check every 100 log writes
 
   constructor() {
-    this.logDir = path.join(os.homedir(), '.claudecat', 'multi-instance-logs');
+    // Each session gets its own isolated log directory
+    this.logDir = path.join(os.homedir(), '.claudecat', 'logs');
     this.sessionId = this.generateSessionId();
     this.claudeSession = this.detectClaudeSession();
+    
+    // Session-specific log file (no shared logs)
+    this.sessionLogFile = path.join(this.logDir, `session-${this.sessionId}.log`);
     
     // Create logs directory
     if (!fs.existsSync(this.logDir)) {
       fs.mkdirSync(this.logDir, { recursive: true });
     }
     
+    // Start logging (simplified)
     this.logToFile(`SESSION_START: ${this.claudeSession} (PID: ${process.pid}, Session: ${this.sessionId})`);
-    this.registerSession();
+    
+    // Setup cleanup handlers
+    process.on('exit', () => this.cleanup());
+    process.on('SIGINT', () => { this.cleanup(); process.exit(0); });
+    process.on('SIGTERM', () => { this.cleanup(); process.exit(0); });
   }
   
   getSessionId(): string {
@@ -58,85 +73,79 @@ export class MultiInstanceLogger {
     }
   }
   
-  private registerSession(): void {
-    try {
-      const sessionsFile = path.join(this.logDir, 'active-sessions.json');
-      let sessions: Record<string, any> = {};
-      
-      if (fs.existsSync(sessionsFile)) {
-        const data = fs.readFileSync(sessionsFile, 'utf8');
-        sessions = JSON.parse(data);
-      }
-      
-      sessions[this.sessionId] = {
-        sessionId: this.sessionId,
-        claudeSession: this.claudeSession,
-        pid: process.pid,
-        parentPid: process.ppid,
-        startTime: Date.now(),
-        lastActivity: Date.now(),
-        status: 'starting'
-      };
-      
-      fs.writeFileSync(sessionsFile, JSON.stringify(sessions, null, 2));
-      this.logToFile(`SESSION_REGISTERED: Total active sessions: ${Object.keys(sessions).length}`);
-    } catch (error) {
-      this.logToFile(`SESSION_REGISTER_ERROR: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+  // Removed: No more shared session registration
   
   logToFile(message: string): void {
     try {
+      // Check log file size periodically to prevent runaway growth
+      this.logWriteCount++;
+      if (this.logWriteCount % this.logSizeCheckInterval === 0) {
+        this.checkAndRotateLog();
+      }
+      
       const timestamp = new Date().toISOString();
       const logLine = `[${timestamp}] [${this.claudeSession}] [${this.sessionId}] ${message}\n`;
-      const sessionLogFile = path.join(this.logDir, `${this.sessionId}.log`);
-      fs.appendFileSync(sessionLogFile, logLine);
-      console.error(`[Multi-Instance] ${logLine.trim()}`);
+      
+      // Write only to session-specific file (no console.error to avoid EPIPE loops)
+      fs.appendFileSync(this.sessionLogFile, logLine);
+      
     } catch (error) {
-      console.error(`[Multi-Instance] Failed to log: ${error instanceof Error ? error.message : String(error)}`);
+      // Silent failure to prevent infinite loops - no console.error at all
+      try {
+        const errorLine = `[${new Date().toISOString()}] [${this.claudeSession}] [${this.sessionId}] LOG_ERROR: ${error instanceof Error ? error.message : String(error)}\n`;
+        fs.appendFileSync(this.sessionLogFile, errorLine);
+      } catch {
+        // Complete silent failure if file system has issues
+      }
+    }
+  }
+  
+  private checkAndRotateLog(): void {
+    try {
+      const stats = fs.statSync(this.sessionLogFile);
+      if (stats.size > this.maxLogSizeBytes) {
+        const rotatedFile = `${this.sessionLogFile}.${Date.now()}.old`;
+        fs.renameSync(this.sessionLogFile, rotatedFile);
+        this.logToFile('LOG_ROTATED: Log file rotated due to size limit');
+      }
+    } catch {
+      // Ignore rotation errors
     }
   }
   
   updateSessionStatus(status: string): void {
-    try {
-      const sessionsFile = path.join(this.logDir, 'active-sessions.json');
-      if (fs.existsSync(sessionsFile)) {
-        const data = fs.readFileSync(sessionsFile, 'utf8');
-        const sessions = JSON.parse(data);
-        
-        if (sessions[this.sessionId]) {
-          sessions[this.sessionId].status = status;
-          sessions[this.sessionId].lastActivity = Date.now();
-          fs.writeFileSync(sessionsFile, JSON.stringify(sessions, null, 2));
-          this.logToFile(`SESSION_STATUS_UPDATED: ${status}`);
-        }
-      }
-    } catch (error) {
-      this.logToFile(`SESSION_STATUS_UPDATE_ERROR: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    // Simplified: just log status changes to own file
+    this.logToFile(`SESSION_STATUS_UPDATED: ${status}`);
   }
 
   getActiveSessionsInfo(): any {
     try {
-      const sessionsFile = path.join(this.logDir, 'active-sessions.json');
-      if (!fs.existsSync(sessionsFile)) {
-        return { totalSessions: 0, sessions: [] };
-      }
-      
-      const data = fs.readFileSync(sessionsFile, 'utf8');
-      const sessions = JSON.parse(data);
+      // Discover sessions by scanning log directory
+      const logFiles = fs.readdirSync(this.logDir)
+        .filter(file => file.startsWith('session-') && file.endsWith('.log'))
+        .map(file => {
+          const sessionId = file.replace('session-', '').replace('.log', '');
+          const filePath = path.join(this.logDir, file);
+          try {
+            const stats = fs.statSync(filePath);
+            return {
+              sessionId,
+              logFile: file,
+              size: stats.size,
+              modified: stats.mtime,
+              uptime: Math.round((Date.now() - stats.birthtime.getTime()) / 1000)
+            };
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
       
       return {
-        totalSessions: Object.keys(sessions).length,
-        claudeSessions: [...new Set(Object.values(sessions).map((s: any) => s.claudeSession))],
+        totalSessions: logFiles.length,
         currentSession: this.sessionId,
-        sessionDetails: Object.values(sessions).map((s: any) => ({
-          sessionId: s.sessionId,
-          claudeSession: s.claudeSession,
-          pid: s.pid,
-          uptime: Math.round((Date.now() - s.startTime) / 1000),
-          status: s.status
-        }))
+        claudeSession: this.claudeSession,
+        sessionDetails: logFiles
       };
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
@@ -145,18 +154,6 @@ export class MultiInstanceLogger {
   
   cleanup(): void {
     this.logToFile('SESSION_END: MCP server shutting down');
-    
-    try {
-      const sessionsFile = path.join(this.logDir, 'active-sessions.json');
-      if (fs.existsSync(sessionsFile)) {
-        const data = fs.readFileSync(sessionsFile, 'utf8');
-        const sessions = JSON.parse(data);
-        delete sessions[this.sessionId];
-        fs.writeFileSync(sessionsFile, JSON.stringify(sessions, null, 2));
-        this.logToFile(`SESSION_CLEANUP: ${Object.keys(sessions).length} sessions remaining`);
-      }
-    } catch (error) {
-      this.logToFile(`SESSION_CLEANUP_ERROR: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    // No shared resources to clean up - session isolation complete
   }
 }

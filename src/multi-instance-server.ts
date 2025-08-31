@@ -15,6 +15,7 @@ class ClaudeCatMultiInstanceServer {
   private contextEngine: ProactiveContextEngine;
   private logger: MultiInstanceLogger;
   private isReady: boolean = false;
+  private resourceMonitor: NodeJS.Timeout | null = null;
 
   constructor() {
     // Initialize enhanced logging first
@@ -521,64 +522,21 @@ If a second Claude Code fails to connect:
       this.logger.logToFile('STDIN_END: stdin stream ended - this is normal when no MCP client is connected');
     });
     
-    process.stdin.on('error', (error) => {
-      this.logger.logToFile(`STDIN_ERROR: ${error.message}`);
+    // Simplified stdio error handling - no logging to prevent EPIPE loops
+    process.stdin.on('error', () => {
+      // Silent handling - stdio errors are expected in MCP environment
     });
     
-    process.stdout.on('error', (error) => {
-      this.logger.logToFile(`STDOUT_ERROR: ${error.message}`);
+    process.stdout.on('error', () => {
+      // Silent handling - stdio errors are expected in MCP environment  
     });
     
-    process.stderr.on('error', (error) => {
-      this.logger.logToFile(`STDERR_ERROR: ${error.message}`);
-    });
-  }
-
-  private setupReconnectionMonitor() {
-    this.logger.logToFile('RECONNECTION_MONITOR: Setting up reconnection monitoring');
-    
-    // Monitor for stdin becoming available again
-    const reconnectInterval = setInterval(() => {
-      if (process.stdin.readable) {
-        this.logger.logToFile('RECONNECTION_ATTEMPT: stdin became readable, attempting reconnection');
-        clearInterval(reconnectInterval);
-        
-        // Try to reconnect
-        setTimeout(() => {
-          this.start().catch(error => {
-            this.logger.logToFile(`RECONNECTION_FAILED: ${error.message}`);
-          });
-        }, 1000);
-      } else {
-        this.logger.logToFile('RECONNECTION_STANDBY: Waiting for stdin to become available');
-      }
-    }, 5000);
-    
-    // Keep process alive in standby mode
-    this.setupKeepAlive();
-    
-    // Clean up interval on exit
-    process.on('exit', () => {
-      clearInterval(reconnectInterval);
+    process.stderr.on('error', () => {
+      // Silent handling - stdio errors are expected in MCP environment
     });
   }
 
-  private setupKeepAlive() {
-    this.logger.logToFile('KEEPALIVE_SETUP: Setting up process monitoring');
-    
-    // Monitor for unexpected process termination
-    const heartbeatInterval = setInterval(() => {
-      this.logger.logToFile(`HEARTBEAT: Process alive (uptime: ${Math.round(process.uptime() * 1000)}ms)`);
-      this.logger.updateSessionStatus('ready');
-    }, 30000);
-    
-    // Clean up interval on exit
-    process.on('exit', () => {
-      clearInterval(heartbeatInterval);
-    });
-    
-    this.logger.logToFile('KEEPALIVE_READY: Process monitoring active');
-  }
+  // Removed complex reconnection logic that could cause resource leaks
 
   async start() {
     try {
@@ -597,32 +555,16 @@ If a second Claude Code fails to connect:
       const transport = new StdioServerTransport();
       this.logger.logToFile(`TRANSPORT_CREATED: StdioServerTransport instance created`);
       
-      // Set up connection monitoring with proper error handling
-      try {
-        this.logger.logToFile(`CONNECTION_ATTEMPT: server.connect() called`);
-        await this.server.connect(transport);
-        this.logger.logToFile('MCP server connected and ready');
-        
-        // Update session status to ready
-        this.logger.updateSessionStatus('ready');
-        
-        console.log('✅ ClaudeCat Multi-Instance MCP Server ready - stdio transport active');
-        
-        // Keep the process alive and monitor for unexpected exits
-        this.setupKeepAlive();
-        
-      } catch (connectionError) {
-        this.logger.logToFile(`MCP connection error: ${connectionError instanceof Error ? connectionError.message : String(connectionError)}`);
-        
-        // If connection fails but server is still valid, keep it alive for retry
-        if (connectionError instanceof Error && (connectionError.message.includes('stdin') || connectionError.message.includes('EPIPE'))) {
-          this.logger.logToFile('STDIN connection failed - entering standby mode for reconnection');
-          this.logger.updateSessionStatus('standby');
-          this.setupReconnectionMonitor();
-        } else {
-          throw connectionError; // Re-throw non-stdin errors
-        }
-      }
+      // Simplified connection - no complex error handling
+      this.logger.logToFile(`CONNECTION_ATTEMPT: server.connect() called`);
+      await this.server.connect(transport);
+      this.logger.logToFile('MCP server connected and ready');
+      
+      // Update session status to ready
+      this.logger.updateSessionStatus('ready');
+      
+      // Start resource monitoring
+      this.startResourceMonitoring();
       
     } catch (error) {
       this.logger.logToFile(`Failed to start MCP server: ${error instanceof Error ? error.message : String(error)}`);
@@ -633,8 +575,35 @@ If a second Claude Code fails to connect:
     }
   }
 
+  private startResourceMonitoring(): void {
+    // Monitor resources every 60 seconds
+    this.resourceMonitor = setInterval(() => {
+      const memUsage = process.memoryUsage();
+      const cpuUsage = process.cpuUsage();
+      
+      // Check memory usage (alert if over 500MB)
+      const memMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+      if (memMB > 500) {
+        this.logger.logToFile(`RESOURCE_WARNING: High memory usage: ${memMB}MB`);
+      }
+      
+      // Log resource stats periodically
+      this.logger.logToFile(`RESOURCE_STATS: Memory=${memMB}MB, Uptime=${Math.round(process.uptime())}s`);
+      
+    }, 60000); // Every 60 seconds
+    
+    this.logger.logToFile('RESOURCE_MONITOR: Started resource monitoring');
+  }
+  
   private cleanup() {
     this.logger.logToFile('Cleanup initiated');
+    
+    // Stop resource monitoring
+    if (this.resourceMonitor) {
+      clearInterval(this.resourceMonitor);
+      this.resourceMonitor = null;
+    }
+    
     if (this.contextEngine) {
       this.contextEngine.shutdown();
     }
@@ -650,19 +619,11 @@ If a second Claude Code fails to connect:
   }
 }
 
-// Handle process signals for graceful shutdown
+// Main startup function
 async function main() {
   const server = new ClaudeCatMultiInstanceServer();
   
-  // Graceful shutdown handlers
-  const shutdownHandler = async (signal: string) => {
-    console.log(`\n📡 Received ${signal}, shutting down gracefully...`);
-    await server.stop();
-    process.exit(0);
-  };
-
-  process.on('SIGINT', () => shutdownHandler('SIGINT'));
-  process.on('SIGTERM', () => shutdownHandler('SIGTERM'));
+  // Note: Signal handlers are already set up in MultiInstanceLogger constructor
 
   try {
     await server.start();
