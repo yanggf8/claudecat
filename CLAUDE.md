@@ -250,6 +250,35 @@ This is a complete accuracy improvement system with production-ready implementat
 - ✅ **Improved Accuracy Measurement**: 68% real-world performance on test projects
 - ✅ **Eliminated Measurement Noise**: Removed phantom patterns from validation framework
 
+## Future Considerations
+
+### Claude Code Skill with Cloud Storage
+
+**Status**: Not currently planned
+
+**Concept**: Convert from MCP server to Claude Code skill with cloud-based pattern storage.
+
+**Potential Benefits**:
+- Cross-machine pattern sharing (work + home)
+- Team-wide pattern conventions
+- No MCP registration required
+- Manual on-demand analysis
+
+**Cloud DB**: Turso (libSQL) - chosen for lower cost and simpler setup
+
+**Proposed Architecture**:
+```
+Claude Code → Skill → Cloud DB (Turso) → Local Analysis → CLAUDE.md
+```
+
+**Considerations**:
+- MCP provides auto-startup context (runs on Claude Code start)
+- Skill requires manual invocation
+- Could use SessionStart hook to auto-invoke
+- Cloud sync adds complexity vs local-only MCP
+
+**Low priority** - Current MCP solution works well for personal use.
+
 **Last Updated**: 2025-08-25
 \n\n<!-- claudecat:auto:begin:project-context -->
 ## Project Context (Auto-Maintained by ClaudeCat)
@@ -294,18 +323,9 @@ This is a complete accuracy improvement system with production-ready implementat
 
 ### Critical Guardrails
 
-✅ **ALWAYS use `req.auth`** for authenticated user data  
-✅ **Use bare object responses** - No wrapper format detected  
-✅ **Follow `global middleware`** error handling pattern
+✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Follow `global middleware`** error handling pattern
 
-### Resource Protection Guardrails
-
-🛡️ **Session isolation enforced** - Each MCP instance logs to separate files  
-🛡️ **Log rotation active** - 100MB size limits prevent runaway growth  
-🛡️ **Memory monitoring enabled** - Alerts at 500MB+ usage  
-🛡️ **EPIPE loops prevented** - No console.error in error handlers
-
-**Last Updated**: 2025-08-31T09:12:26.941Z  
+**Last Updated**: 2026-03-06T04:25:10.932Z  
 **Detection Quality**: Implementation patterns auto-detected with confidence scoring
 
 *This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
