@@ -31,6 +31,7 @@
   "author": "ClaudeCat Project",
   "license": "MIT",
   "dependencies": {
+    "@libsql/client": "^0.17.2",
     "@modelcontextprotocol/sdk": "^0.6.0",
     "@typescript-eslint/typescript-estree": "^8.40.0",
     "chokidar": "^3.6.0",

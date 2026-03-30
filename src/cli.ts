@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { parseArgs } from './cli/args.js';
-import { runScan, runUpdate, runStatus } from './cli/commands.js';
+import { runScan, runUpdate, runStatus, runLogin, runSync } from './cli/commands.js';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -13,22 +13,28 @@ Commands:
   scan      Analyze project and display detected patterns
   update    Analyze project and update CLAUDE.md
   status    Show current detected patterns and confidence scores
+  login     Configure Turso cloud storage credentials
+  sync      Push/pull patterns to/from cloud storage
 
 Options:
   --root <path>   Project root directory (default: cwd)
   --json          Output as JSON
+  --force         Force sync regardless of timestamps
+  --url <url>     Turso database URL (for login)
+  --token <token> Turso auth token (for login)
   --help, -h      Show this help message
   --version, -v   Show version
 
 Examples:
-  claudecat scan              # Analyze current project
-  claudecat update            # Update CLAUDE.md with deep analysis
-  claudecat status --json     # Machine-readable pattern output
-  claudecat scan --root /path/to/project
+  claudecat scan                                    # Analyze current project
+  claudecat update                                  # Update CLAUDE.md
+  claudecat status --json                           # Machine-readable output
+  claudecat login --url libsql://... --token ...    # Configure cloud
+  claudecat sync                                    # Sync patterns to cloud
 `;
 
 async function main(): Promise<void> {
-  const { command, projectRoot, flags } = parseArgs(process.argv);
+  const { command, projectRoot, flags, options } = parseArgs(process.argv);
 
   if (flags.version) {
     try {
@@ -55,6 +61,12 @@ async function main(): Promise<void> {
       break;
     case 'status':
       await runStatus(projectRoot, flags);
+      break;
+    case 'login':
+      await runLogin(options);
+      break;
+    case 'sync':
+      await runSync(projectRoot, flags);
       break;
     default:
       console.error(`Unknown command: ${command}\n`);

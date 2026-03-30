@@ -193,4 +193,53 @@ The analysis engine has been validated across 10 phases of development. Full pha
 ### Future
 - **Additional Languages**: Python, Go, Rust AST support — based on demand
 
-**Last Updated**: 2026-03-30
+**Last Updated**: 2026-03-30\n\n<!-- claudecat:auto:begin:project-context -->
+## Project Context (Auto-Maintained by ClaudeCat)
+
+**Project Type**: Express API  
+**Language**: TypeScript  
+**Framework**: Express.js  
+**Package Manager**: npm
+
+### Implementation Patterns
+
+#### Authentication Implementation (100% - High Confidence)
+- **User Property**: `req.auth`
+- **Token Storage**: Unknown
+- **Error Response**: Unknown
+- **Middleware Pattern**: app.use(auth)\n  Evidence: /debug-pattern-matching.js: req.auth usage (70% confidence)
+
+#### API Response Implementation (100% - High Confidence)
+- **Success Format**: bare object
+- **Error Format**: Unknown
+- **Status Codes**: default 200/500
+- **Wrapper Pattern**: conditional\n  Evidence: /test-performance.js: bare object response (100% confidence), /test-cross-file-analysis.js: {result: any} format (100% confidence), /final-validation.js: bare object response (100% confidence)
+
+#### Error Handling Implementation (100% - High Confidence)
+- **Catch Pattern**: global middleware
+- **Error Structure**: Unknown
+- **Logging Integration**: integrated
+- **Propagation Style**: Unknown\n  Evidence: /test-performance.js: global error handler
+
+### Development Information
+
+**Scripts**:
+- dev: `tsx watch src/stdio-mcp-server.ts`
+- build: `tsc`
+- test: `jest`
+
+**Key Directories**:
+  - src/ (source code)
+  - src/types/ (TypeScript types)
+
+**Core Dependencies**: @libsql/client, @modelcontextprotocol/sdk, @typescript-eslint/typescript-estree, chokidar, glob, zod
+
+### Critical Guardrails
+
+✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Follow `global middleware`** error handling pattern
+
+**Last Updated**: 2026-03-30T07:19:26.525Z  
+**Detection Quality**: Implementation patterns auto-detected with confidence scoring
+
+*This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
+<!-- claudecat:auto:end:project-context -->\n

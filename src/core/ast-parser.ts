@@ -316,7 +316,7 @@ export class ASTParser {
             hasDefault = true;
             break;
           case 'ImportSpecifier':
-            imported.push(specifier.imported.name);
+            imported.push(specifier.imported.type === 'Identifier' ? specifier.imported.name : specifier.imported.value);
             hasNamed = true;
             break;
           case 'ImportNamespaceSpecifier':
@@ -376,7 +376,7 @@ export class ASTParser {
       // export { foo, bar } from './module'
       for (const specifier of node.specifiers) {
         if (specifier.type === 'ExportSpecifier') {
-          exported.push(specifier.exported.name);
+          exported.push(specifier.exported.type === 'Identifier' ? specifier.exported.name : specifier.exported.value);
         }
       }
     }

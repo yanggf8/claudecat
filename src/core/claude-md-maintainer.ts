@@ -99,7 +99,7 @@ ${guardrailsSection}
   private generateAuthSection(auth: ImplementationPatterns['authentication']): string {
     const confidenceText = this.getConfidenceText(auth.confidence);
     const evidenceText = auth.evidence.length > 0 ? 
-      `\\n  Evidence: ${auth.evidence.slice(0, 3).join(', ')}` : '';
+      `\n  Evidence: ${auth.evidence.slice(0, 3).join(', ')}` : '';
     
     return `#### Authentication Implementation (${confidenceText})
 - **User Property**: \`${auth.userProperty}\`
@@ -114,7 +114,7 @@ ${guardrailsSection}
   private generateApiSection(api: ImplementationPatterns['apiResponses']): string {
     const confidenceText = this.getConfidenceText(api.confidence);
     const evidenceText = api.evidence.length > 0 ? 
-      `\\n  Evidence: ${api.evidence.slice(0, 3).join(', ')}` : '';
+      `\n  Evidence: ${api.evidence.slice(0, 3).join(', ')}` : '';
     
     return `#### API Response Implementation (${confidenceText})
 - **Success Format**: ${api.successFormat}
@@ -129,7 +129,7 @@ ${guardrailsSection}
   private generateErrorSection(error: ImplementationPatterns['errorHandling']): string {
     const confidenceText = this.getConfidenceText(error.confidence);
     const evidenceText = error.evidence.length > 0 ? 
-      `\\n  Evidence: ${error.evidence.slice(0, 3).join(', ')}` : '';
+      `\n  Evidence: ${error.evidence.slice(0, 3).join(', ')}` : '';
     
     return `#### Error Handling Implementation (${confidenceText})
 - **Catch Pattern**: ${error.catchPattern}
@@ -170,12 +170,12 @@ ${guardrailsSection}
     }
 
     if (guardrails.length === 0) {
-      return '### Critical Guardrails\\n\\n⚠️ **Implementation patterns unclear** - Verify project conventions before making architectural decisions';
+      return '### Critical Guardrails\n\n⚠️ **Implementation patterns unclear** - Verify project conventions before making architectural decisions';
     }
 
     return `### Critical Guardrails
 
-${guardrails.join('\\n')}`;
+${guardrails.join('\n')}`;
   }
 
   /**
