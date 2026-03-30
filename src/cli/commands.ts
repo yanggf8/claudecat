@@ -5,6 +5,7 @@ import { TursoClient } from '../cloud/turso-client.js';
 import { ConfigStore } from '../cloud/config-store.js';
 import { ProjectIdentifier } from '../cloud/project-identifier.js';
 import { getMachineId } from '../cloud/machine-id.js';
+import { mergeSnapshots } from '../cloud/pattern-merger.js';
 import { formatScanResult, formatStatus } from './formatter.js';
 import type { ParsedArgs } from './args.js';
 
@@ -125,38 +126,42 @@ export async function runSync(projectRoot: string, flags: ParsedArgs['flags']): 
 
     const { id, displayName } = ProjectIdentifier.resolve(projectRoot);
     const machineId = getMachineId();
-    const lastSyncedAt = ConfigStore.getLastSyncedAt(id);
 
-    // Pull first — check if remote has newer patterns since our last sync
-    const remote = await client.getLatestSnapshot(id);
-    const remoteIsNewer = remote
-      && remote.machineId !== machineId
-      && (!lastSyncedAt || remote.scannedAt > lastSyncedAt);
+    // Scan and push local patterns
+    const detector = new EnhancedProjectDetector(projectRoot);
+    const localContext = detector.detectCurrentContext();
 
-    if (remoteIsNewer && !flags.force) {
-      // Remote has newer patterns from another machine — apply them locally
-      const maintainer = new CLAUDEMdMaintainer(projectRoot);
-      await maintainer.updateProjectContext(remote.context);
-      ConfigStore.setLastSyncedAt(id, remote.scannedAt);
+    await client.upsertProject(id, displayName);
+    await client.pushSnapshot(id, machineId, localContext);
+
+    const maintainer = new CLAUDEMdMaintainer(projectRoot);
+
+    if (flags.force) {
+      // --force: skip merge, use local patterns only
+      await maintainer.updateProjectContext(localContext);
+      ConfigStore.setLastSyncedAt(id, localContext.lastUpdated);
 
       if (flags.json) {
-        process.stdout.write(JSON.stringify({ action: 'pulled', from: remote.machineId, context: remote.context }, null, 2) + '\n');
+        process.stdout.write(
+          JSON.stringify({ action: 'force-pushed', project: id, context: localContext }, null, 2) + '\n',
+        );
       } else {
-        console.log(`Pulled newer patterns from machine ${remote.machineId}`);
+        console.log(`Force-synced: ${displayName} — local patterns pushed (no merge)`);
       }
     } else {
-      // Scan and push local patterns
-      const detector = new EnhancedProjectDetector(projectRoot);
-      const context = detector.detectCurrentContext();
+      // Default: fetch all snapshots and merge
+      const allSnapshots = await client.getAllSnapshots(id);
+      const merged = mergeSnapshots(allSnapshots);
 
-      await client.upsertProject(id, displayName);
-      await client.pushSnapshot(id, machineId, context);
-      ConfigStore.setLastSyncedAt(id, context.lastUpdated);
+      await maintainer.updateProjectContext(merged);
+      ConfigStore.setLastSyncedAt(id, merged.lastUpdated);
 
       if (flags.json) {
-        process.stdout.write(JSON.stringify({ action: 'pushed', project: id, machine: machineId }, null, 2) + '\n');
+        process.stdout.write(
+          JSON.stringify({ action: 'merged', machines: allSnapshots.length, project: id, context: merged }, null, 2) + '\n',
+        );
       } else {
-        console.log(`Synced: ${displayName} (${id})`);
+        console.log(`Synced: ${displayName} — merged patterns from ${allSnapshots.length} machine(s)`);
       }
     }
   } catch (error) {

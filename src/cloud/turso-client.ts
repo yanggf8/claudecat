@@ -83,6 +83,23 @@ export class TursoClient {
     };
   }
 
+  async getAllSnapshots(projectId: string): Promise<SnapshotRow[]> {
+    const result = await this.client.execute({
+      sql: `SELECT project_id, machine_id, context, scanned_at
+            FROM pattern_snapshots
+            WHERE project_id = ?
+            ORDER BY scanned_at DESC`,
+      args: [projectId],
+    });
+
+    return result.rows.map((row) => ({
+      projectId: row['project_id'] as string,
+      machineId: row['machine_id'] as string,
+      context: JSON.parse(row['context'] as string) as ProjectContextInfo,
+      scannedAt: row['scanned_at'] as string,
+    }));
+  }
+
   close(): void {
     this.client.close();
   }

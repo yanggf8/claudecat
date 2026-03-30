@@ -28,7 +28,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 │   │   ├── turso-client.ts   # Turso DB client
 │   │   ├── config-store.ts   # ~/.claudecat/config.json
 │   │   ├── project-identifier.ts # Git remote → project ID
-│   │   └── machine-id.ts     # Machine fingerprint
+│   │   ├── machine-id.ts     # Machine fingerprint
+│   │   └── pattern-merger.ts # Multi-machine pattern merging
 │   ├── types/                # TypeScript type definitions
 │   ├── cli.ts                # CLI entry point
 │   ├── server.ts             # MCP server (legacy)
@@ -172,13 +173,69 @@ The analysis engine has been validated across 10 phases of development. Full pha
 ## Completed Phases
 
 - **Phase 11: CLI Tool** — `claudecat scan/update/status/login/sync` commands, zero new deps for CLI layer
-- **Phase 12: Cloud Storage (Turso)** — cross-machine pattern sync via libSQL, pull-before-push logic, per-project sync history
+- **Phase 12: Cloud Storage (Turso)** — cross-machine pattern sync via libSQL, per-project sync history
 - **Phase 13: Claude Code Skill** — `/claudecat` slash command installed at `~/.claude/skills/claudecat/`
 - **Phase 14: Team Sharing** — supported via shared Turso credentials; no additional code needed
+- **Phase 15: Multi-User Pattern Merging** — recency-weighted merge across machines, `--force` for local-only sync
 
 ## Future
-- **Multi-user pattern merging** — combine patterns from different team members scanning different areas
 - **Additional Languages** — Python, Go, Rust AST support based on demand
 - **npm publish** — package for public distribution
 
 **Last Updated**: 2026-03-30
+
+<!-- claudecat:auto:begin:project-context -->
+## Project Context (Auto-Maintained by ClaudeCat)
+
+**Project Type**: Express API  
+**Language**: TypeScript  
+**Framework**: Express.js  
+**Package Manager**: npm
+
+### Implementation Patterns
+
+#### Authentication Implementation (100% - High Confidence)
+- **User Property**: `req.auth`
+- **Token Storage**: Unknown
+- **Error Response**: Unknown
+- **Middleware Pattern**: app.use(auth)
+  Evidence: /debug-pattern-matching.js: req.auth usage (70% confidence)
+
+#### API Response Implementation (100% - High Confidence)
+- **Success Format**: bare object
+- **Error Format**: Unknown
+- **Status Codes**: default 200/500
+- **Wrapper Pattern**: conditional
+  Evidence: /test-performance.js: bare object response (100% confidence), /test-cross-file-analysis.js: {result: any} format (100% confidence), /final-validation.js: bare object response (100% confidence)
+
+#### Error Handling Implementation (100% - High Confidence)
+- **Catch Pattern**: global middleware
+- **Error Structure**: Unknown
+- **Logging Integration**: integrated
+- **Propagation Style**: Unknown
+  Evidence: /test-performance.js: global error handler
+
+### Development Information
+
+**Scripts**:
+- dev: `tsx watch src/stdio-mcp-server.ts`
+- build: `tsc`
+- test: `jest`
+
+**Key Directories**:
+  - src/ (source code)
+  - src/types/ (TypeScript types)
+
+**Core Dependencies**: @libsql/client, @modelcontextprotocol/sdk, @typescript-eslint/typescript-estree, chokidar, glob, zod
+
+### Critical Guardrails
+
+✅ **ALWAYS use `req.auth`** for authenticated user data
+✅ **Use bare object responses** - No wrapper format detected
+✅ **Follow `global middleware`** error handling pattern
+
+**Last Updated**: 2026-03-30T09:52:49.966Z  
+**Detection Quality**: Implementation patterns auto-detected with confidence scoring
+
+*This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
+<!-- claudecat:auto:end:project-context -->
