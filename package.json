@@ -1,14 +1,16 @@
 {
-  "name": "claudecat-mcp-server",
+  "name": "claudecat",
   "version": "1.0.0",
-  "description": "ClaudeCat Proactive Context Engine - MCP Server for Claude Code accuracy improvement",
-  "main": "dist/stdio-mcp-server.js",
+  "description": "ClaudeCat - Deep analysis CLI tool for Claude Code",
+  "main": "dist/cli.js",
   "type": "module",
   "bin": {
-    "claudecat": "dist/stdio-mcp-server.js"
+    "claudecat": "dist/cli.js",
+    "claudecat-mcp": "dist/stdio-mcp-server.js"
   },
   "scripts": {
     "build": "tsc",
+    "cli": "tsx src/cli.ts",
     "dev": "tsx watch src/stdio-mcp-server.ts",
     "dev:cross-file": "tsx watch src/core/enhanced-project-detector.ts",
     "start": "node dist/stdio-mcp-server.js",

@@ -166,27 +166,31 @@ The analysis engine has been validated across 10 phases of development. Full pha
 
 **Current Focus**: CLI + Skill delivery interface (Phases 11-12).
 
-## Next Phase: CLI + Skill Architecture
+## Roadmap
 
-### Phase 11: CLI Tool Implementation (Planned)
+### Phase 11: CLI Tool (Next)
 - CLI entry point (`src/cli.ts`) with `scan`, `update`, `status` commands
 - Reuse existing core engine (project-detector, claude-md-maintainer)
 - `bin` field in package.json for `claudecat` command
 - npm-publishable package
 
-### Phase 12: Claude Code Skill (Planned)
+### Phase 12: Cloud Storage (Turso)
+- Cross-machine pattern sharing (work + home)
+- Turso (libSQL) for low-cost cloud persistence
+- CLI reads/writes patterns to cloud DB
+
+### Phase 13: Claude Code Skill
 - Skill definition in `skill/` directory following Claude Code skill spec
 - `/claudecat` slash command invocable inside Claude Code sessions
 - Skill calls the same core engine as the CLI
-- Optional `SessionStart` hook in `.claude/settings.json` for auto-invocation:
-  ```json
-  { "hooks": { "SessionStart": [{ "command": "claudecat update --quiet" }] } }
-  ```
-- Appends deep analysis below `/init`'s output using `<!-- claudecat:auto:begin -->` markers
+- Can sync with cloud storage from Phase 12
+- Optional `SessionStart` hook for auto-invocation
 
-### Future Considerations
-- **Cloud Storage (Turso)**: Cross-machine pattern sharing — low priority
-- **Team Sharing**: Shared pattern conventions via cloud sync — deferred
+### Phase 14: Team Sharing
+- Shared pattern conventions via cloud sync
+- Team-wide consistency enforcement
+
+### Future
 - **Additional Languages**: Python, Go, Rust AST support — based on demand
 
 **Last Updated**: 2026-03-30
