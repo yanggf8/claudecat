@@ -15,23 +15,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 /home/yanggf/a/claudecat/
 ├── src/
-│   ├── core/                 # Core analysis engine (reused by all interfaces)
+│   ├── core/                 # Core analysis engine
 │   │   ├── project-detector.ts      # AST-based pattern detection
 │   │   ├── claude-md-maintainer.ts  # CLAUDE.md maintenance
 │   │   ├── context-watcher.ts       # File change monitoring
 │   │   └── proactive-context-engine.ts # Main engine orchestrator
+│   ├── cli/                  # CLI command layer
+│   │   ├── args.ts           # Argument parsing
+│   │   ├── commands.ts       # Command implementations
+│   │   └── formatter.ts      # Terminal output formatting
+│   ├── cloud/                # Cloud storage layer
+│   │   ├── turso-client.ts   # Turso DB client
+│   │   ├── config-store.ts   # ~/.claudecat/config.json
+│   │   ├── project-identifier.ts # Git remote → project ID
+│   │   └── machine-id.ts     # Machine fingerprint
 │   ├── types/                # TypeScript type definitions
-│   ├── cli.ts                # CLI entry point (planned)
+│   ├── cli.ts                # CLI entry point
 │   ├── server.ts             # MCP server (legacy)
 │   ├── stdio-mcp-server.ts   # Stdio MCP server (legacy)
 │   └── stdio-mcp-logger.ts   # Session logging (legacy)
-├── skill/                    # Claude Code skill definition (planned)
 ├── scripts/                  # Installation and testing scripts
 ├── dist/                     # Compiled JavaScript output
-└── docs/                     # Project documentation
-    ├── CLAUDECAT-PROPOSAL.md
-    ├── CLAUDECAT-ARCHITECTURE.md
-    └── CLAUDECAT-GOALS.md
+└── ~/.claude/skills/claudecat/ # Claude Code skill (global)
 ```
 
 ## Core Concept
@@ -164,82 +169,16 @@ The analysis engine has been validated across 10 phases of development. Full pha
 
 **Core Engine**: Production-ready (Phases 1-10 complete). Full results in `ARCHITECTURE-STUDY.md`.
 
-**Current Focus**: CLI + Skill delivery interface (Phases 11-12).
+## Completed Phases
 
-## Roadmap
+- **Phase 11: CLI Tool** — `claudecat scan/update/status/login/sync` commands, zero new deps for CLI layer
+- **Phase 12: Cloud Storage (Turso)** — cross-machine pattern sync via libSQL, pull-before-push logic, per-project sync history
+- **Phase 13: Claude Code Skill** — `/claudecat` slash command installed at `~/.claude/skills/claudecat/`
+- **Phase 14: Team Sharing** — supported via shared Turso credentials; no additional code needed
 
-### Phase 11: CLI Tool (Next)
-- CLI entry point (`src/cli.ts`) with `scan`, `update`, `status` commands
-- Reuse existing core engine (project-detector, claude-md-maintainer)
-- `bin` field in package.json for `claudecat` command
-- npm-publishable package
+## Future
+- **Multi-user pattern merging** — combine patterns from different team members scanning different areas
+- **Additional Languages** — Python, Go, Rust AST support based on demand
+- **npm publish** — package for public distribution
 
-### Phase 12: Cloud Storage (Turso)
-- Cross-machine pattern sharing (work + home)
-- Turso (libSQL) for low-cost cloud persistence
-- CLI reads/writes patterns to cloud DB
-
-### Phase 13: Claude Code Skill
-- Skill definition in `skill/` directory following Claude Code skill spec
-- `/claudecat` slash command invocable inside Claude Code sessions
-- Skill calls the same core engine as the CLI
-- Can sync with cloud storage from Phase 12
-- Optional `SessionStart` hook for auto-invocation
-
-### Phase 14: Team Sharing
-- Shared pattern conventions via cloud sync
-- Team-wide consistency enforcement
-
-### Future
-- **Additional Languages**: Python, Go, Rust AST support — based on demand
-
-**Last Updated**: 2026-03-30\n\n<!-- claudecat:auto:begin:project-context -->
-## Project Context (Auto-Maintained by ClaudeCat)
-
-**Project Type**: Express API  
-**Language**: TypeScript  
-**Framework**: Express.js  
-**Package Manager**: npm
-
-### Implementation Patterns
-
-#### Authentication Implementation (100% - High Confidence)
-- **User Property**: `req.auth`
-- **Token Storage**: Unknown
-- **Error Response**: Unknown
-- **Middleware Pattern**: app.use(auth)\n  Evidence: /debug-pattern-matching.js: req.auth usage (70% confidence)
-
-#### API Response Implementation (100% - High Confidence)
-- **Success Format**: bare object
-- **Error Format**: Unknown
-- **Status Codes**: default 200/500
-- **Wrapper Pattern**: conditional\n  Evidence: /test-performance.js: bare object response (100% confidence), /test-cross-file-analysis.js: {result: any} format (100% confidence), /final-validation.js: bare object response (100% confidence)
-
-#### Error Handling Implementation (100% - High Confidence)
-- **Catch Pattern**: global middleware
-- **Error Structure**: Unknown
-- **Logging Integration**: integrated
-- **Propagation Style**: Unknown\n  Evidence: /test-performance.js: global error handler
-
-### Development Information
-
-**Scripts**:
-- dev: `tsx watch src/stdio-mcp-server.ts`
-- build: `tsc`
-- test: `jest`
-
-**Key Directories**:
-  - src/ (source code)
-  - src/types/ (TypeScript types)
-
-**Core Dependencies**: @libsql/client, @modelcontextprotocol/sdk, @typescript-eslint/typescript-estree, chokidar, glob, zod
-
-### Critical Guardrails
-
-✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Follow `global middleware`** error handling pattern
-
-**Last Updated**: 2026-03-30T07:19:26.525Z  
-**Detection Quality**: Implementation patterns auto-detected with confidence scoring
-
-*This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
-<!-- claudecat:auto:end:project-context -->\n
+**Last Updated**: 2026-03-30
