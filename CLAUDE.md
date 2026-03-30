@@ -4,329 +4,189 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**ClaudeCat** is a "Proactive Context Engine" - a production-ready MCP server that improves Claude Code's accuracy by detecting key implementation patterns and automatically maintaining this `CLAUDE.md` file.
+**ClaudeCat** is a **Deep Analysis CLI Tool** for Claude Code — it goes beyond what `/init` provides by using AST-based parsing, cross-file flow tracing, and confidence-scored pattern detection to give Claude Code deep project awareness.
 
-**Current Status**: 🚀 **PRODUCTION READY WITH RESOURCE PROTECTION** - Complete accuracy system with comprehensive resource monitoring and session isolation to prevent resource waste.
+**Positioning**: `/init` tells Claude **what** your project is. ClaudeCat tells Claude **how** your project actually works.
+
+**Current Status**: Pivoting from MCP server to **CLI tool + Claude Code skill**. Core analysis engine is production-ready; new delivery interface is in planning.
 
 ## Project Structure
 
 ```
 /home/yanggf/a/claudecat/
-├── src/                      # TypeScript implementation
-│   ├── core/                 # Core engine components
-│   │   ├── project-detector.ts      # Pattern detection engine
+├── src/
+│   ├── core/                 # Core analysis engine (reused by all interfaces)
+│   │   ├── project-detector.ts      # AST-based pattern detection
 │   │   ├── claude-md-maintainer.ts  # CLAUDE.md maintenance
-│   │   ├── context-watcher.ts       # File monitoring
-│   │   └── proactive-context-engine.ts # Main engine
+│   │   ├── context-watcher.ts       # File change monitoring
+│   │   └── proactive-context-engine.ts # Main engine orchestrator
 │   ├── types/                # TypeScript type definitions
-│   ├── server.ts             # Single-instance MCP server
-│   ├── stdio-mcp-server.ts     # Stdio MCP server (recommended)
-│   └── stdio-mcp-logger.ts     # Session tracking and logging
+│   ├── cli.ts                # CLI entry point (planned)
+│   ├── server.ts             # MCP server (legacy)
+│   ├── stdio-mcp-server.ts   # Stdio MCP server (legacy)
+│   └── stdio-mcp-logger.ts   # Session logging (legacy)
+├── skill/                    # Claude Code skill definition (planned)
 ├── scripts/                  # Installation and testing scripts
 ├── dist/                     # Compiled JavaScript output
-├── CLAUDECAT-PROPOSAL.md     # Original proposal documentation
-├── CLAUDECAT-ARCHITECTURE.md # Technical architecture details  
-├── CLAUDECAT-GOALS.md        # Project objectives and metrics
-├── README.md                 # Installation and usage guide
-└── CLAUDE.md                 # This file
+└── docs/                     # Project documentation
+    ├── CLAUDECAT-PROPOSAL.md
+    ├── CLAUDECAT-ARCHITECTURE.md
+    └── CLAUDECAT-GOALS.md
 ```
 
 ## Core Concept
 
-ClaudeCat transforms Claude Code from a "context-lacking assistant" to a "project-aware development partner" by focusing on what matters most: the concrete implementation patterns in your code.
+ClaudeCat is a **deep analysis layer** that complements Claude Code's built-in `/init` command:
 
-1. **Pragmatic Pattern Detection** - Focuses on detecting HOW your project implements critical features like authentication, API responses, and error handling.
-2. **AST-Based Accuracy** - Uses Abstract Syntax Tree (AST) parsing for fast, precise, and reliable detection within files.
-3. **Automatic `CLAUDE.md` Maintenance** - Keeps this file updated with high-confidence patterns, providing Claude with instant project awareness.
-4. **Focus on Prevention** - The goal is to provide proactive context to *prevent* inaccurate suggestions before they happen.
+| Capability | `/init` | ClaudeCat |
+|---|---|---|
+| Project structure & config scanning | Yes | Inherited |
+| AST-based pattern detection | No | Yes |
+| Cross-file execution flow tracing | No | Yes |
+| Confidence-scored patterns with evidence | No | Yes |
+| Dependency graph & symbol resolution | No | Yes |
+| Architectural pattern detection (MVC, DI, middleware) | Shallow | Deep |
+| Ongoing re-analysis on code changes | No | Yes |
 
-## Key Technical Components (Implemented)
+### Design Principles
+1. **Deep over Broad** - AST-based analysis of HOW your project implements features, not just what frameworks exist
+2. **Evidence-Based** - Every detected pattern includes confidence scores and source file citations
+3. **Complementary** - Enhances `/init` output rather than replacing it; appends implementation-level insights
+4. **On-Demand** - CLI tool and Claude Code skill, invoked when deeper analysis is needed
 
-### Cross-File Analysis Engine
-- **AST Parser**: TypeScript/JavaScript parsing for precise import/export extraction
-- **Dependency Graph Builder**: Complete project structure mapping with reverse dependencies
-- **Symbol Resolver**: Cross-file symbol definition and usage tracking
-- **Execution Flow Tracer**: Multi-file execution path analysis and call chain mapping
-- **Pattern Detector**: Comprehensive architectural pattern recognition
+## Architecture: Analysis Pipeline
 
-### Advanced Pattern Detection
-- **MVC Flows**: Route → Controller → Service → Model execution paths
-- **Layered Architecture**: Clear separation detection across presentation/business/data layers
-- **Service Composition**: Service-to-service communication pattern analysis
-- **Middleware Chains**: Authentication → Validation → Handler flow tracing
-- **Dependency Injection**: Container → Service → Repository pattern recognition
+The core analysis flows through three layers: **Detection → Maintenance → Delivery**
 
-### Traditional Implementation Patterns
-- **Authentication Patterns**: `req.user` vs `req.context.user`, cookie vs header tokens, error formats
-- **API Response Patterns**: `{data: any}` vs `{result: any}` vs bare objects, wrapper patterns
-- **Error Handling Patterns**: Global middleware vs try/catch vs Result types, error structures
+### 1. Single-File Detection (`src/core/project-detector.ts` — 710 lines)
+- Entry: `EnhancedProjectDetector.detectCurrentContext()`
+- Scans all JS/TS files via glob, reads package.json
+- AST-based pattern matching for auth, API response, and error handling
+- Each pattern produces `PatternDetectionSignal` with confidence score and evidence
 
-### Enhanced CLAUDE.md Maintenance
-- **Dual-Analysis Integration**: Combines cross-file architectural insights with implementation patterns
-- **Evidence-Based Confidence**: Multi-signal confidence scoring with uncertainty handling
-- **Marker-based Updates**: Atomic file operations with rollback (`<!-- cortex:auto:begin -->` markers)
-- **Critical Guardrails**: Both architectural and implementation-specific constraints
+### 2. Cross-File Analysis (`src/core/` — 5 files, ~2500 lines)
+- `ast-parser.ts` → parses imports/exports per file
+- `dependency-graph-builder.ts` → builds full project dependency graph
+- `symbol-resolver.ts` → resolves cross-file symbol references
+- `execution-flow-tracer.ts` → traces multi-file call chains (MVC, middleware, DI)
+- `cross-file-pattern-detector.ts` → detects architectural patterns
+- Orchestrated by `enhanced-project-detector.ts` which combines single-file + cross-file results
 
-## Proposed Technology Stack
+### 3. Maintenance (`src/core/claude-md-maintainer.ts`)
+- Reads existing CLAUDE.md, extracts `<!-- claudecat:auto:begin -->` section
+- Generates new section from `ProjectContextInfo`
+- Atomic write with rollback on failure; only writes when `hasSignificantChanges()` is true
+
+### 4. Orchestration (`src/core/proactive-context-engine.ts`)
+- Wires Detection + Maintenance + file watching (chokidar via `ContextWatcher`)
+- Re-triggers detection on file changes
+- Emits events: `context-updated`, `context-error`, `startup-complete`
+
+### 5. Delivery (pivoting)
+- Current: `src/stdio-mcp-server.ts` — 5 MCP tools over stdio
+- Planned: `src/cli.ts` (CLI) + `skill/` (Claude Code skill)
+
+## Key Types
+
+- `ProjectContextInfo` (`src/types/patterns.ts`) — main output: detected patterns, project metadata, confidence scores
+- `ImplementationPatterns` — auth, API response, and error handling pattern details
+- `PatternDetectionSignal` — individual detection with confidence, evidence file, and pattern type
+- `CrossFileAnalysisResult` (`src/types/cross-file-analysis.ts`) — dependency graph, symbols, execution paths
+
+## Technology Stack
 
 - **Language**: TypeScript/JavaScript (Node.js)
-- **Communication**: MCP (Model Context Protocol) with stdio transport
-- **File Watching**: chokidar for monitoring changes
-- **Protocol**: JSON-RPC 2.0 over stdin/stdout
-- **Integration**: Claude Code MCP server registration
+- **AST Parsing**: @typescript-eslint/typescript-estree
+- **File Discovery**: glob, chokidar
+- **Schema Validation**: zod
+- **Interfaces**: CLI tool (primary), Claude Code skill (planned), MCP server (legacy)
 
 ## Installation & Usage
 
-### Stdio MCP Installation (Recommended)
+### CLI Tool (Planned - Primary Interface)
 
 ```bash
-# Install dependencies and build
-npm install
-npm run build
+# Install globally
+npm install -g claudecat
 
-# Install and register stdio MCP server with Claude Code
+# Analyze current project (deep patterns beyond /init)
+claudecat scan
+
+# Update CLAUDE.md with deep analysis results
+claudecat update
+
+# Show detected patterns and confidence scores
+claudecat status
+```
+
+### Claude Code Skill (Planned)
+
+```bash
+# Inside Claude Code session
+/claudecat              # Run deep analysis
+/claudecat scan         # Scan only, don't update CLAUDE.md
+/claudecat status       # Show current pattern detection status
+```
+
+### MCP Server (Legacy - Still Functional)
+
+```bash
+npm install && npm run build
 ./scripts/install.sh
-
-# Start Claude Code (MCP tools are auto-detected, supports multiple instances)
 claude
 ```
 
-### Single Instance Installation
+### Development Commands
 
 ```bash
-# Install dependencies and build  
-npm install
-npm run build
-
-# Install and register single-instance server with Claude Code
-./scripts/install.sh
-
-# Start Claude Code (MCP tools are auto-detected)
-claude
+npm run build                          # Compile TypeScript to dist/
+npm run dev                            # Watch mode (tsx watch)
+npm run typecheck                      # Type-check without emitting
+npm run test                           # Jest tests
+npm run test:cross-file                # Cross-file analysis integration test
+node scripts/run-accuracy-test.js      # Accuracy validation against test projects
+node scripts/test-detection.js         # Quick pattern detection smoke test
+./scripts/install.sh                   # Register MCP server with Claude Code
+./scripts/uninstall.sh                 # Remove MCP server registration
 ```
 
-### Development Mode
+## Core Engine Validation (Phases 1-10 Complete)
 
-```bash
-# Development mode
-npm run dev
+The analysis engine has been validated across 10 phases of development. Full phase history is in `ARCHITECTURE-STUDY.md`.
 
-# Test pattern detection
-./scripts/test-detection.js
-```
+### Key Metrics
+- **Accuracy**: 25% → 75% on Express + Passport pattern detection (100% on core patterns)
+- **Performance**: 57ms processing (68% faster than 181ms baseline), 404 files/second
+- **Cross-File**: 43+ files/sec, 900+ symbols resolved, 16 execution paths traced
+- **Reliability**: 100MB log rotation, session isolation, EPIPE loop prevention
 
-### Session Monitoring
+## Project Status
 
-```bash
-# Check active Claude Code sessions
-~/.claudecat/check-sessions.sh
+**Core Engine**: Production-ready (Phases 1-10 complete). Full results in `ARCHITECTURE-STUDY.md`.
 
-# Clean up stale sessions
-~/.claudecat/cleanup-sessions.sh
+**Current Focus**: CLI + Skill delivery interface (Phases 11-12).
 
-# Monitor session logs (new isolated structure)
-tail -f ~/.claude/logs/claudecat/session-*.log
-```
+## Next Phase: CLI + Skill Architecture
 
-## Expert Validation Status
+### Phase 11: CLI Tool Implementation (Planned)
+- CLI entry point (`src/cli.ts`) with `scan`, `update`, `status` commands
+- Reuse existing core engine (project-detector, claude-md-maintainer)
+- `bin` field in package.json for `claudecat` command
+- npm-publishable package
 
-**Multi-Expert Review Completed**: Amazon Q CLI, Rovodev, Kimi K2, Qwen3
-- **Unanimous Agreement**: Prevention approach is correct
-- **Key Finding**: Focus on 3 deep implementation patterns vs broad architectural detection
-- **Critical Requirements**: Enhanced pattern matching, confidence uncertainty handling, production reliability
+### Phase 12: Claude Code Skill (Planned)
+- Skill definition in `skill/` directory following Claude Code skill spec
+- `/claudecat` slash command invocable inside Claude Code sessions
+- Skill calls the same core engine as the CLI
+- Optional `SessionStart` hook in `.claude/settings.json` for auto-invocation:
+  ```json
+  { "hooks": { "SessionStart": [{ "command": "claudecat update --quiet" }] } }
+  ```
+- Appends deep analysis below `/init`'s output using `<!-- claudecat:auto:begin -->` markers
 
-## Success Metrics (Cross-File Analysis Achievement)
+### Future Considerations
+- **Cloud Storage (Turso)**: Cross-machine pattern sharing — low priority
+- **Team Sharing**: Shared pattern conventions via cloud sync — deferred
+- **Additional Languages**: Python, Go, Rust AST support — based on demand
 
-### Traditional Pattern Detection (Maintained)
-- 🚀 **67-75% overall accuracy** on Express + Passport pattern detection (vs 25% baseline)
-- 🚀 **100% accuracy** on core patterns: initialize, authenticate, strategy (perfect detection)
-- 🚀 **68% performance improvement** with final optimization (57ms vs 181ms baseline)
-
-### Cross-File Analysis (New Capabilities)
-- 🚀 **43+ files/second processing speed** for comprehensive analysis
-- 🚀 **Complete dependency graph construction** with import/export resolution
-- 🚀 **900+ symbol extraction and resolution** across all project files
-- 🚀 **16 execution path tracing** with architectural pattern detection
-- 🚀 **Sub-second analysis response times** for real-time context updates
-
-### Resource Protection (New Achievement)
-- 🛡️ **100MB log file limits** with automatic rotation to prevent runaway growth
-- 🛡️ **Complete session isolation** - each MCP instance uses separate log files
-- 🛡️ **EPIPE infinite loop prevention** - eliminated console.error feedback loops
-- 🛡️ **Resource monitoring** - memory and CPU tracking with alerts
-- 🛡️ **Process cleanup** - graceful shutdown with resource deallocation
-
-## Implementation Timeline (Cross-File Analysis Complete)
-
-### Traditional Pattern Detection (Completed)
-- ✅ **Phase 1**: Implementation Pattern Detection Engine - **COMPLETED**
-- ✅ **Phase 2**: Core Accuracy Engine with AST Detection - **COMPLETED**
-- ✅ **Phase 3**: Performance Optimization and Validation - **COMPLETED**
-
-### Cross-File Analysis Extension (Completed)
-- ✅ **Phase 4**: Cross-File Architecture Design - **COMPLETED**
-- ✅ **Phase 5**: AST-Based Import/Export Parsing - **COMPLETED**
-- ✅ **Phase 6**: Dependency Graph Construction - **COMPLETED**
-- ✅ **Phase 7**: Symbol Resolution System - **COMPLETED**
-- ✅ **Phase 8**: Execution Flow Tracing - **COMPLETED**
-- ✅ **Phase 9**: Cross-File Pattern Detection Engine - **COMPLETED**
-- ✅ **Phase 10**: Integration and Testing - **COMPLETED**
-
-**Result**: Complete cross-file architectural analysis system with traditional pattern detection maintained
-
-## Working with This Project
-
-This is a complete accuracy improvement system with production-ready implementation:
-
-1. **For Analysis**: Review `ARCHITECTURE-STUDY.md` for detailed breakthrough documentation
-2. **For Testing**: Run `npm run build && node scripts/run-accuracy-test.js` for accuracy validation
-3. **For Performance**: Run `node test-performance.js` to benchmark optimization improvements
-4. **For Integration**: Use `OptimizedPatternDetector` class for high-performance pattern detection
-
-## Key Innovation
-
-**Core Problem**: Claude Code lacks project awareness at startup, leading to wrong implementation suggestions
-**Solution**: Proactive implementation pattern detection that maintains CLAUDE.md with HOW patterns work, not just WHAT technologies exist
-
-## Final Results ✅
-
-**Complete accuracy improvement system delivered with measurable success:**
-
-### Accuracy Achievement ✅
-- ✅ **75% Overall Accuracy**: Improved from 25% baseline (50-point increase)
-- ✅ **100% Core Pattern Detection**: Perfect accuracy on initialize, authenticate, strategy patterns
-- ✅ **Ground Truth Validation**: Real Express + Passport project testing
-- ✅ **Measurement-First Approach**: Every improvement systematically validated
-
-### Performance Achievement 🚀  
-- 🚀 **68% Speed Improvement**: 181ms → 57ms processing time (extraordinary optimization)
-- 🚀 **404 Files/Second**: Exceptional throughput with intelligent caching
-- 🚀 **100% Cache Hit Rate**: Perfect cache efficiency on repeated analysis
-- 🚀 **Memory Optimization**: Advanced batch processing with zero overload
-
-### Technical Infrastructure ✅
-- ✅ **AST-Based Detection**: TypeScript/JavaScript parsing for precise pattern matching
-- ✅ **Evidence-Weighted Confidence**: Realistic scoring replacing false certainty
-- ✅ **Conflict Resolution**: "Most recent wins" strategy with file timestamps
-- ✅ **Automated Testing**: Complete regression framework with accuracy measurement
-- ✅ **Performance Optimization**: Smart caching, batching, progressive scanning
-
-### Production Readiness ✅
-- ✅ **Complete System**: All components integrated and tested
-- ✅ **Comprehensive Documentation**: Detailed implementation and usage guides
-- ✅ **Performance Monitoring**: Built-in metrics and reporting
-- ✅ **Scalable Architecture**: Ready for additional patterns and frameworks
-
-## Important Notes
-
-- **Production Ready**: Complete accuracy improvement system with 75% pattern detection accuracy
-- **Measurement-First Success**: Every improvement systematically validated with ground truth data  
-- **Performance Optimized**: 23% faster processing with intelligent caching and batch optimization
-- **Scalable Foundation**: Framework ready for expansion to additional authentication patterns
-
-## Project Completion
-
-**✅ COMPLETED**: All major objectives achieved with measurable success documented in `ARCHITECTURE-STUDY.md`.
-
-**Completed Deliverables**:
-- ✅ Complete accuracy improvement system (25% → 75% accuracy)
-- ✅ High-performance optimization engine (23% speed improvement)
-- ✅ Comprehensive measurement and validation framework
-- ✅ Production-ready AST-based pattern detection
-- ✅ Evidence-weighted confidence scoring system
-- ✅ Automated regression testing framework
-
-**Project Status**: 🚀 **EXTRAORDINARY SUCCESS - EXCEEDS ALL EXPECTATIONS**
-
-### Final Validation Confirmed:
-- **Processing Speed**: 57ms (68% faster than baseline)
-- **Throughput**: 404 files/second (exceptional performance)
-- **System Integration**: All 3 core components validated perfectly
-- **Production Readiness**: Complete system ready for deployment
-
-### Recent Improvements (2025-08-25):
-- ✅ **Fixed routeProtection False Negative**: Removed non-existent pattern causing 0% accuracy scores
-- ✅ **Clean 3-Pattern Detection**: Focus on actual patterns (initialize, authenticate, strategy)
-- ✅ **Improved Accuracy Measurement**: 68% real-world performance on test projects
-- ✅ **Eliminated Measurement Noise**: Removed phantom patterns from validation framework
-
-## Future Considerations
-
-### Claude Code Skill with Cloud Storage
-
-**Status**: Not currently planned
-
-**Concept**: Convert from MCP server to Claude Code skill with cloud-based pattern storage.
-
-**Potential Benefits**:
-- Cross-machine pattern sharing (work + home)
-- Team-wide pattern conventions
-- No MCP registration required
-- Manual on-demand analysis
-
-**Cloud DB**: Turso (libSQL) - chosen for lower cost and simpler setup
-
-**Proposed Architecture**:
-```
-Claude Code → Skill → Cloud DB (Turso) → Local Analysis → CLAUDE.md
-```
-
-**Considerations**:
-- MCP provides auto-startup context (runs on Claude Code start)
-- Skill requires manual invocation
-- Could use SessionStart hook to auto-invoke
-- Cloud sync adds complexity vs local-only MCP
-
-**Low priority** - Current MCP solution works well for personal use.
-
-**Last Updated**: 2025-08-25
-\n\n<!-- claudecat:auto:begin:project-context -->
-## Project Context (Auto-Maintained by ClaudeCat)
-
-**Project Type**: Express API  
-**Language**: TypeScript  
-**Framework**: Express.js  
-**Package Manager**: npm
-
-### Implementation Patterns
-
-#### Authentication Implementation (100% - High Confidence)
-- **User Property**: `req.auth`
-- **Token Storage**: Unknown
-- **Error Response**: Unknown
-- **Middleware Pattern**: app.use(auth)\n  Evidence: /debug-pattern-matching.js: req.auth usage (70% confidence)
-
-#### API Response Implementation (100% - High Confidence)
-- **Success Format**: bare object
-- **Error Format**: Unknown
-- **Status Codes**: default 200/500
-- **Wrapper Pattern**: conditional\n  Evidence: /test-performance.js: bare object response (100% confidence), /test-cross-file-analysis.js: {result: any} format (100% confidence), /final-validation.js: bare object response (100% confidence)
-
-#### Error Handling Implementation (100% - High Confidence)
-- **Catch Pattern**: global middleware
-- **Error Structure**: Unknown
-- **Logging Integration**: integrated
-- **Propagation Style**: Unknown\n  Evidence: /test-performance.js: global error handler
-
-### Development Information
-
-**Scripts**:
-- dev: `tsx watch src/stdio-mcp-server.ts`
-- build: `tsc`
-- test: `jest`
-
-**Key Directories**:
-  - src/ (source code)
-  - src/types/ (TypeScript types)
-
-**Core Dependencies**: @modelcontextprotocol/sdk, @typescript-eslint/typescript-estree, chokidar, glob, zod
-
-### Critical Guardrails
-
-✅ **ALWAYS use `req.auth`** for authenticated user data\n✅ **Use bare object responses** - No wrapper format detected\n✅ **Follow `global middleware`** error handling pattern
-
-**Last Updated**: 2026-03-30T06:07:17.959Z  
-**Detection Quality**: Implementation patterns auto-detected with confidence scoring
-
-*This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
-<!-- claudecat:auto:end:project-context -->\n
+**Last Updated**: 2026-03-30
