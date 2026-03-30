@@ -21,16 +21,20 @@ Options:
   --json          Output as JSON
   --force         Force sync regardless of timestamps
   --url <url>     Turso database URL (for login)
-  --token <token> Turso auth token (for login)
   --help, -h      Show this help message
   --version, -v   Show version
+
+Environment:
+  TURSO_AUTH_TOKEN  Turso auth token (avoids interactive prompt)
 
 Examples:
   claudecat scan                                    # Analyze current project
   claudecat update                                  # Update CLAUDE.md
   claudecat status --json                           # Machine-readable output
-  claudecat login --url libsql://... --token ...    # Configure cloud
+  claudecat login --url libsql://...                # Configure cloud (prompts for token)
+  TURSO_AUTH_TOKEN=... claudecat login --url ...    # Non-interactive login
   claudecat sync                                    # Sync patterns to cloud
+  claudecat sync --force                            # Force push local patterns
 `;
 
 async function main(): Promise<void> {

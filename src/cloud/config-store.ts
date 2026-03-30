@@ -5,6 +5,7 @@ import { homedir } from 'os';
 export interface CloudConfig {
   tursoUrl: string;
   tursoToken: string;
+  syncHistory?: Record<string, string>; // projectId → lastSyncedAt ISO timestamp
 }
 
 const CONFIG_PATH = join(homedir(), '.claudecat', 'config.json');
@@ -33,5 +34,18 @@ export class ConfigStore {
 
   static exists(): boolean {
     return existsSync(CONFIG_PATH);
+  }
+
+  static getLastSyncedAt(projectId: string): string | null {
+    const config = ConfigStore.read();
+    return config?.syncHistory?.[projectId] ?? null;
+  }
+
+  static setLastSyncedAt(projectId: string, timestamp: string): void {
+    const config = ConfigStore.read();
+    if (!config) return;
+    config.syncHistory = config.syncHistory || {};
+    config.syncHistory[projectId] = timestamp;
+    ConfigStore.write(config);
   }
 }

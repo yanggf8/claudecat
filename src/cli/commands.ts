@@ -52,15 +52,44 @@ function prompt(question: string): Promise<string> {
   });
 }
 
+function promptSecret(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    process.stdout.write(question);
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    if (stdin.isTTY) stdin.setRawMode(true);
+    let input = '';
+    const onData = (chunk: Buffer) => {
+      const char = chunk.toString();
+      if (char === '\n' || char === '\r') {
+        stdin.removeListener('data', onData);
+        if (stdin.isTTY && wasRaw !== undefined) stdin.setRawMode(wasRaw);
+        process.stdout.write('\n');
+        resolve(input.trim());
+      } else if (char === '\x03') {
+        // Ctrl+C
+        process.exit(1);
+      } else if (char === '\x7f' || char === '\b') {
+        input = input.slice(0, -1);
+      } else {
+        input += char;
+      }
+    };
+    stdin.resume();
+    stdin.on('data', onData);
+  });
+}
+
 export async function runLogin(options: ParsedArgs['options']): Promise<void> {
+  // Token: env var > interactive prompt (never CLI flag)
   let url = options.url;
-  let token = options.token;
+  let token = process.env['TURSO_AUTH_TOKEN'] || '';
 
   if (!url) url = await prompt('Turso database URL: ');
-  if (!token) token = await prompt('Turso auth token: ');
+  if (!token) token = await promptSecret('Turso auth token: ');
 
   if (!url || !token) {
-    console.error('Both URL and token are required.');
+    console.error('URL and token are required. Set TURSO_AUTH_TOKEN env var or enter interactively.');
     process.exitCode = 1;
     return;
   }
@@ -85,7 +114,7 @@ export async function runLogin(options: ParsedArgs['options']): Promise<void> {
 export async function runSync(projectRoot: string, flags: ParsedArgs['flags']): Promise<void> {
   const config = ConfigStore.read();
   if (!config) {
-    console.error('Not configured. Run: claudecat login --url <turso-url> --token <token>');
+    console.error('Not configured. Run: claudecat login --url <turso-url>');
     process.exitCode = 1;
     return;
   }
@@ -96,21 +125,19 @@ export async function runSync(projectRoot: string, flags: ParsedArgs['flags']): 
 
     const { id, displayName } = ProjectIdentifier.resolve(projectRoot);
     const machineId = getMachineId();
+    const lastSyncedAt = ConfigStore.getLastSyncedAt(id);
 
-    // Scan current project
-    const detector = new EnhancedProjectDetector(projectRoot);
-    const context = detector.detectCurrentContext();
-
-    // Pull first — check if remote has newer patterns before pushing
+    // Pull first — check if remote has newer patterns since our last sync
     const remote = await client.getLatestSnapshot(id);
     const remoteIsNewer = remote
       && remote.machineId !== machineId
-      && remote.scannedAt > context.lastUpdated;
+      && (!lastSyncedAt || remote.scannedAt > lastSyncedAt);
 
     if (remoteIsNewer && !flags.force) {
       // Remote has newer patterns from another machine — apply them locally
       const maintainer = new CLAUDEMdMaintainer(projectRoot);
       await maintainer.updateProjectContext(remote.context);
+      ConfigStore.setLastSyncedAt(id, remote.scannedAt);
 
       if (flags.json) {
         process.stdout.write(JSON.stringify({ action: 'pulled', from: remote.machineId, context: remote.context }, null, 2) + '\n');
@@ -118,9 +145,13 @@ export async function runSync(projectRoot: string, flags: ParsedArgs['flags']): 
         console.log(`Pulled newer patterns from machine ${remote.machineId}`);
       }
     } else {
-      // Push local patterns (local is newer or force flag set)
+      // Scan and push local patterns
+      const detector = new EnhancedProjectDetector(projectRoot);
+      const context = detector.detectCurrentContext();
+
       await client.upsertProject(id, displayName);
       await client.pushSnapshot(id, machineId, context);
+      ConfigStore.setLastSyncedAt(id, context.lastUpdated);
 
       if (flags.json) {
         process.stdout.write(JSON.stringify({ action: 'pushed', project: id, machine: machineId }, null, 2) + '\n');

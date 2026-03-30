@@ -9,7 +9,6 @@ export interface ParsedArgs {
   };
   options: {
     url: string;
-    token: string;
   };
 }
 
@@ -18,7 +17,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let command = '';
   let projectRoot = process.cwd();
   const flags = { json: false, help: false, version: false, force: false };
-  const options = { url: '', token: '' };
+  const options = { url: '' };
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -41,9 +40,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
         break;
       case '--url':
         options.url = args[++i] || '';
-        break;
-      case '--token':
-        options.token = args[++i] || '';
         break;
       default:
         if (!command && !args[i].startsWith('-')) {
