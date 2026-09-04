@@ -2,7 +2,7 @@ use claudecat::claude_md;
 use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
-use claudecat::model;
+use claudecat::model::{self, MapProfile};
 use claudecat::outline;
 use claudecat::symbols;
 use claudecat::walk;
@@ -32,6 +32,9 @@ enum Commands {
         /// 要解析符號的最大檔案數
         #[arg(long, default_value_t = 15)]
         top_files: usize,
+        /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
+        #[arg(long, value_enum, default_value = "auto")]
+        map: MapArg,
     },
     /// 量化探索成本（無地圖 vs 地圖 token 粗估）
     Explore {
@@ -44,17 +47,26 @@ enum Commands {
         /// 以 JSON 輸出指標（機器可讀）
         #[arg(long)]
         json: bool,
+        /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
+        #[arg(long, value_enum, default_value = "auto")]
+        map: MapArg,
     },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
         /// 目標 markdown 檔（例如 SESSION-EVIDENCE.md）
         file: PathBuf,
-        /// 專案根目錄
+        /// 專案根目錄（可重複；省略＝cwd）
         #[arg(long, default_value = ".")]
-        root: PathBuf,
+        root: Vec<PathBuf>,
+        /// 一行一個 repo 路徑的文字檔（與 --root 併用）
+        #[arg(long)]
+        roots_file: Option<PathBuf>,
         /// 要解析符號的最大檔案數
         #[arg(long, default_value_t = 50)]
         top_files: usize,
+        /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
+        #[arg(long, value_enum, default_value = "auto")]
+        map: MapArg,
     },
     /// 更新 CLAUDE.md 的 claudecat 自動區塊
     Update {
@@ -67,7 +79,27 @@ enum Commands {
         /// 要解析符號的最大檔案數
         #[arg(long, default_value_t = 15)]
         top_files: usize,
+        /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
+        #[arg(long, value_enum, default_value = "auto")]
+        map: MapArg,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum MapArg {
+    Auto,
+    Mini,
+    Full,
+}
+
+impl MapArg {
+    fn into_profile(self) -> Option<MapProfile> {
+        match self {
+            MapArg::Auto => None,
+            MapArg::Mini => Some(MapProfile::Mini),
+            MapArg::Full => Some(MapProfile::Full),
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -107,7 +139,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-fn analyze(root: &PathBuf, top_files: usize) -> ProjectMap {
+fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> ProjectMap {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
     let mut map = walk::analyze_project(&root, top_files, top_files * 8);
 
@@ -141,6 +173,8 @@ fn analyze(root: &PathBuf, top_files: usize) -> ProjectMap {
     let claude_existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
     map.guardrails = guardrails::load(&root, &claude_existing);
 
+    map.profile_used = model::resolve_profile(map.total_loc, map.total_files, map_flag);
+
     map.generated_at = now_iso();
     map.errors = vec![];
     map
@@ -149,12 +183,14 @@ fn analyze(root: &PathBuf, top_files: usize) -> ProjectMap {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { root, format, top_files } => {
-            let map = analyze(&root, top_files);
+        Commands::Scan { root, format, top_files, map: mf } => {
+            let map = analyze(&root, top_files, mf.into_profile());
             match format {
-                Format::Markdown => println!("{}", outline::render_markdown(&map)),
+                Format::Markdown => {
+                    println!("{}", outline::render_with_profile(&map, map.profile_used))
+                }
                 Format::Text => {
-                    let md = outline::render_markdown(&map);
+                    let md = outline::render_with_profile(&map, map.profile_used);
                     // text mode: strip markdown * emphasis only
                     println!("{}", md.replace('*', ""));
                 }
@@ -167,9 +203,9 @@ fn main() {
                 },
             }
         }
-        Commands::Explore { root, top_files, json } => {
-            let map = analyze(&root, top_files);
-            let m = explore::compute(&map);
+        Commands::Explore { root, top_files, json, map: mf } => {
+            let map = analyze(&root, top_files, mf.into_profile());
+            let m = explore::compute_with_profile(&map, map.profile_used);
             if json {
                 match serde_json::to_string_pretty(&m) {
                     Ok(s) => println!("{s}"),
@@ -182,15 +218,51 @@ fn main() {
                 println!("{}", explore::render(&m));
             }
         }
-        Commands::Track { file, root, top_files } => {
-            let map = analyze(&root, top_files);
-            let m = explore::compute(&map);
-            match explore::track_append(&file, &m) {
+        Commands::Track { file, root, roots_file, top_files, map: mf } => {
+            // roots：--root 可重複；有 --roots-file 時忽略預設 "."；最後去重
+            let mut roots: Vec<PathBuf> = Vec::new();
+            if let Some(rf) = roots_file {
+                if let Ok(text) = std::fs::read_to_string(&rf) {
+                    for line in text.lines() {
+                        let t = line.trim();
+                        if !t.is_empty() && !t.starts_with('#') {
+                            roots.push(PathBuf::from(t));
+                        }
+                    }
+                } else {
+                    eprintln!("Cannot read roots file: {}", rf.display());
+                    std::process::exit(1);
+                }
+            } else {
+                roots = root.clone();
+                if roots.is_empty() {
+                    roots.push(PathBuf::from("."));
+                }
+            }
+            // 去重（canonical path）
+            let mut seen = std::collections::HashSet::new();
+            let roots: Vec<PathBuf> = roots
+                .into_iter()
+                .filter(|r| {
+                    let canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+                    seen.insert(canon)
+                })
+                .collect();
+            let mut metrics: Vec<explore::ExploreMetrics> = Vec::new();
+            for r in &roots {
+                let map = analyze(r, top_files, mf.into_profile());
+                metrics.push(explore::compute_with_profile(&map, map.profile_used));
+            }
+            let refs: Vec<&explore::ExploreMetrics> = metrics.iter().collect();
+            match explore::track_update(&file, &refs) {
                 Ok((changed, path)) => {
+                    let n = metrics.len();
                     println!(
-                        "{} {}",
-                        if changed { "Recorded metric ->" } else { "Up to date:" },
-                        path
+                        "{} {} ({} repo{})",
+                        if changed { "Recorded metrics ->" } else { "Up to date:" },
+                        path,
+                        n,
+                        if n == 1 { "" } else { "s" }
                     );
                 }
                 Err(e) => {
@@ -199,9 +271,9 @@ fn main() {
                 }
             }
         }
-        Commands::Update { root, dry_run, top_files } => {
-            let map = analyze(&root, top_files);
-            let section = outline::render_markdown(&map);
+        Commands::Update { root, dry_run, top_files, map: mf } => {
+            let map = analyze(&root, top_files, mf.into_profile());
+            let section = outline::render_with_profile(&map, map.profile_used);
             let path = claude_md::find_claude_md(&root);
             match claude_md::update_section(&path, &section, dry_run) {
                 Ok((changed, _content)) => {

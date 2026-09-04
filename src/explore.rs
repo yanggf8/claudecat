@@ -1,7 +1,6 @@
 //! explore：量化 Claude 若無地圖時的探索成本 vs 地圖成本
 //! 作為長期指標：`claudecat track <file>` 把指標寫進文件的長期指標表
-use crate::model::ProjectMap;
-use crate::outline::render_markdown;
+use crate::model::{MapProfile, ProjectMap};
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
@@ -35,7 +34,11 @@ fn est_tokens_from_loc(loc: usize) -> usize {
 }
 
 pub fn compute(map: &ProjectMap) -> ExploreMetrics {
-    let map_md = render_markdown(map);
+    compute_with_profile(map, MapProfile::Full)
+}
+
+pub fn compute_with_profile(map: &ProjectMap, profile: MapProfile) -> ExploreMetrics {
+    let map_md = crate::outline::render_with_profile(map, profile);
     let map_chars = map_md.chars().count();
     let map_tokens = map_chars / 4;
     let read_tokens = est_tokens_from_loc(map.total_loc);
@@ -125,9 +128,11 @@ pub fn row_md(m: &ExploreMetrics) -> String {
     )
 }
 
-/// 把指標追加（或更新當天同專案那一列）到文件的「長期指標」表格。
+/// 把多個指標更新進文件的「長期指標」表格：
+/// - 當天已存在且 root 在本次更新集合內的行 -> 以新值取代
+/// - 其餘歷史行保留；新 root 追加
 /// 原子寫入；回傳 (changed, file_path)。
-pub fn track_append(path: &Path, m: &ExploreMetrics) -> std::io::Result<(bool, String)> {
+pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result<(bool, String)> {
     let existing = if path.is_file() {
         fs::read_to_string(path).unwrap_or_default()
     } else {
@@ -138,32 +143,56 @@ pub fn track_append(path: &Path, m: &ExploreMetrics) -> std::io::Result<(bool, S
         "{}\n\n| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省% | top-10 覆蓋% | 覆蓋上限% |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n",
         TRACK_SECTION
     );
-    let row = row_md(m) + "\n";
 
-    let mut new_content = String::new();
-    let changed;
+    // 解析既有表格資料列（`|` 開頭）
+    let mut old_rows: Vec<String> = Vec::new();
     if let Some(b) = existing.find(TRACK_SECTION) {
-        // 取代既有表格（保留 section 標題與表頭，重寫資料列）
-        let prefix = &existing[..b];
-        new_content.push_str(prefix);
-        // 去除舊表格（到檔案尾，因為 section 在尾端）
-        new_content.push_str(&header);
-        new_content.push_str(&row);
-        changed = new_content != existing;
-    } else {
-        let mut out = existing.clone();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
+        for line in existing[b..].lines() {
+            let t = line.trim();
+            if t.starts_with('|') && !t.starts_with("|---") && !t.starts_with("| 日期") {
+                old_rows.push(t.to_string());
+            }
         }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&header);
-        out.push_str(&row);
-        new_content = out;
-        changed = true;
     }
 
+    let keep: Vec<String> = old_rows
+        .into_iter()
+        .filter(|row| {
+            // 保留不含「今天+本次 root」的行
+            for m in metrics.iter() {
+                if row.contains(&m.date) && row.contains(&m.root) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let prefix = if let Some(b) = existing.find(TRACK_SECTION) {
+        existing[..b].to_string()
+    } else {
+        let mut p = existing.clone();
+        if !p.is_empty() && !p.ends_with('\n') {
+            p.push('\n');
+        }
+        if !p.is_empty() {
+            p.push('\n');
+        }
+        p
+    };
+
+    let mut table = String::new();
+    table.push_str(&header);
+    for r in &keep {
+        table.push_str(r);
+        table.push('\n');
+    }
+    for m in metrics {
+        table.push_str(&row_md(m));
+        table.push('\n');
+    }
+    let new_content = format!("{prefix}{table}");
+    let changed = new_content != existing;
     if changed {
         let tmp = path.with_extension("track.tmp");
         let mut f = fs::File::create(&tmp)?;
@@ -172,4 +201,9 @@ pub fn track_append(path: &Path, m: &ExploreMetrics) -> std::io::Result<(bool, S
         fs::rename(&tmp, path)?;
     }
     Ok((changed, path.to_string_lossy().into_owned()))
+}
+
+/// 相容舊 API（單 repo）
+pub fn track_append(path: &Path, m: &ExploreMetrics) -> std::io::Result<(bool, String)> {
+    track_update(path, &[m])
 }

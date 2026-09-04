@@ -1,8 +1,19 @@
 //! Project map rendering: markdown section for CLAUDE.md / human output
-use crate::model::ProjectMap;
+use crate::model::{MapProfile, ProjectMap};
 use crate::walk::tree_lines;
 
 pub fn render_markdown(map: &ProjectMap) -> String {
+    render_with_profile(map, MapProfile::Full)
+}
+
+pub fn render_with_profile(map: &ProjectMap, profile: MapProfile) -> String {
+    if profile == MapProfile::Mini {
+        return render_mini(map);
+    }
+    render_full(map)
+}
+
+fn render_full(map: &ProjectMap) -> String {
     let mut s = String::new();
     s.push_str("## Project Map (auto-maintained by claudecat)\n");
     s.push_str(&format!("- **Root**: `{}`\n", map.root));
@@ -100,5 +111,48 @@ pub fn render_markdown(map: &ProjectMap) -> String {
     }
 
     s.push_str(&format!("\n*Generated at {} by claudecat* — facts from manifests + AST, no inference.\n", map.generated_at));
+    s
+}
+
+fn render_mini(map: &ProjectMap) -> String {
+    let mut s = String::new();
+    s.push_str("## Project Map (auto-maintained by claudecat) — Mini\n");
+    let bits: Vec<String> = vec![
+        Some(map.meta.project_type.clone()).filter(|x| !x.is_empty()),
+        Some(map.meta.language.clone()).filter(|x| !x.is_empty()),
+        Some(map.meta.framework.clone()).filter(|x| !x.is_empty()),
+        Some(map.meta.package_manager.clone()).filter(|x| !x.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    s.push_str(&format!("- **About**: {}\n", bits.join(" · ")));
+    if !map.meta.entry_points.is_empty() {
+        s.push_str(&format!("- **Entry points**: {}\n", map.meta.entry_points.join(", ")));
+    }
+    if let Some(c) = &map.meta.run_command {
+        s.push_str(&format!("- **Run**: `{}`\n", c));
+    }
+    if let Some(c) = &map.meta.build_command {
+        s.push_str(&format!("- **Build**: `{}`\n", c));
+    }
+    let top = crate::walk::tree_lines(&map.dir_stats, 1, 6).join("; ");
+    if !top.is_empty() {
+        s.push_str(&format!("- **Structure**: {}\n", top));
+    }
+    if !map.deps.is_empty() {
+        let dep_bits: Vec<String> = map
+            .deps
+            .iter()
+            .map(|g| format!("{}: {}", g.ecosystem, g.deps.iter().take(8).cloned().collect::<Vec<_>>().join(", ")))
+            .collect();
+        s.push_str(&format!("- **Deps**: {}\n", dep_bits.join("; ")));
+    }
+    if !map.guardrails.is_empty() {
+        s.push_str("- **Guardrails**: ");
+        s.push_str(&map.guardrails.join(" | "));
+        s.push('\n');
+    }
+    s.push_str(&format!("\n*Mini map — {}\n", map.generated_at));
     s
 }

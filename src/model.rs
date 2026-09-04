@@ -53,7 +53,38 @@ pub struct ProjectMap {
     pub key_files: Vec<FileInfo>,
     pub deps: Vec<DepGroup>,
     pub guardrails: Vec<String>,
+    pub profile_used: MapProfile,
     pub excluded_paths: Vec<String>,
     pub generated_at: String,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub enum MapProfile {
+    #[default]
+    #[serde(rename = "full")]
+    Full,
+    #[serde(rename = "mini")]
+    Mini,
+}
+
+impl MapProfile {
+    pub fn is_mini(&self) -> bool {
+        matches!(self, MapProfile::Mini)
+    }
+}
+
+/// auto：依專案規模選（小專案用迷你地圖，避免負效益）
+pub fn resolve_profile(total_loc: usize, _total_files: usize, flag: Option<MapProfile>) -> MapProfile {
+    match flag {
+        Some(MapProfile::Mini) | Some(MapProfile::Full) => flag.unwrap(),
+        _ => {
+            // 讀完整個專案 <300 行時，地圖反而比直接讀貴 -> 用迷你地圖
+            if total_loc < 300 {
+                MapProfile::Mini
+            } else {
+                MapProfile::Full
+            }
+        }
+    }
 }

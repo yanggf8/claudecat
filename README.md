@@ -21,16 +21,24 @@ cargo build --release            # 產生 target/release/claudecat（單一二�
 ## 使用
 
 ```bash
-claudecat scan                   # 輸出導航地圖（markdown）
+claudecat scan                   # 輸出導航地圖（markdown，auto 依規模選樣式）
 claudecat scan --format json     # JSON 輸出
 claudecat scan --format text     # 純文字輸出
+claudecat scan --map mini        # 強制迷你地圖（小專案省 token）
+claudecat scan --map full        # 強制完整導航地圖
 claudecat update                 # 更新 CLAUDE.md 的 claudecat 自動區塊（原子寫入）
 claudecat update --dry-run       # 只看會不會變，不寫入
 claudecat explore                # 量化探索成本（地圖 token vs 全讀 token）
 claudecat explore --json         # 機器可讀指標輸出
 claudecat track SESSION-EVIDENCE.md  # 把指標寫入長期指標表（原子、同日不重複）
+claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
+claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
 claudecat scan --root /path/to/project
 ```
+
+**迷你地圖（auto）**：專案 <300 LOC 時，讀全部比導航地圖便宜，`auto` 會自動改用
+15 行內的迷你地圖（About/Entry/Run/Build/Structure/Deps/Guardrails），避免負效益。
+`--map mini|full` 可手動覆蓋。
 
 ### 對 Claude Code 的使用建議
 

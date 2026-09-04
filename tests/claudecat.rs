@@ -142,3 +142,54 @@ fn track_appends_and_updates_same_day_row() {
     let content2 = fs::read_to_string(&target).unwrap();
     assert_eq!(content2.matches(m.date.as_str()).count(), 1);
 }
+
+#[test]
+fn auto_profile_picks_mini_for_small_project() {
+    let dir = temp_project();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("Cargo.toml"), "[package]\nname=\"tiny\"\n").unwrap();
+    fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let map = claudecat_lib_scan(&dir);
+    let profile = claudecat::model::resolve_profile(map.total_loc, map.total_files, None);
+    assert!(profile.is_mini(), "small project should resolve to Mini, got {:?}", profile);
+    let md = claudecat::outline::render_with_profile(&map, profile);
+    assert!(md.contains("Mini"));
+    assert!(!md.contains("Key files & symbols"), "mini must skip symbols");
+}
+
+#[test]
+fn auto_profile_picks_full_for_large_project() {
+    let dir = temp_project();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("Cargo.toml"), "[package]\nname=\"big\"\n").unwrap();
+    let mut body = String::from("fn main() {}\n");
+    for i in 0..500 {
+        body.push_str(&format!("pub fn f{i}() -> usize {{ {i} }}\n"));
+    }
+    fs::write(dir.join("src/main.rs"), &body).unwrap();
+    let map = claudecat_lib_scan(&dir);
+    let profile = claudecat::model::resolve_profile(map.total_loc, map.total_files, None);
+    assert!(!profile.is_mini(), "large project should resolve to Full");
+}
+
+#[test]
+fn track_update_handles_multiple_repos() {
+    let dir = temp_project();
+    let target = dir.join("METRICS.md");
+    let r1 = dir.join("repo1");
+    let r2 = dir.join("repo2");
+    for r in [&r1, &r2] {
+        fs::create_dir_all(r.join("src")).unwrap();
+        fs::write(r.join("Cargo.toml"), "[package]\nname=\"r\"\n").unwrap();
+        fs::write(r.join("src/main.rs"), "fn main() {}\n").unwrap();
+    }
+    let m1 = claudecat::explore::compute(&claudecat_lib_scan(&r1));
+    let m2 = claudecat::explore::compute(&claudecat_lib_scan(&r2));
+    let refs = vec![&m1, &m2];
+    let (changed, _) = claudecat::explore::track_update(&target, &refs).unwrap();
+    assert!(changed);
+    let content = fs::read_to_string(&target).unwrap();
+    assert_eq!(content.matches("| 日期").count(), 1, "single header expected");
+    assert_eq!(content.matches(&format!("`{}`", r1.display())).count(), 1);
+    assert_eq!(content.matches(&format!("`{}`", r2.display())).count(), 1);
+}
