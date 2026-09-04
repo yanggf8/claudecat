@@ -97,11 +97,19 @@ fn explore_report_has_savings_section() {
     let dir = temp_project();
     fs::write(dir.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
     fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(dir.join("src/main.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+    // 足夠大的 fixture（>60 行），地圖才會低於全讀成本
+    let mut body = String::from("use std::collections::HashMap;\n\nfn main() {}\n");
+    for i in 0..80 {
+        body.push_str(&format!("pub fn worker_{i}() -> usize {{ {i} }}\n"));
+    }
+    fs::write(dir.join("src/main.rs"), &body).unwrap();
     let map = claudecat_lib_scan(&dir);
-    let report = claudecat::explore::render_explore(&map);
+    let m = claudecat::explore::compute(&map);
+    let report = claudecat::explore::render(&m);
     assert!(report.contains("Estimated token savings"));
     assert!(report.contains("覆蓋率"));
+    assert!(m.read_tokens > 0 && m.map_tokens > 0);
+    assert!(m.savings_pct > 0.0);
 }
 
 fn claudecat_lib_scan(root: &std::path::Path) -> claudecat::model::ProjectMap {
@@ -111,4 +119,26 @@ fn claudecat_lib_scan(root: &std::path::Path) -> claudecat::model::ProjectMap {
     map.deps = deps;
     map.generated_at = "2026-09-05T00:00:00Z".into();
     map
+}
+
+
+#[test]
+fn track_appends_and_updates_same_day_row() {
+    let dir = temp_project();
+    let target = dir.join("SESSION-EVIDENCE.md");
+    fs::write(dir.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let map = claudecat_lib_scan(&dir);
+    let m = claudecat::explore::compute(&map);
+    let (changed, _) = claudecat::explore::track_append(&target, &m).unwrap();
+    assert!(changed);
+    let content1 = fs::read_to_string(&target).unwrap();
+    assert!(content1.contains("## 長期指標 (claudecat explore)"));
+    assert!(content1.contains(m.date.as_str()));
+    // same-day second run: row replaced, not duplicated
+    let (changed2, _) = claudecat::explore::track_append(&target, &m).unwrap();
+    assert!(!changed2, "same date+project row should be idempotent");
+    let content2 = fs::read_to_string(&target).unwrap();
+    assert_eq!(content2.matches(m.date.as_str()).count(), 1);
 }

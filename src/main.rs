@@ -41,6 +41,20 @@ enum Commands {
         /// 要解析符號的最大檔案數
         #[arg(long, default_value_t = 50)]
         top_files: usize,
+        /// 以 JSON 輸出指標（機器可讀）
+        #[arg(long)]
+        json: bool,
+    },
+    /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
+    Track {
+        /// 目標 markdown 檔（例如 SESSION-EVIDENCE.md）
+        file: PathBuf,
+        /// 專案根目錄
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// 要解析符號的最大檔案數
+        #[arg(long, default_value_t = 50)]
+        top_files: usize,
     },
     /// 更新 CLAUDE.md 的 claudecat 自動區塊
     Update {
@@ -153,9 +167,37 @@ fn main() {
                 },
             }
         }
-        Commands::Explore { root, top_files } => {
+        Commands::Explore { root, top_files, json } => {
             let map = analyze(&root, top_files);
-            println!("{}", explore::render_explore(&map));
+            let m = explore::compute(&map);
+            if json {
+                match serde_json::to_string_pretty(&m) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("JSON serialization failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                println!("{}", explore::render(&m));
+            }
+        }
+        Commands::Track { file, root, top_files } => {
+            let map = analyze(&root, top_files);
+            let m = explore::compute(&map);
+            match explore::track_append(&file, &m) {
+                Ok((changed, path)) => {
+                    println!(
+                        "{} {}",
+                        if changed { "Recorded metric ->" } else { "Up to date:" },
+                        path
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Failed to track metric into {}: {e}", file.display());
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Update { root, dry_run, top_files } => {
             let map = analyze(&root, top_files);

@@ -27,6 +27,8 @@ claudecat scan --format text     # 純文字輸出
 claudecat update                 # 更新 CLAUDE.md 的 claudecat 自動區塊（原子寫入）
 claudecat update --dry-run       # 只看會不會變，不寫入
 claudecat explore                # 量化探索成本（地圖 token vs 全讀 token）
+claudecat explore --json         # 機器可讀指標輸出
+claudecat track SESSION-EVIDENCE.md  # 把指標寫入長期指標表（原子、同日不重複）
 claudecat scan --root /path/to/project
 ```
 
