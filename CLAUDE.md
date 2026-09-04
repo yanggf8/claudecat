@@ -1,241 +1,45 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本檔案提供 Claude Code (claude.ai/code) 在本 repo 工作時的指引。
+`<!-- claudecat:auto:begin -->
+## Project Map (auto-maintained by claudecat)
+- **Root**: `/home/yanggf/a/claudecat`
+- **Type**: Rust application/library
+- **Language**: Rust
+- **Package manager**: cargo
+- **Entry points**: claudecat (src/main.rs), src/main.rs
+- **Run**: `cargo run`
+- **Build**: `cargo build`
+- **Scale**: 17 files, 1553 LOC [config(1), rust(16)]
 
-## Project Overview
-
-**ClaudeCat** is a **Deep Analysis CLI Tool** for Claude Code — it goes beyond what `/init` provides by using AST-based parsing, cross-file flow tracing, and confidence-scored pattern detection to give Claude Code deep project awareness.
-
-**Positioning**: `/init` tells Claude **what** your project is. ClaudeCat tells Claude **how** your project actually works.
-
-**Current Status**: Pivoting from MCP server to **CLI tool + Claude Code skill**. Core analysis engine is production-ready; new delivery interface is in planning.
-
-## Project Structure
-
+### Directory structure
 ```
-/home/yanggf/a/claudecat/
-├── src/
-│   ├── core/                 # Core analysis engine
-│   │   ├── project-detector.ts      # AST-based pattern detection
-│   │   ├── claude-md-maintainer.ts  # CLAUDE.md maintenance
-│   │   ├── context-watcher.ts       # File change monitoring
-│   │   └── proactive-context-engine.ts # Main engine orchestrator
-│   ├── cli/                  # CLI command layer
-│   │   ├── args.ts           # Argument parsing
-│   │   ├── commands.ts       # Command implementations
-│   │   └── formatter.ts      # Terminal output formatting
-│   ├── cloud/                # Cloud storage layer
-│   │   ├── turso-client.ts   # Turso DB client
-│   │   ├── config-store.ts   # ~/.claudecat/config.json
-│   │   ├── project-identifier.ts # Git remote → project ID
-│   │   ├── machine-id.ts     # Machine fingerprint
-│   │   └── pattern-merger.ts # Multi-machine pattern merging
-│   ├── types/                # TypeScript type definitions
-│   ├── cli.ts                # CLI entry point
-│   ├── server.ts             # MCP server (legacy)
-│   ├── stdio-mcp-server.ts   # Stdio MCP server (legacy)
-│   └── stdio-mcp-logger.ts   # Session logging (legacy)
-├── scripts/                  # Installation and testing scripts
-├── dist/                     # Compiled JavaScript output
-└── ~/.claude/skills/claudecat/ # Claude Code skill (global)
+src/ (10 files, 2432 LOC)
+tests/ (6 files, 638 LOC)  [common(1)]
 ```
 
-## Core Concept
+### Key files & symbols
+- `src/manifest.rs` (340 LOC, rust)  — 5:fn detect_project_meta; 104:fn merge_meta; 129:fn parse_package_json; 184:fn parse_cargo_toml; 224:fn parse_pyproject; 265:fn parse_requirements; 287:fn parse_go_mod; 309:fn infer_framework
+- `src/walk.rs` (191 LOC, rust)  — 7:const CODE_EXT; 26:fn lang_for_ext; 31:const ALWAYS_EXCLUDE; 38:fn collect_files; 82:fn count_loc; 94:fn analyze_project; 154:fn tree_lines
+- `src/symbols.rs` (183 LOC, rust)  — 5:fn lang_for; 19:fn interesting_kinds; 37:fn name_of; 108:fn is_plain_name; 112:fn kind_label; 135:const FUNCTION_LIKE; 141:fn is_nested; 157:fn extract_symbols
+- `src/main.rs` (173 LOC, rust)  — 17:struct Cli; 23:enum Commands; 60:enum Format; 66:fn now_iso; 83:fn civil_from_days; 96:fn analyze; 135:fn main
+- `tests/claudecat.rs` (103 LOC, rust)  — 5:fn manifest_detects_rust_and_deps; 18:fn symbols_extract_rust_items; 28:fn symbols_skip_nested_fn_noise; 39:fn claude_md_update_is_idempotent_and_atomic; 54:fn temp_project; 61:fn rand_suffix; 67:fn guardrails_preserved_and_seeded; 87:fn guardrails_load_from_file; 96:fn explore_report_has_savings_section; 107:fn claudecat_lib_scan
+- `src/outline.rs` (98 LOC, rust)  — 5:fn render_markdown
+- `src/claude_md.rs` (73 LOC, rust)  — 5:const BEGIN_MARKER; 6:const END_MARKER; 8:fn find_claude_md; 27:fn update_section
+- `src/explore.rs` (53 LOC, rust)  — 5:fn est_tokens_from_loc; 9:fn render_explore
+- `src/model.rs` (53 LOC, rust)  — 5:struct ProjectMeta; 18:struct Symbol; 25:struct FileInfo; 33:struct DepGroup; 39:struct DirStat; 45:struct ProjectMap
+- `tests/walk_test.rs` (52 LOC, rust)  — 1:mod common; 5:fn analyze_project_counts_files_loc_and_langs; 36:fn top_n_limits_key_files; 47:fn tree_lines_compacts_structure
+- `tests/cli_test.rs` (51 LOC, rust)  — 1:mod common; 4:fn bin; 9:fn scan_json_is_valid_and_complete; 25:fn update_dry_run_does_not_write; 39:fn update_writes_section_and_is_idempotent
+- `src/guardrails.rs` (44 LOC, rust)  — 5:const GR_BEGIN; 6:const GR_END; 9:fn extract; 23:fn load; 41:fn seed_block; 47:fn has_marker
+- `tests/manifest_test.rs` (40 LOC, rust)  — 1:mod common; 5:fn package_json_full_parse; 21:fn pyproject_and_requirements; 35:fn go_mod_detection
+- `tests/symbols_test.rs` (40 LOC, rust)  — 1:mod common; 5:fn typescript_interfaces_types_enums_classes; 17:fn python_functions_classes_decorators; 28:fn go_functions_methods; 38:fn c_functions_structs
+- `Cargo.toml` (29 LOC, config)
 
-ClaudeCat is a **deep analysis layer** that complements Claude Code's built-in `/init` command:
+### Dependencies (declared)
+- `crates.io`: clap, ignore, serde, serde_json, tempfile, toml, tree-sitter, tree-sitter-c, tree-sitter-cpp, tree-sitter-go, tree-sitter-javascript, tree-sitter-python, tree-sitter-rust, tree-sitter-typescript
 
-| Capability | `/init` | ClaudeCat |
-|---|---|---|
-| Project structure & config scanning | Yes | Inherited |
-| AST-based pattern detection | No | Yes |
-| Cross-file execution flow tracing | No | Yes |
-| Confidence-scored patterns with evidence | No | Yes |
-| Dependency graph & symbol resolution | No | Yes |
-| Architectural pattern detection (MVC, DI, middleware) | Shallow | Deep |
-| Ongoing re-analysis on code changes | No | Yes |
-
-### Design Principles
-1. **Deep over Broad** - AST-based analysis of HOW your project implements features, not just what frameworks exist
-2. **Evidence-Based** - Every detected pattern includes confidence scores and source file citations
-3. **Complementary** - Enhances `/init` output rather than replacing it; appends implementation-level insights
-4. **On-Demand** - CLI tool and Claude Code skill, invoked when deeper analysis is needed
-
-## Architecture: Analysis Pipeline
-
-The core analysis flows through three layers: **Detection → Maintenance → Delivery**
-
-### 1. Single-File Detection (`src/core/project-detector.ts` — 710 lines)
-- Entry: `EnhancedProjectDetector.detectCurrentContext()`
-- Scans all JS/TS files via glob, reads package.json
-- AST-based pattern matching for auth, API response, and error handling
-- Each pattern produces `PatternDetectionSignal` with confidence score and evidence
-
-### 2. Cross-File Analysis (`src/core/` — 5 files, ~2500 lines)
-- `ast-parser.ts` → parses imports/exports per file
-- `dependency-graph-builder.ts` → builds full project dependency graph
-- `symbol-resolver.ts` → resolves cross-file symbol references
-- `execution-flow-tracer.ts` → traces multi-file call chains (MVC, middleware, DI)
-- `cross-file-pattern-detector.ts` → detects architectural patterns
-- Orchestrated by `enhanced-project-detector.ts` which combines single-file + cross-file results
-
-### 3. Maintenance (`src/core/claude-md-maintainer.ts`)
-- Reads existing CLAUDE.md, extracts `<!-- claudecat:auto:begin -->` section
-- Generates new section from `ProjectContextInfo`
-- Atomic write with rollback on failure; only writes when `hasSignificantChanges()` is true
-
-### 4. Orchestration (`src/core/proactive-context-engine.ts`)
-- Wires Detection + Maintenance + file watching (chokidar via `ContextWatcher`)
-- Re-triggers detection on file changes
-- Emits events: `context-updated`, `context-error`, `startup-complete`
-
-### 5. Delivery (pivoting)
-- Current: `src/stdio-mcp-server.ts` — 5 MCP tools over stdio
-- Planned: `src/cli.ts` (CLI) + `skill/` (Claude Code skill)
-
-## Key Types
-
-- `ProjectContextInfo` (`src/types/patterns.ts`) — main output: detected patterns, project metadata, confidence scores
-- `ImplementationPatterns` — auth, API response, and error handling pattern details
-- `PatternDetectionSignal` — individual detection with confidence, evidence file, and pattern type
-- `CrossFileAnalysisResult` (`src/types/cross-file-analysis.ts`) — dependency graph, symbols, execution paths
-
-## Technology Stack
-
-- **Language**: TypeScript/JavaScript (Node.js)
-- **AST Parsing**: @typescript-eslint/typescript-estree
-- **File Discovery**: glob, chokidar
-- **Schema Validation**: zod
-- **Interfaces**: CLI tool (primary), Claude Code skill (planned), MCP server (legacy)
-
-## Installation & Usage
-
-### CLI Tool (Planned - Primary Interface)
-
-```bash
-# Install globally
-npm install -g claudecat
-
-# Analyze current project (deep patterns beyond /init)
-claudecat scan
-
-# Update CLAUDE.md with deep analysis results
-claudecat update
-
-# Show detected patterns and confidence scores
-claudecat status
-```
-
-### Claude Code Skill (Planned)
-
-```bash
-# Inside Claude Code session
-/claudecat              # Run deep analysis
-/claudecat scan         # Scan only, don't update CLAUDE.md
-/claudecat status       # Show current pattern detection status
-```
-
-### MCP Server (Legacy - Still Functional)
-
-```bash
-npm install && npm run build
-./scripts/install.sh
-claude
-```
-
-### Development Commands
-
-```bash
-npm run build                          # Compile TypeScript to dist/
-npm run dev                            # Watch mode (tsx watch)
-npm run typecheck                      # Type-check without emitting
-npm run test                           # Jest tests
-npm run test:cross-file                # Cross-file analysis integration test
-node scripts/run-accuracy-test.js      # Accuracy validation against test projects
-node scripts/test-detection.js         # Quick pattern detection smoke test
-./scripts/install.sh                   # Register MCP server with Claude Code
-./scripts/uninstall.sh                 # Remove MCP server registration
-```
-
-## Core Engine Validation (Phases 1-10 Complete)
-
-The analysis engine has been validated across 10 phases of development. Full phase history is in `ARCHITECTURE-STUDY.md`.
-
-### Key Metrics
-- **Accuracy**: 25% → 75% on Express + Passport pattern detection (100% on core patterns)
-- **Performance**: 57ms processing (68% faster than 181ms baseline), 404 files/second
-- **Cross-File**: 43+ files/sec, 900+ symbols resolved, 16 execution paths traced
-- **Reliability**: 100MB log rotation, session isolation, EPIPE loop prevention
-
-## Project Status
-
-**Core Engine**: Production-ready (Phases 1-10 complete). Full results in `ARCHITECTURE-STUDY.md`.
-
-## Completed Phases
-
-- **Phase 11: CLI Tool** — `claudecat scan/update/status/login/sync` commands, zero new deps for CLI layer
-- **Phase 12: Cloud Storage (Turso)** — cross-machine pattern sync via libSQL, per-project sync history
-- **Phase 13: Claude Code Skill** — `/claudecat` slash command installed at `~/.claude/skills/claudecat/`
-- **Phase 14: Team Sharing** — supported via shared Turso credentials; no additional code needed
-- **Phase 15: Multi-User Pattern Merging** — recency-weighted merge across machines, `--force` for local-only sync
-
-## Future
-- **Additional Languages** — Python, Go, Rust AST support based on demand
-- **npm publish** — package for public distribution
-
-**Last Updated**: 2026-03-30
-
-<!-- claudecat:auto:begin:project-context -->
-## Project Context (Auto-Maintained by ClaudeCat)
-
-**Project Type**: Express API  
-**Language**: TypeScript  
-**Framework**: Express.js  
-**Package Manager**: npm
-
-### Implementation Patterns
-
-#### Authentication Implementation (100% - High Confidence)
-- **User Property**: `req.auth`
-- **Token Storage**: Unknown
-- **Error Response**: Unknown
-- **Middleware Pattern**: app.use(auth)
-  Evidence: /debug-pattern-matching.js: req.auth usage (70% confidence)
-
-#### API Response Implementation (100% - High Confidence)
-- **Success Format**: bare object
-- **Error Format**: Unknown
-- **Status Codes**: default 200/500
-- **Wrapper Pattern**: conditional
-  Evidence: /test-performance.js: bare object response (100% confidence), /test-cross-file-analysis.js: {result: any} format (100% confidence), /final-validation.js: bare object response (100% confidence)
-
-#### Error Handling Implementation (100% - High Confidence)
-- **Catch Pattern**: global middleware
-- **Error Structure**: Unknown
-- **Logging Integration**: integrated
-- **Propagation Style**: Unknown
-  Evidence: /test-performance.js: global error handler
-
-### Development Information
-
-**Scripts**:
-- dev: `tsx watch src/stdio-mcp-server.ts`
-- build: `tsc`
-- test: `jest`
-
-**Key Directories**:
-  - src/ (source code)
-  - src/types/ (TypeScript types)
-
-**Core Dependencies**: @libsql/client, @modelcontextprotocol/sdk, @typescript-eslint/typescript-estree, chokidar, glob, zod
-
-### Critical Guardrails
-
-✅ **ALWAYS use `req.auth`** for authenticated user data
-✅ **Use bare object responses** - No wrapper format detected
-✅ **Follow `global middleware`** error handling pattern
-
-**Last Updated**: 2026-03-30T09:52:49.966Z  
-**Detection Quality**: Implementation patterns auto-detected with confidence scoring
-
-*This section is automatically maintained by ClaudeCat. All patterns include confidence scores and evidence citations.*
-<!-- claudecat:auto:end:project-context -->
+*Generated at 2026-09-04T16:50:51Z by claudecat* — facts from manifests + AST, no inference.
+<!-- claudecat:auto:end -->
+<!-- claudecat:guardrails:begin -->
+<!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 Claude Code 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->
+<!-- claudecat:guardrails:end -->

@@ -1,0 +1,104 @@
+//! Project map rendering: markdown section for CLAUDE.md / human output
+use crate::model::ProjectMap;
+use crate::walk::tree_lines;
+
+pub fn render_markdown(map: &ProjectMap) -> String {
+    let mut s = String::new();
+    s.push_str("## Project Map (auto-maintained by claudecat)\n");
+    s.push_str(&format!("- **Root**: `{}`\n", map.root));
+    if !map.meta.project_type.is_empty() {
+        s.push_str(&format!("- **Type**: {}\n", map.meta.project_type));
+    }
+    if !map.meta.language.is_empty() {
+        s.push_str(&format!("- **Language**: {}\n", map.meta.language));
+    }
+    if !map.meta.framework.is_empty() {
+        s.push_str(&format!("- **Framework**: {}\n", map.meta.framework));
+    }
+    if !map.meta.package_manager.is_empty() {
+        s.push_str(&format!("- **Package manager**: {}\n", map.meta.package_manager));
+    }
+    if !map.meta.entry_points.is_empty() {
+        s.push_str(&format!("- **Entry points**: {}\n", map.meta.entry_points.join(", ")));
+    }
+    if let Some(c) = &map.meta.run_command {
+        s.push_str(&format!("- **Run**: `{}`\n", c));
+    }
+    if let Some(c) = &map.meta.build_command {
+        s.push_str(&format!("- **Build**: `{}`\n", c));
+    }
+    let langs: Vec<String> = map
+        .languages
+        .iter()
+        .map(|(k, v)| format!("{k}({v})"))
+        .collect();
+    s.push_str(&format!(
+        "- **Scale**: {} files, {} LOC [{}]\n",
+        map.total_files,
+        map.total_loc,
+        langs.join(", ")
+    ));
+    if !map.meta.scripts.is_empty() {
+        let scripts: Vec<String> = map
+            .meta
+            .scripts
+            .iter()
+            .map(|(k, v)| format!("`{}`: {}", k, v))
+            .collect();
+        s.push_str(&format!("- **Scripts**: {}\n", scripts.join(" · ")));
+    }
+
+    s.push_str("\n### Directory structure\n```\n");
+    for line in tree_lines(&map.dir_stats, 2, 40) {
+        s.push_str(&line);
+        s.push('\n');
+    }
+    s.push_str("```\n");
+
+    if !map.key_files.is_empty() {
+        s.push_str("\n### Key files & symbols\n");
+        for f in &map.key_files {
+            let syms = if f.symbols.is_empty() {
+                String::new()
+            } else {
+                let names: Vec<String> = f
+                    .symbols
+                    .iter()
+                    .map(|sym| format!("{}:{} {}", sym.line, sym.kind, sym.name))
+                    .collect();
+                format!("  — {}", names.join("; "))
+            };
+            s.push_str(&format!(
+                "- `{}` ({} LOC, {}){}\n",
+                f.path,
+                f.loc,
+                f.language.clone().unwrap_or_else(|| "?".into()),
+                syms
+            ));
+        }
+    }
+
+    if !map.deps.is_empty() {
+        s.push_str("\n### Dependencies (declared)\n");
+        for g in &map.deps {
+            if g.deps.is_empty() {
+                continue;
+            }
+            let take = g.deps.len().min(30);
+            s.push_str(&format!("- `{}`: {}\n", g.ecosystem, g.deps[..take].join(", ")));
+            if g.deps.len() > take {
+                s.push_str(&format!("  … +{} more\n", g.deps.len() - take));
+            }
+        }
+    }
+
+    if !map.guardrails.is_empty() {
+        s.push_str("\n### 技術決策 / Guardrails（開發者維護，claudecat 永不覆寫）\n");
+        for g in &map.guardrails {
+            s.push_str(&format!("- {g}\n"));
+        }
+    }
+
+    s.push_str(&format!("\n*Generated at {} by claudecat* — facts from manifests + AST, no inference.\n", map.generated_at));
+    s
+}

@@ -1,144 +1,77 @@
-# Cortex Goals: Proactive Project Awareness for Claude Code
+# ClaudeCat V2 目標：帶給 Claude Code 一張「可信任的專案地圖」
 
-## Primary Mission
+## 重新定位（V2）
 
-Transform Claude Code from a context-lacking assistant to a project-aware development partner through **proactive project awareness** - ensuring Claude Code understands the project's implementation patterns from startup, before any queries are asked.
+### V1 的教訓（為什麼要重定位）
+V1 把目標設定為「偵測實作 pattern（auth/API response/error handling）並給信心分數」，
+結果產生三個致命問題：
+1. **假信心**：對 `Unknown` 仍標「100% High Confidence」，誤導 Claude Code。
+2. **誤判**：把除錯腳本當專案慣例（本 repo 被誤判成 Express API，並產生
+   `ALWAYS use req.auth` 的錯誤 guardrail）。
+3. **介面錯位**：MCP server 持續「主動維護」CLAUDE.md，產出更多雜訊而非精確資訊。
 
-## The 80/20 Problem We're Solving
+### V2 核心命題
+> Claude Code 缺的不是「更多程式碼」，而是一張**精確、可信任、精簡的專案地圖**。
+> ClaudeCat 的職責是**自動產出這張地圖**——入口、模組、依賴、符號、專案事實——
+> 放進 CLAUDE.md 供啟動時使用，並提供 CLI 隨叫隨查。
 
-### 🎯 **80% Impact (What We're Fixing)**
-- Claude Code suggestions that break existing architecture
-- Missing critical dependencies causing runtime errors  
-- Code inconsistent with project patterns and conventions
-- Development friction and eroded trust in AI assistance
-- Constant need to correct Claude Code's architectural misconceptions
-
-### 🔍 **20% Root Cause (What We're Targeting)**
-**Lack of project awareness at startup** - Claude Code doesn't know how the project implements authentication, API responses, and error handling before developers ask questions.
-
-## Core Goals
-
-### Goal 1: **Proactive Implementation Pattern Detection**
-**Automatically detect HOW the project implements critical patterns before Claude Code needs them**
-
-**What This Means:**
-- Detect how authentication actually works (`req.user` vs `req.context.user`, cookie vs header tokens)
-- Discover actual API response format (`{data: any}` vs `{result: any}` vs bare objects)
-- Identify real error handling patterns (`{error: string}` vs `{message: string}`, global middleware vs try/catch)
-- Focus on implementation details that prevent wrong suggestions
-
-**Success Criteria:**
-- 85%+ confidence in detecting authentication user property patterns
-- 90%+ accuracy in identifying API response wrapper formats
-- 80%+ confidence in error handling structure detection
-- Evidence-based detection with file path citations
-
-### Goal 2: **Startup Project Awareness**
-**Ensure Claude Code knows project implementation patterns from the moment it starts**
-
-**What This Means:**
-- Proactive CLAUDE.md maintenance with implementation patterns before first query
-- Boot-time project awareness that prevents wrong assumptions
-- Critical guardrails clearly documented (e.g., "NEVER use localStorage for tokens")
-- Prevention approach: context ready before problems happen
-
-**Success Criteria:**
-- CLAUDE.md updated within 10 seconds of project changes
-- Implementation patterns documented before first developer interaction
-- Critical guardrails prevent common architectural mistakes
-- Zero manual context preparation required
-
-### Goal 3: **Implementation Detail Accuracy**
-**Focus on the specific implementation details that cause wrong suggestions**
-
-**What This Means:**
-- Not just "uses JWT" but "JWT in httpOnly cookies, user in req.user, 401 errors"
-- Not just "REST API" but "{data: any} wrapper, explicit status codes, always wrapped responses"
-- Not just "error handling" but "global middleware, {error: string} format, throw exceptions"
-- Deep implementation knowledge over broad technology detection
-
-**Success Criteria:**
-- Prevent localStorage suggestions in cookie-based auth projects
-- Prevent bare object responses in wrapper-based API projects  
-- Prevent inconsistent error formats across the codebase
-- 30% reduction in implementation-specific wrong suggestions
-
-### Goal 4: **Confidence-Based Reliability**
-**Only assert implementation patterns when confident, mark uncertainty clearly**
-
-**What This Means:**
-- 60%+ confidence threshold for asserting implementation patterns
-- "Unknown" states for uncertain patterns to prevent wrong guidance
-- Evidence citations for all implementation pattern claims
-- Low-confidence warnings: "Ask before making assumptions"
-
-**Success Criteria:**
-- No false positive implementation guidance that breaks existing patterns
-- Clear uncertainty indicators when pattern detection is ambiguous
-- Evidence-backed claims with file paths supporting each assertion
-- Developer trust in pattern detection accuracy
-
-## Implementation Strategy
-
-### Phase 1: Implementation Pattern Detection Engine
-**Build the core implementation pattern detection and analysis system**
-
-**Components:**
-- **Authentication Pattern Detection**: Extract user property patterns, token storage, error formats
-- **API Response Pattern Detection**: Identify success/error formats, wrapper patterns, status code usage
-- **Error Handling Pattern Detection**: Discover catch patterns, error structures, propagation styles
-- **Evidence Collection**: File content analysis with citation tracking
-
-### Phase 2: Proactive CLAUDE.md Maintenance
-**Develop automatic project awareness system that prevents context issues**
-
-**Components:**
-- **Boot-time Context Generation**: Populate CLAUDE.md before first developer interaction
-- **Pattern Documentation**: Generate implementation-specific guidance with confidence scores
-- **Critical Guardrails**: Document project-specific constraints and patterns
-- **Atomic Updates**: Safe marker-based content updates with error recovery
-
-### Phase 3: Real-time Project Awareness Maintenance
-**Create self-updating project awareness that evolves with codebase changes**
-
-**Components:**
-- **Pattern Change Detection**: Monitor implementation file changes for pattern updates
-- **Context Freshness**: Keep CLAUDE.md current with codebase evolution
-- **Confidence Tracking**: Maintain accuracy of implementation pattern detection
-- **Reliability Monitoring**: Ensure consistent project awareness quality
-
-## Success Metrics
-
-### Implementation Pattern Accuracy Metrics
-- **Authentication Detection**: 85%+ confidence in user property patterns (`req.user` vs `req.context.user`)
-- **API Response Detection**: 90%+ accuracy in response format detection (`{data: any}` vs bare objects)
-- **Error Handling Detection**: 80%+ confidence in error structure patterns (`{error: string}` vs `{message: string}`)
-- **Evidence Quality**: All pattern assertions backed by file citations and confidence scores
-
-### Startup Awareness Metrics  
-- **Boot-time Readiness**: CLAUDE.md populated with implementation patterns before first interaction
-- **Context Freshness**: Implementation patterns updated within 10 seconds of relevant file changes
-- **Guardrail Effectiveness**: Critical warnings prevent common implementation mistakes
-- **Zero Manual Preparation**: No developer action required for project awareness
-
-### Prevention Effectiveness Metrics
-- **Wrong Suggestion Reduction**: 30% fewer implementation-specific incorrect suggestions from Claude Code
-- **Pattern Consistency**: 95%+ adherence to detected implementation patterns in suggestions
-- **First Interaction Accuracy**: Correct implementation guidance from the very first Claude Code query
-- **Architecture Alignment**: Zero localStorage suggestions in cookie-based auth projects
-
-## Vision: Implementation-Aware Claude Code
-
-**The Future State**: Claude Code that knows exactly HOW your project implements authentication, API responses, and error handling from the moment it starts - preventing wrong implementation suggestions before they happen.
-
-**The Developer Experience**: Work with Claude Code that immediately understands your project's specific patterns - suggesting `req.user` instead of `req.context.user`, `{data: any}` instead of bare objects, and never recommending localStorage in cookie-based auth projects.
-
-**The Technical Reality**: A proactive implementation pattern detection engine that automatically maintains CLAUDE.md with deep project awareness, ensuring Claude Code has accurate implementation knowledge before any developer interaction.
+地圖只包含**可驗證的事實**（manifest 宣告、AST 符號、檔案統計、依賴清單）；
+**不做執行期行為的推論式猜測**，**不標不存在的信心**。
 
 ---
 
-## Implementation Completed ✅
+## 三大目標
 
-**All goals achieved** - ClaudeCat has been fully implemented as a proactive project awareness engine that gives Claude Code startup implementation knowledge to prevent wrong suggestions from the first interaction.
+### Goal 1：可信的事實地圖
+自動產生專案輪廓，內容全部來自可驗證來源：
+- **專案類型**：語言、框架、套件管理器（來自 `package.json` / `Cargo.toml` /
+  `pyproject.toml` / `go.mod` 等 manifest）
+- **入口點**：`main`/`bin`/`scripts.start`、`main.rs`、`main.py`、`main.go`…
+- **模組樹**：pruned directory tree + 各目錄檔案數/LOC（gitignore-aware）
+- **符號清單**：tree-sitter AST 抽出主要檔案的 function/class/struct/interface/mod
+- **依賴摘要**：manifest 宣告的依賴名稱
 
-**Ready for Production**: Complete MCP server with all expert-validated reliability improvements.
+**成功標準**：掃描結果中 100% 的陳述可回溯到 manifest 或 AST 證據；
+沒有「未偵測到」卻標高信心的欄位。
+
+### Goal 2：精簡、守預算的 CLAUDE.md 自動維護
+- 自動區塊目標 **≤ 150 行**（官方建議 CLAUDE.md 約 200 行內）
+- **原子寫入**：只更新 `<!-- claudecat:auto:begin/end -->` 區塊，其餘內容不動
+- 內容有變才寫；失敗不損壞原檔案
+- 偵測不到的項目明確標「未偵測到（需人工確認）」
+
+**成功標準**：`claudecat update` 後 CLAUDE.md 保持可讀、精簡、零假信心。
+
+### Goal 3：純 Rust CLI（快速、可離線、單一二進位）
+- `claudecat scan`：輸出地圖（text / markdown / json）
+- `claudecat update`：更新 CLAUDE.md auto 區塊
+- `claudecat skill`（後續）：安裝 Claude Code skill
+- 單一靜態二進位；不需 Node、不需模型 API、不需網路
+
+**成功標準**：`cargo build --release` 產出單一二進位；在大型 repo 掃描
+sub-second 到數秒完成。
+
+---
+
+## 明確不做的事（Anti-Goals）
+
+1. ❌ **不推論執行期行為**：不對 auth 流程、API 回應格式、錯誤處理做「猜測式」偵測。
+   （「依賴清單有 passport」是事實；「401 用 {error}」是猜測——V1 死在這裡。）
+2. ❌ **不打包整個 repo**：不學 repomix/code2prompt 全量塞 context；
+   只給「地圖」，讓 Claude 自己做有目標的探索（對齊 Anthropic agentic search 策略）。
+3. ❌ **不標假信心**：沒有 Unknown→100% High Confidence。
+4. ❌ **不做 RAG / embed 索引**。
+
+## 成功度量
+
+| 項目 | 目標 |
+|---|---|
+| 地圖陳述可驗證性 | 100%（manifest/AST 可回溯） |
+| CLAUDE.md 自動區塊 | ≤ 150 行、原子更新、零假信心 |
+| 掃描速度 | 中型 repo（<5k files）< 2s |
+| 二進位 | 單一 Rust binary，`cargo build --release` 即得 |
+
+## 技術棧
+
+`tree-sitter`（AST 符號抽取）+ `ignore`（gitignore-aware 遍歷）+
+`clap`（CLI）+ `serde_json`/`toml`（manifest 解析）。
