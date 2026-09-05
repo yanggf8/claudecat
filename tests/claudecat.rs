@@ -305,3 +305,114 @@ fn cort_search_symbols_none_when_db_missing() {
     let hits = claudecat::cort::search_symbols(&dir, "auth");
     assert!(hits.is_none());
 }
+
+/// cort 索引被寫入端持 EXCLUSIVE lock（模擬 cort hook 正在索引/寫入）時，
+/// 一般唯讀 query 會 BUSY；claudecat 必須自動退回 immutable=1 仍能唯讀讀到索引。
+#[cfg(unix)]
+#[test]
+fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct EnvGuard(String, Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(&self.0, v),
+                None => std::env::remove_var(&self.0),
+            }
+        }
+    }
+
+    // 1) project + cache dir（cache 內放 cort 風格的 WAL DB）
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let db_path = cache.join(format!("{pid}.db"));
+
+    // 2) WAL mode + schema v4 相容表 + 資料（checkpoint 後資料在主檔，唯讀可直接讀）
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE projects (
+               project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+               git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+             );
+             CREATE TABLE chunks (
+               chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL,
+               symbol_name TEXT, chunk_type TEXT, start_line INTEGER NOT NULL,
+               end_line INTEGER NOT NULL, content TEXT NOT NULL, language TEXT
+             );
+             CREATE TABLE relationships (
+               source_chunk_id TEXT NOT NULL, target_chunk_id TEXT NOT NULL,
+               rel_type TEXT NOT NULL, call_site_line INTEGER, confidence_score REAL NOT NULL
+             );
+             INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, {now_ms}, 'test-extractor');
+             INSERT INTO chunks VALUES ('c1', '{pid}', 'src/lib.rs', 'alpha', 'function', 1, 3, 'pub fn alpha() {{}}', 'Rust');
+             INSERT INTO chunks VALUES ('c2', '{pid}', 'src/lib.rs', 'beta',  'function', 5, 9, 'pub fn beta() {{}}',  'Rust');
+             INSERT INTO relationships VALUES ('c2', 'c1', 'calls', 6, 1.0);"
+        ))
+        .unwrap();
+        // journal_mode 會回傳 row，須用 query_row 而非 execute_batch
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let _: (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+    }
+    let _ = fs::remove_file(format!("{}{}", db_path.display(), ".db-shm"));
+    let _ = fs::remove_file(format!("{}{}", db_path.display(), ".db-wal"));
+
+    // 3) 寫入端持 EXCLUSIVE lock，直到測試結束才釋放
+    let holder = rusqlite::Connection::open(&db_path).unwrap();
+    holder
+        .execute_batch("PRAGMA locking_mode=EXCLUSIVE;")
+        .unwrap();
+    holder
+        .execute_batch("BEGIN; INSERT INTO chunks VALUES ('c3', 'x', 'x', 'x', 'x', 1, 1, 'x', 'x'); COMMIT;")
+        .unwrap();
+
+    // 4) 情境成立：一般唯讀可以開，但第一次 query 就 BUSY
+    let normal = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open 本身應成功");
+    let err = normal.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0));
+    assert!(
+        err.is_err(),
+        "EXCLUSIVE lock 下一般唯讀 query 必須 BUSY，才能證明 fallback 有必要"
+    );
+
+    // 5) claudecat 的 fallback 仍可唯讀讀到索引（不寫入）
+    let guard = EnvGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let info = claudecat::cort::index_info(&proj).expect("immutable fallback 應能開啟");
+    assert_eq!(info.chunk_count, 2);
+    assert_eq!(info.relationships_count, 1);
+    let hits = claudecat::cort::search_symbols(&proj, "alpha").expect("fallback 應能搜尋");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].symbol.as_deref(), Some("alpha"));
+
+    // 6) 清理：釋放 lock、還原 env
+    drop(holder);
+    drop(guard);
+    let _ = std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755));
+}

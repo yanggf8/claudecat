@@ -64,23 +64,39 @@ pub struct CortDependent {
     pub confidence_score: f64,
 }
 
-fn open_readonly(real_path: &str) -> Option<Connection> {
+/// 對 cort DB 跑唯讀查詢：先試一般唯讀（sidecar 齊全時最準）；若開檔失敗
+/// （唯讀檔案系統缺 -shm/-wal、sandbox 擋 lock 等）或查詢時 BUSY（cort 正持有寫鎖），
+/// 自動退回 `immutable=1`（SQLite 完全不碰 sidecar/lock，直接讀主檔；代價是 cort 若有
+/// 未 checkpoint 的 WAL 內容會讀不到——這是可接受的誠實取捨）。claudecat 全程不寫入。
+fn with_readonly<T>(real_path: &str, f: impl Fn(&Connection) -> rusqlite::Result<T>) -> Option<T> {
     let db = db_path_for(real_path);
     if !db.is_file() {
         return None;
     }
-    Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+    let uri = format!("file:{}?immutable=1", db.display());
+    let candidates = [
+        Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY),
+        Connection::open_with_flags(
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        ),
+    ];
+    for conn in candidates.into_iter().flatten() {
+        if let Ok(v) = f(&conn) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// 取得 cort 索引狀態（DB 不存在或 projects 表無此專案 → None）
 pub fn index_info(root: &Path) -> Option<CortIndexInfo> {
     let real = std::fs::canonicalize(root).ok()?;
     let real_str = real.to_str()?;
-    let conn = open_readonly(real_str)?;
     let pid = project_id(real_str);
 
-    let row = conn
-        .query_row(
+    let row = with_readonly(real_str, |conn| {
+        conn.query_row(
             "SELECT name, path, git_head, last_indexed_at, extractor_version \
              FROM projects WHERE project_id = ?1",
             [&pid],
@@ -95,23 +111,23 @@ pub fn index_info(root: &Path) -> Option<CortIndexInfo> {
             },
         )
         .optional()
-        .ok()??;
+    })??;
 
-    let chunk_count: i64 = conn
-        .query_row(
+    let (chunk_count, relationships_count) = with_readonly(real_str, |conn| {
+        let chunks: i64 = conn.query_row(
             "SELECT COUNT(*) FROM chunks WHERE project_id = ?1",
             [&pid],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let relationships_count: i64 = conn
-        .query_row(
+        )?;
+        let rels: i64 = conn.query_row(
             "SELECT COUNT(*) FROM chunks c JOIN relationships r \
              ON r.source_chunk_id = c.chunk_id WHERE c.project_id = ?1",
             [&pid],
             |r| r.get(0),
-        )
-        .unwrap_or(0);
+        )?;
+        Ok((chunks, rels))
+    })
+    .unwrap_or((0, 0));
 
     // 新鮮度：git head 相符 + 索引在 7 天內
     let fresh = freshness(real_str, row.2.as_deref(), row.3);
@@ -168,19 +184,16 @@ fn git_head(real_str: &str) -> Option<String> {
 pub fn search_symbols(root: &Path, query: &str) -> Option<Vec<CortHit>> {
     let real = std::fs::canonicalize(root).ok()?;
     let real_str = real.to_str()?;
-    let conn = open_readonly(real_str)?;
     let pid = project_id(real_str);
     let pat = format!("%{}%", query.to_lowercase());
 
-    let mut stmt = conn
-        .prepare(
+    let hits = with_readonly(real_str, |conn| {
+        let mut stmt = conn.prepare(
             "SELECT symbol_name, chunk_type, file_path, start_line, end_line, language \
              FROM chunks WHERE project_id = ?1 AND lower(symbol_name) LIKE ?2 \
              ORDER BY start_line LIMIT 50",
-        )
-        .ok()?;
-    let hits: Vec<CortHit> = stmt
-        .query_map([&pid, &pat], |r| {
+        )?;
+        let rows = stmt.query_map([&pid, &pat], |r| {
             Ok(CortHit {
                 symbol: r.get(0)?,
                 chunk_type: r.get(1)?,
@@ -189,10 +202,9 @@ pub fn search_symbols(root: &Path, query: &str) -> Option<Vec<CortHit>> {
                 end_line: r.get(4)?,
                 language: r.get(5)?,
             })
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
+        })?;
+        rows.collect::<rusqlite::Result<Vec<CortHit>>>()
+    })?;
     if hits.is_empty() {
         None
     } else {
@@ -204,21 +216,18 @@ pub fn search_symbols(root: &Path, query: &str) -> Option<Vec<CortHit>> {
 pub fn dependents(root: &Path, symbol: &str) -> Option<Vec<CortDependent>> {
     let real = std::fs::canonicalize(root).ok()?;
     let real_str = real.to_str()?;
-    let conn = open_readonly(real_str)?;
     let pid = project_id(real_str);
 
-    let mut stmt = conn
-        .prepare(
+    let deps = with_readonly(real_str, |conn| {
+        let mut stmt = conn.prepare(
             "SELECT sc.file_path, sc.symbol_name, sc.start_line, r.rel_type, r.call_site_line, r.confidence_score \
              FROM relationships r \
              JOIN chunks tc ON r.target_chunk_id = tc.chunk_id AND tc.project_id = ?1 \
              JOIN chunks sc ON r.source_chunk_id = sc.chunk_id AND sc.project_id = ?1 \
              WHERE tc.symbol_name = ?2 \
              ORDER BY sc.file_path LIMIT 50",
-        )
-        .ok()?;
-    let deps: Vec<CortDependent> = stmt
-        .query_map([&pid, symbol], |r| {
+        )?;
+        let rows = stmt.query_map([&pid, symbol], |r| {
             Ok(CortDependent {
                 source_file: r.get(0)?,
                 source_symbol: r.get(1)?,
@@ -227,10 +236,9 @@ pub fn dependents(root: &Path, symbol: &str) -> Option<Vec<CortDependent>> {
                 call_site_line: r.get(4)?,
                 confidence_score: r.get(5)?,
             })
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
+        })?;
+        rows.collect::<rusqlite::Result<Vec<CortDependent>>>()
+    })?;
     if deps.is_empty() {
         None
     } else {
