@@ -32,6 +32,8 @@ claudecat explore                # 量化探索成本（地圖 token vs 全讀 t
 claudecat explore --json         # 機器可讀指標輸出
 claudecat track SESSION-EVIDENCE.md  # 把指標寫入長期指標表（原子、同日不重複）
 claudecat navigate "<要找什麼>"      # 從一句話給出目的地符號/檔案 + cort 路線
+claudecat navigate --cort "<要找什麼>"  # 優先吃 cort 全量索引（含反向依賴）
+claudecat cort-status --root <proj>   # cort 索引新鮮度 / chunks / relationships
 claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
 claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
 claudecat scan --root /path/to/project
@@ -48,6 +50,8 @@ claudecat scan --root /path/to/project
 3. Claude Code 啟動時自動載入，導航零成本
 
 ## 導航能力：全圖之外，還要有「路」
+
+> 與 cortexyoung/cort 的結合使用細節見 [CORT-INTEGRATION.md](CORT-INTEGRATION.md)。
 
 **問題**（2026-09-05）：作為導航工具，光有「全圖」不夠——全圖是靜態的「東西在哪裡」，
 真正的導航是**從一句話高速低本到達目的地**。缺少它時，Claude 仍要自己
@@ -69,6 +73,23 @@ claudecat navigate "auth" --json   # 機器可讀
 
 **分工**：`scan/update` = 全圖（場景）；`navigate` = 路線（導航）；
 `cortexyoung/cort` = 精準定位（到達後深挖）。三者串成「快速低本到達目的地」。
+
+### 結合 cortexyoung：直接吃 cort 的索引（2026-09-05）
+
+claudecat **不重造索引**——直接唯讀 cort 的 SQLite
+（`~/.cache/cortex-ng/<sha256>.db`，schema v4 相容）：`chunks`（全 project 符號）、
+`relationships`（calls/imports 邊）、`projects`（git_head / 索引時間）。
+
+```bash
+claudecat cort-status --root <project>      # 索引新鮮度 / chunks / relationships
+claudecat navigate --cort "staleness"       # 優先查 cort 全量索引（tree-sitter 只掃 top-N）
+```
+
+- `cort-status fresh`：git HEAD 相符 + 索引 ≤7 天；STALE 時提示 `cort index`。
+- `navigate --cort`：命中 cort `chunks`（**比 tree-sitter top-30 更完整**——實測
+  cortexyoung 的測試檔符號，tree-sitter 找不到、cort 全量索引找到）
+  且路線自動含 `cort context` / `cort impact` / **反向依賴清單**。
+- 唯讀：claudecat 永不寫 cort 的 DB；DB 不存在或未命中自動回退 tree-sitter。
 
 ## 導航地圖內容（全部是事實）
 

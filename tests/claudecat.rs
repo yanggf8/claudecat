@@ -282,3 +282,26 @@ fn navigate_finds_symbol_and_route() {
     let report = claudecat::navigate::render(&r);
     assert!(report.contains("路線"));
 }
+
+#[test]
+fn cort_project_id_matches_sha256() {
+    let id = claudecat::cort::project_id("/home/yanggf/a/claudecat");
+    // 以 python hashlib 驗證過：77bf9a9b6e40...
+    assert_eq!(&id[..12], "77bf9a9b6e40");
+    // 確定性
+    assert_eq!(id, claudecat::cort::project_id("/home/yanggf/a/claudecat"));
+}
+
+#[test]
+fn cort_index_info_none_when_db_missing() {
+    let dir = temp_project(); // 隨機目錄 → 無 cort DB
+    let info = claudecat::cort::index_info(&dir);
+    assert!(info.is_none(), "db 不存在應回 None，而非錯誤");
+}
+
+#[test]
+fn cort_search_symbols_none_when_db_missing() {
+    let dir = temp_project();
+    let hits = claudecat::cort::search_symbols(&dir, "auth");
+    assert!(hits.is_none());
+}

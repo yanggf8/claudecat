@@ -3,6 +3,7 @@
 //! - 命中的符號（檔案:行號 + kind）
 //! - 命中的檔案
 //! - 建議的 cort 命令路線（cortexyoung 的精準查詢）
+use crate::cort::{CortDependent, CortHit};
 use crate::model::ProjectMap;
 use serde::Serialize;
 
@@ -149,4 +150,75 @@ pub fn render(r: &NavigateResult) -> String {
         s.push_str(&format!("{}. {step}\n", i + 1));
     }
     s
+}
+
+/// 用 cort 全量索引強化導航：cort 命中 → 附反向依賴（誰呼叫它）
+pub fn navigate_with_cort(
+    map: &ProjectMap,
+    query: &str,
+    cort_hits: Vec<CortHit>,
+) -> NavigateResult {
+    let mut r = navigate(map, query);
+    // 把 cort 命中疊進 symbols（去重：同 file+symbol 只留 cort 的行號，較精確）
+    for h in cort_hits {
+        if let Some(sym) = &h.symbol {
+            let exists = r
+                .symbols
+                .iter()
+                .any(|s| s.file == h.file && s.name == *sym);
+            if !exists {
+                r.symbols.push(NavigateHit {
+                    kind: h.chunk_type,
+                    name: sym.clone(),
+                    file: h.file,
+                    line: h.start_line as usize,
+                    exact: sym.to_lowercase() == query.to_lowercase(),
+                });
+            }
+        }
+    }
+    // 依賴路線：cort 命中取第一個主要符號，查反向依賴
+    if r.symbols.is_empty() {
+        r.route = vec![format!(
+            "cort 索引也沒找到「{}」——試 `cort context \"{query}\"` or `cort recall \"{query}\"`",
+            query
+        )];
+        return r;
+    }
+    let primary = r.symbols.first().unwrap();
+    let root = std::path::Path::new(&map.root);
+    // cort 命中時：第一條路線改為「先讀 cort 命中」，而非 fallback 文案
+    let mut new_route = vec![format!(
+        "先讀 {}:{}（cort 全量索引命中：{} {}）",
+        primary.file, primary.line, primary.kind, primary.name
+    )];
+    new_route.push(format!(
+        "深挖符號：`cort context {} --content full -f lean`",
+        primary.name
+    ));
+    new_route.push(format!(
+        "改動前檢查影響：`cort impact --symbol {} --depth 1 -f lean`",
+        primary.name
+    ));
+    if let Some(deps) = crate::cort::dependents(root, &primary.name) {
+        new_route.push(format!(
+            "反向依賴（誰在用它，改動前必看）：{}",
+            render_dependents(&deps)
+        ));
+    }
+    new_route.push(format!("若仍不中，擴大：`cort struct -p '{}' --lang <lang>`", query));
+    r.route = new_route;
+    r
+}
+
+fn render_dependents(deps: &[CortDependent]) -> String {
+    let parts: Vec<String> = deps
+        .iter()
+        .take(8)
+        .map(|d| {
+            let sym = d.source_symbol.as_deref().unwrap_or("(file-level)");
+            format!("{}:{} {} ({})", d.source_file, d.source_start_line, sym, d.rel_type)
+        })
+        .collect();
+    parts.join("; ")
 }

@@ -1,4 +1,5 @@
 use claudecat::claude_md;
+use claudecat::cort;
 use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
@@ -52,6 +53,12 @@ enum Commands {
         #[arg(long, value_enum, default_value = "auto")]
         map: MapArg,
     },
+    /// 顯示 cortexyoung/cort 索引狀態（新鮮度、chunk、relationships）
+    CortStatus {
+        /// 專案根目錄
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// 導航：從一句話找到目的地符號/檔案，並給出 cort 低成本路線
     Navigate {
         /// 要找什麼（例如 auth / user creation）
@@ -65,6 +72,9 @@ enum Commands {
         /// JSON 輸出
         #[arg(long)]
         json: bool,
+        /// 優先使用 cortexyoung/cort 全量索引（更完整；需先 cort index）
+        #[arg(long)]
+        cort: bool,
     },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
@@ -231,9 +241,43 @@ fn main() {
                 println!("{}", explore::render(&m));
             }
         }
-        Commands::Navigate { query, root, top_files, json } => {
+        Commands::CortStatus { root } => {
+            match cort::index_info(&root) {
+                Some(info) => {
+                    println!(
+                        "cort index: {} ({}) — chunks={} relationships={} fresh={}",
+                        info.name,
+                        info.path,
+                        info.chunk_count,
+                        info.relationships_count,
+                        if info.fresh { "fresh" } else { "STALE or old" }
+                    );
+                    if let Some(head) = &info.git_head {
+                        println!("  git head: {}", &head[..head.len().min(12)]);
+                    }
+                    if let Some(t) = info.last_indexed_at {
+                        println!("  last indexed: {}", t);
+                    }
+                    if !info.fresh {
+                        eprintln!("  hint: 執行 `cort index` 更新索引");
+                    }
+                }
+                None => {
+                    println!("cort index: 無（尚未對 {} 建立索引）", root.display());
+                    eprintln!("  hint: 在該專案執行 `cort index` 後再用 navigate --cort");
+                }
+            }
+        }
+        Commands::Navigate { query, root, top_files, json, cort: use_cort } => {
             let map = analyze(&root, top_files, Some(MapProfile::Full));
-            let r = navigate::navigate(&map, &query);
+            let mut r = navigate::navigate(&map, &query);
+            if use_cort {
+                if let Some(hits) = cort::search_symbols(&root, &query) {
+                    r = navigate::navigate_with_cort(&map, &query, hits);
+                } else {
+                    eprintln!("cort index 無命中（或未索引）。已回退到 tree-sitter 地圖結果。");
+                }
+            }
             if json {
                 match serde_json::to_string_pretty(&r) {
                     Ok(s) => println!("{s}"),
