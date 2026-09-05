@@ -60,7 +60,7 @@ fn render_full(map: &ProjectMap) -> String {
     }
 
     s.push_str("\n### Directory structure\n```\n");
-    for line in tree_lines(&map.dir_stats, 2, 40) {
+    for line in tree_lines(&map.dir_stats, 2, 40, map.total_loc) {
         s.push_str(&line);
         s.push('\n');
     }
@@ -110,7 +110,13 @@ fn render_full(map: &ProjectMap) -> String {
         }
     }
 
-    s.push_str(&format!("\n*Generated at {} by claudecat* — facts from manifests + AST, no inference.\n", map.generated_at));
+    if !map.excluded_paths.is_empty() {
+        s.push_str(&format!(
+            "\n**Excluded dirs**: {}\n",
+            map.excluded_paths.join(", ")
+        ));
+    }
+    s.push_str(&format!("\n*Generated at {} by claudecat* — facts from manifests + AST; framework/entry may be inferred from deps/paths where manifest lacks them.\n", map.generated_at));
     s
 }
 
@@ -136,7 +142,8 @@ fn render_mini(map: &ProjectMap) -> String {
     if let Some(c) = &map.meta.build_command {
         s.push_str(&format!("- **Build**: `{}`\n", c));
     }
-    let top = crate::walk::tree_lines(&map.dir_stats, 1, 6).join("; ");
+    let top_ = crate::walk::tree_lines(&map.dir_stats, 1, 6, map.total_loc);
+    let top: String = top_.iter().filter(|l| !l.starts_with("Total:")).cloned().collect::<Vec<_>>().join("; ");
     if !top.is_empty() {
         s.push_str(&format!("- **Structure**: {}\n", top));
     }

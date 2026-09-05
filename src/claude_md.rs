@@ -6,20 +6,9 @@ pub const BEGIN_MARKER: &str = "<!-- claudecat:auto:begin -->";
 pub const END_MARKER: &str = "<!-- claudecat:auto:end -->";
 
 pub fn find_claude_md(root: &Path) -> PathBuf {
-    let direct = root.join("CLAUDE.md");
-    if direct.is_file() {
-        return direct;
-    }
-    // walk up looking for CLAUDE.md (max 4 levels)
-    let mut cur = root.to_path_buf();
-    for _ in 0..4 {
-        cur = cur.parent().map(|p| p.to_path_buf()).unwrap_or(cur.clone());
-        let candidate = cur.join("CLAUDE.md");
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    direct
+    // V2: 只寫 --root/CLAUDE.md，不做向上搜尋（避免子目錄汙染父專案）。
+    // 需要父專案時請自行指定，或之後提供 --discover-claude-md。
+    root.join("CLAUDE.md")
 }
 
 /// Update (or insert) the claudecat section in `path`.
@@ -71,9 +60,21 @@ pub fn update_section(path: &Path, section: &str, dry_run: bool) -> std::io::Res
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        // atomic write: temp file + rename
-        let tmp = path.with_extension("claudecat.tmp");
-        fs::write(&tmp, &new_content)?;
+        // atomic write: temp file + rename（唯一 tmp 名 + fsync）
+        let tmp = path.with_extension(format!(
+            "claudecat.{}.{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        {
+            use std::io::Write;
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(new_content.as_bytes())?;
+            f.sync_all()?;
+        }
         fs::rename(&tmp, path)?;
     }
     Ok((changed, new_content))

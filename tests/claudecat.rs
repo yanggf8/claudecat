@@ -97,26 +97,44 @@ fn explore_report_has_savings_section() {
     let dir = temp_project();
     fs::write(dir.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
     fs::create_dir_all(dir.join("src")).unwrap();
-    // 足夠大的 fixture（>60 行），地圖才會低於全讀成本
+    // 足夠大的 fixture（>420 行 code），full map 才能穩定低於全讀成本
     let mut body = String::from("use std::collections::HashMap;\n\nfn main() {}\n");
-    for i in 0..80 {
+    for i in 0..420 {
         body.push_str(&format!("pub fn worker_{i}() -> usize {{ {i} }}\n"));
     }
     fs::write(dir.join("src/main.rs"), &body).unwrap();
     let map = claudecat_lib_scan(&dir);
     let m = claudecat::explore::compute(&map);
     let report = claudecat::explore::render(&m);
-    assert!(report.contains("Estimated token savings"));
+    assert!(report.contains("Map vs full-read") || report.contains("Map overhead"));
     assert!(report.contains("覆蓋率"));
     assert!(m.read_tokens > 0 && m.map_tokens > 0);
     assert!(m.savings_pct > 0.0);
 }
 
 fn claudecat_lib_scan(root: &std::path::Path) -> claudecat::model::ProjectMap {
-    let mut map = claudecat::walk::analyze_project(root, 10, 80);
+    let mut map = claudecat::walk::analyze_project(root, 10, None);
     let (meta, deps) = claudecat::manifest::detect_project_meta(root);
     map.meta = meta;
     map.deps = deps;
+    // 與 main.rs 的 analyze() 一致：對 key files 抽 symbols
+    for f in &mut map.key_files {
+        if let Some(lang) = &f.language {
+            if let Ok(src) = std::fs::read_to_string(root.join(&f.path)) {
+                let l = match lang.as_str() {
+                    "typescript" => "typescript",
+                    "javascript" => "javascript",
+                    "python" => "python",
+                    "rust" => "rust",
+                    "go" => "go",
+                    "c" => "c",
+                    "cpp" => "cpp",
+                    _ => continue,
+                };
+                f.symbols = claudecat::symbols::extract_symbols(l, &src);
+            }
+        }
+    }
     map.generated_at = "2026-09-05T00:00:00Z".into();
     map
 }
@@ -192,4 +210,75 @@ fn track_update_handles_multiple_repos() {
     assert_eq!(content.matches("| 日期").count(), 1, "single header expected");
     assert_eq!(content.matches(&format!("`{}`", r1.display())).count(), 1);
     assert_eq!(content.matches(&format!("`{}`", r2.display())).count(), 1);
+}
+
+#[test]
+fn grok_regression_dir_loc_no_double_count() {
+    let dir = temp_project();
+    fs::create_dir_all(dir.join("src/sub")).unwrap();
+    fs::write(dir.join("src/a.rs"), "fn a(){}\n").unwrap();
+    fs::write(dir.join("src/sub/b.rs"), "fn b(){}\n").unwrap();
+    let map = claudecat_lib_scan(&dir);
+    // 每個子目錄 loc 加總 == total_loc（雙計會讓它大於）
+    let sum: usize = map.dir_stats.values().map(|d| d.loc).sum();
+    assert_eq!(sum, map.total_loc, "目錄 LOC 不得雙計");
+    let src = map.dir_stats.get("src").unwrap();
+    let sub = map.dir_stats.get("src/sub").unwrap();
+    assert_eq!(src.loc + sub.loc, map.total_loc);
+}
+
+#[test]
+fn grok_regression_track_keeps_sibling_repo() {
+    let dir = temp_project();
+    let target = dir.join("M.md");
+    let foo = dir.join("foo");
+    let foobar = dir.join("foo-bar");
+    for r in [&foo, &foobar] {
+        fs::create_dir_all(r.join("src")).unwrap();
+        fs::write(r.join("src/main.rs"), "fn main(){}\n").unwrap();
+    }
+    let m1 = claudecat::explore::compute(&claudecat_lib_scan(&foo));
+    let m2 = claudecat::explore::compute(&claudecat_lib_scan(&foobar));
+    claudecat::explore::track_update(&target, &[&m1]).unwrap();
+    claudecat::explore::track_update(&target, &[&m2]).unwrap();
+    // 更新 foo 時不得刪掉 foo-bar
+    let m1b = claudecat::explore::compute(&claudecat_lib_scan(&foo));
+    claudecat::explore::track_update(&target, &[&m1b]).unwrap();
+    let content = fs::read_to_string(&target).unwrap();
+    assert!(content.contains("foo-bar"), "sibling repo row must survive");
+    assert!(content.contains(&format!("`{}`", foo.display())));
+}
+
+#[test]
+fn grok_regression_update_root_stays_local() {
+    let dir = temp_project();
+    let deep = dir.join("sub/deep");
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(dir.join("CLAUDE.md"), "# parent\n").unwrap();
+    let section = "x";
+    let path = claudecat::claude_md::find_claude_md(&deep);
+    // 直接 join 回傳 root/CLAUDE.md，而非向上找父專案
+    assert_eq!(path, deep.join("CLAUDE.md"));
+    let _ = section;
+}
+
+#[test]
+fn navigate_finds_symbol_and_route() {
+    let dir = temp_project();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
+    fs::write(
+        dir.join("src/main.rs"),
+        "mod auth;\nfn main() {}\npub fn authenticate(name: &str) -> bool { true }\npub fn create_user() -> usize { 1 }\n",
+    )
+    .unwrap();
+    let map = claudecat_lib_scan(&dir);
+    let r = claudecat::navigate::navigate(&map, "auth");
+    assert!(r.symbols.iter().any(|h| h.name == "authenticate"), "should hit authenticate");
+    // mod auth 精確命中優先；路線應含 cort context <命中符號>
+    assert!(r.route.iter().any(|s| s.contains("cort context")), "route should suggest cort context");
+    let report_auth = claudecat::navigate::render(&r);
+    assert!(report_auth.contains("auth") || report_auth.contains("authenticate"));
+    let report = claudecat::navigate::render(&r);
+    assert!(report.contains("路線"));
 }

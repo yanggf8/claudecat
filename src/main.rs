@@ -3,6 +3,7 @@ use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
 use claudecat::model::{self, MapProfile};
+use claudecat::navigate;
 use claudecat::outline;
 use claudecat::symbols;
 use claudecat::walk;
@@ -50,6 +51,20 @@ enum Commands {
         /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
         #[arg(long, value_enum, default_value = "auto")]
         map: MapArg,
+    },
+    /// 導航：從一句話找到目的地符號/檔案，並給出 cort 低成本路線
+    Navigate {
+        /// 要找什麼（例如 auth / user creation）
+        query: String,
+        /// 專案根目錄
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// 要解析符號的最大檔案數
+        #[arg(long, default_value_t = 30)]
+        top_files: usize,
+        /// JSON 輸出
+        #[arg(long)]
+        json: bool,
     },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
@@ -141,7 +156,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> ProjectMap {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-    let mut map = walk::analyze_project(&root, top_files, top_files * 8);
+    let mut map = walk::analyze_project(&root, top_files, map_flag);
 
     // manifest metadata + deps
     let (meta, deps) = manifest::detect_project_meta(&root);
@@ -172,8 +187,6 @@ fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> Pr
     let claude_md_path = claude_md::find_claude_md(&root);
     let claude_existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
     map.guardrails = guardrails::load(&root, &claude_existing);
-
-    map.profile_used = model::resolve_profile(map.total_loc, map.total_files, map_flag);
 
     map.generated_at = now_iso();
     map.errors = vec![];
@@ -216,6 +229,21 @@ fn main() {
                 }
             } else {
                 println!("{}", explore::render(&m));
+            }
+        }
+        Commands::Navigate { query, root, top_files, json } => {
+            let map = analyze(&root, top_files, Some(MapProfile::Full));
+            let r = navigate::navigate(&map, &query);
+            if json {
+                match serde_json::to_string_pretty(&r) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("JSON serialization failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                println!("{}", navigate::render(&r));
             }
         }
         Commands::Track { file, root, roots_file, top_files, map: mf } => {

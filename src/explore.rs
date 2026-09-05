@@ -27,6 +27,7 @@ pub struct ExploreMetrics {
     pub savings_pct: f64,
     pub coverage: Vec<CoverageRow>,
     pub top10_pct: f64,
+    pub map_overhead: bool,
 }
 
 fn est_tokens_from_loc(loc: usize) -> usize {
@@ -47,6 +48,8 @@ pub fn compute_with_profile(map: &ProjectMap, profile: MapProfile) -> ExploreMet
     } else {
         0.0
     };
+    // 標記地圖成本是否反而超過全讀（小專案）
+    let map_overhead = map_tokens > read_tokens && read_tokens > 0;
     let mut coverage = Vec::new();
     let mut acc = 0usize;
     for (i, f) in map.key_files.iter().enumerate() {
@@ -76,6 +79,7 @@ pub fn compute_with_profile(map: &ProjectMap, profile: MapProfile) -> ExploreMet
         savings_pct,
         coverage,
         top10_pct,
+        map_overhead,
     }
 }
 
@@ -95,7 +99,11 @@ pub fn render(m: &ExploreMetrics) -> String {
         "- **Read-everything cost**: ~{} tokens (LOC×6)\n",
         m.read_tokens
     ));
-    s.push_str(&format!("- **Estimated token savings**: {:.1}%\n", m.savings_pct));
+    if m.map_overhead {
+        s.push_str(&format!("- **Map overhead**: +{:.0}% (地圖成本高於全讀，小專案建議 mini)\n", m.savings_pct.abs()));
+    } else {
+        s.push_str(&format!("- **Map vs full-read**: 地圖省 ~{:.1}% token\n", m.savings_pct));
+    }
 
     s.push_str("\n## 只看 top-K 檔案的覆蓋率\n\n");
     s.push_str("| K | 累計 LOC | 佔總 LOC % |\n|---|--------:|----------:|\n");
@@ -115,7 +123,7 @@ pub fn render(m: &ExploreMetrics) -> String {
 
 pub fn row_md(m: &ExploreMetrics) -> String {
     format!(
-        "| {} | `{}` | {} | {} | ~{} | ~{} | {:.1}% | {:.1}% | {}% |",
+        "| {} | `{}` | {} | {} | ~{} | ~{} | {:.1}% | {:.1}% |",
         m.date,
         m.root,
         m.total_files,
@@ -124,7 +132,6 @@ pub fn row_md(m: &ExploreMetrics) -> String {
         m.read_tokens,
         m.savings_pct,
         m.top10_pct,
-        100,
     )
 }
 
@@ -140,7 +147,7 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
     };
 
     let header = format!(
-        "{}\n\n| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省% | top-10 覆蓋% | 覆蓋上限% |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n",
+        "{}\n\n| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省%(map-vs-read) | top-10 覆蓋% |\n|---|---|---:|---:|---:|---:|---:|---:|\n",
         TRACK_SECTION
     );
 
@@ -155,17 +162,35 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
         }
     }
 
+    fn row_root(row: &str) -> Option<String> {
+        let cols: Vec<&str> = row.split('|').collect();
+        cols.get(2)
+            .map(|c| c.trim().trim_matches('`').to_string())
+    }
+
+    // 欄數正規化：舊格式（例如多一個裝飾欄）對齊新 header
+    fn normalize_row(row: &str, ncols: usize) -> String {
+        let cols: Vec<&str> = row.split('|').collect();
+        if cols.len() <= ncols + 2 {
+            return row.to_string();
+        }
+        let kept: Vec<&str> = cols[1..=ncols].iter().map(|c| c.trim()).collect();
+        format!("| {} |", kept.join(" | "))
+    }
+    let ncols = header.matches('|').count() - 1; // 欄數 = 管道數 - 1（前後各一）
     let keep: Vec<String> = old_rows
         .into_iter()
         .filter(|row| {
-            // 保留不含「今天+本次 root」的行
+            // 只刪「同一天 + root 精確相等」的舊列（避免 foo 誤刪 foo-bar）
+            let r = row_root(row);
             for m in metrics.iter() {
-                if row.contains(&m.date) && row.contains(&m.root) {
+                if row.contains(&m.date) && r.as_deref() == Some(m.root.as_str()) {
                     return false;
                 }
             }
             true
         })
+        .map(|row| normalize_row(&row, ncols))
         .collect();
 
     let prefix = if let Some(b) = existing.find(TRACK_SECTION) {

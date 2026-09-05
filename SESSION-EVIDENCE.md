@@ -6,17 +6,25 @@ cortexyoung、claude-code-router、GalaxyWarHero、empireE、persona-core 等）
 
 ## 量測：探索成本佔比（explore% = Bash+Read+Glob+Grep+Write 佔全部工具數）
 
-| session | 訊息數 | 工具數 | 探索% | 使用者糾正 |
+| session | 訊息數 | 工具數 | 搜尋類工具%* | 使用者糾正 |
 |---|---|---|---|---|
-| GalaxyWarHero 66a0c2f6 | 567 | 657 | 64% | 13 |
-| cortexyoung 03faa8e3 | 64 | 162 | 87% | 1 |
-| claude-code-router c3e99ec6 | 76 | 206 | 84% | 2 |
+| GalaxyWarHero 66a0c2f6 | 567 | 657 | 59% | 13 |
+| cortexyoung 03faa8e3 | 64 | 162 | 85% | 1 |
+| claude-code-router c3e99ec6 | 76 | 206 | 82% | 2 |
 | claude-code-router dc586b54 | 41 | 33 | 93% | 0 |
-| cortexyoung 5e92b5d3 | 11 | 55 | 96% | 0 |
+| cortexyoung 5e92b5d3 | 11 | 55 | 94% | 0 |
 | claude-code-router 973ef69c | 36 | 57 | 70% | 1（AskUserQuestion×6） |
 
-**結論**：真實工作 session 中 **64–96% 的工具呼叫花在「找檔案/讀檔/跑指令確認結構」**，
+*搜尋類工具 = Bash+Read+Glob+Grep+LS；**不含 Write/Edit**（寫程式不算「摸索」，
+避免高估——2026-09-05 依 Grok review #24 修正）。
+
+**結論**：真實工作 session 中 **59–94% 的工具呼叫是搜尋類**（找檔案/讀檔/跑指令確認結構），
 這些正是導航地圖（入口+模組樹+符號+命令）能直接省下的成本。
+
+> **Grok review（2026-09-05）**：26 條發現，重點 P0 全部實測屬實
+> （dir LOC 雙計、大 repo 截斷、dual-manifest 標錯、explore 假指標、
+> track 誤刪兄弟 repo、update 汙染父專案）。已於同日修復並加回歸測試。
+> 完整清單見 [GROK-REVIEW-CORROBORATION.md](GROK-REVIEW-CORROBORATION.md)。
 
 ## 真實案例
 
@@ -61,10 +69,15 @@ Claude 連續 3 輪誤判專案本質：
 
 ## 長期指標 (claudecat explore)
 
-| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省% | top-10 覆蓋% | 覆蓋上限% |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| 2026-09-04 | `/home/yanggf/a/claudecat` | 17 | 1958 | ~1011 | ~11748 | 91.4% | 88.0% | 100% |
-| 2026-09-04 | `/home/yanggf/a/cortexyoung` | 148 | 43005 | ~12390 | ~258030 | 95.2% | 27.6% | 100% |
-| 2026-09-04 | `/home/yanggf/a/persona-core` | 79 | 34510 | ~7883 | ~207060 | 96.2% | 77.2% | 100% |
-| 2026-09-04 | `/home/yanggf/.claude-code-router` | 57 | 15512 | ~7724 | ~93072 | 91.7% | 50.4% | 100% |
-| 2026-09-04 | `/home/yanggf/c/GalaxyWarHero` | 80 | 18118 | ~6822 | ~108708 | 93.7% | 36.6% | 100% |
+| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省%(map-vs-read) | top-10 覆蓋% |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 2026-09-04 | `/home/yanggf/a/claudecat` | 17 | 1958 | ~1011 | ~11748 | 91.4% | 88.0% |
+| 2026-09-04 | `/home/yanggf/a/cortexyoung` | 148 | 43005 | ~12390 | ~258030 | 95.2% | 27.6% |
+| 2026-09-04 | `/home/yanggf/a/persona-core` | 79 | 34510 | ~7883 | ~207060 | 96.2% | 77.2% |
+| 2026-09-04 | `/home/yanggf/.claude-code-router` | 57 | 15512 | ~7724 | ~93072 | 91.7% | 50.4% |
+| 2026-09-04 | `/home/yanggf/c/GalaxyWarHero` | 80 | 18118 | ~6822 | ~108708 | 93.7% | 36.6% |
+| 2026-09-05 | `/home/yanggf/a/claudecat` | 18 | 2348 | ~1155 | ~14088 | 91.8% | 88.8% |
+| 2026-09-05 | `/home/yanggf/a/cortexyoung` | 148 | 33624 | ~13056 | ~201744 | 93.5% | 33.9% |
+| 2026-09-05 | `/home/yanggf/a/persona-core` | 79 | 29145 | ~7941 | ~174870 | 95.5% | 77.3% |
+| 2026-09-05 | `/home/yanggf/.claude-code-router` | 57 | 14412 | ~7556 | ~86472 | 91.3% | 54.3% |
+| 2026-09-05 | `/home/yanggf/c/GalaxyWarHero` | 80 | 18037 | ~6822 | ~108222 | 93.7% | 36.8% |

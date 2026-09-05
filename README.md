@@ -31,6 +31,7 @@ claudecat update --dry-run       # 只看會不會變，不寫入
 claudecat explore                # 量化探索成本（地圖 token vs 全讀 token）
 claudecat explore --json         # 機器可讀指標輸出
 claudecat track SESSION-EVIDENCE.md  # 把指標寫入長期指標表（原子、同日不重複）
+claudecat navigate "<要找什麼>"      # 從一句話給出目的地符號/檔案 + cort 路線
 claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
 claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
 claudecat scan --root /path/to/project
@@ -45,6 +46,29 @@ claudecat scan --root /path/to/project
 1. 在專案根目錄執行 `claudecat update`（或讓 skill/CI 定期執行）
 2. CLAUDE.md 自動維護 `<!-- claudecat:auto:begin -->` 區塊
 3. Claude Code 啟動時自動載入，導航零成本
+
+## 導航能力：全圖之外，還要有「路」
+
+**問題**（2026-09-05）：作為導航工具，光有「全圖」不夠——全圖是靜態的「東西在哪裡」，
+真正的導航是**從一句話高速低本到達目的地**。缺少它時，Claude 仍要自己
+Glob/Read 繞路（真實 session 59–94% 工具呼叫是搜尋類）。
+
+**解法：`claudecat navigate <query>`**——輸入意圖，輸出：
+1. **命中符號表**（檔案:行號 + 種類，精確命中優先）
+2. **命中檔案**
+3. **低成本路線**：先讀哪個檔案:行號 → 建議 `cort` 精確查詢
+   （`cort context <symbol> --content full -f lean`、`cort impact --symbol <symbol>`）
+   → 沒中時擴大搜尋指令
+
+```bash
+claudecat navigate "guardrail"
+# → src/guardrails.rs:4 mod guardrails
+# → 路線: cort context guardrails --content full -f lean …
+claudecat navigate "auth" --json   # 機器可讀
+```
+
+**分工**：`scan/update` = 全圖（場景）；`navigate` = 路線（導航）；
+`cortexyoung/cort` = 精準定位（到達後深挖）。三者串成「快速低本到達目的地」。
 
 ## 導航地圖內容（全部是事實）
 
@@ -73,6 +97,11 @@ claudecat scan --root /path/to/project
 顯示。也可用根目錄 `claudecat-guardrails.md` 優先提供。
 真實案例佐證：GalaxyWarHero session 中 Claude 因缺「技術決策」把 2D 專案當 3D
 分析、裝錯工具——見 [SESSION-EVIDENCE.md](SESSION-EVIDENCE.md)。
+
+**2026-09-05 獨立評審（Grok）**：抓到 26 條問題，其中 6 個 P0（目錄 LOC 雙計、
+大 repo 截斷、dual-manifest 標錯語言、explore 假指標、track 誤刪兄弟 repo、
+update 汙染父專案）全部實測屬實並已修復＋回歸測試；每條 corroboration 與
+剩餘待辦見 [GROK-REVIEW-CORROBORATION.md](GROK-REVIEW-CORROBORATION.md)。
 
 ## 誠實原則（修復 V1 假信心）
 
