@@ -57,11 +57,22 @@ pub fn update_section(path: &Path, section: &str, dry_run: bool) -> std::io::Res
     }
 
     if changed && !dry_run {
-        if let Some(parent) = path.parent() {
+        // CLAUDE.md 常見是 symlink（如 cortexyoung：CLAUDE.md -> AGENTS.md，讓兩個
+        // harness 永不漂移）。rename 直接蓋 path 會把 symlink 換成普通檔——
+        // 寫入目標必須是解析後的本體；tmp 也放目標目錄，rename 才是同檔案系統原子操作。
+        let target = match fs::read_link(path) {
+            Ok(link) if link.is_absolute() => link,
+            Ok(link) => path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link),
+            Err(_) => path.to_path_buf(),
+        };
+        if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
         // atomic write: temp file + rename（唯一 tmp 名 + fsync）
-        let tmp = path.with_extension(format!(
+        let tmp = target.with_extension(format!(
             "claudecat.{}.{}.tmp",
             std::process::id(),
             std::time::SystemTime::now()
@@ -75,7 +86,7 @@ pub fn update_section(path: &Path, section: &str, dry_run: bool) -> std::io::Res
             f.write_all(new_content.as_bytes())?;
             f.sync_all()?;
         }
-        fs::rename(&tmp, path)?;
+        fs::rename(&tmp, &target)?;
     }
     Ok((changed, new_content))
 }

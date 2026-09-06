@@ -833,3 +833,30 @@ fn track_table_preserves_sibling_sections_in_one_file() {
         "audit 資料列應恰有一列（同日更新不重複）"
     );
 }
+
+/// P1 回歸：CLAUDE.md 是 symlink 時（cortexyoung 慣例：CLAUDE.md -> AGENTS.md，
+/// 讓 Claude/Codex 兩個 harness 永不漂移），update 必須寫進 symlink 目標、
+/// 不得把 symlink 取代成普通檔。
+#[test]
+fn claude_md_update_writes_through_symlink() {
+    let dir = temp_project();
+    fs::write(dir.join("AGENTS.md"), "# AGENTS\n\nbody\n").unwrap();
+    std::os::unix::fs::symlink("AGENTS.md", dir.join("CLAUDE.md")).unwrap();
+
+    let section = "## Map\n- x\n".to_string();
+    let path = dir.join("CLAUDE.md");
+    let (changed, _) = claudecat::claude_md::update_section(&path, &section, false).unwrap();
+    assert!(changed);
+
+    let meta = path.symlink_metadata().unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "symlink 不得被原子寫入取代成普通檔"
+    );
+    let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("# AGENTS"), "原內容保留");
+    assert!(agents.contains("## Map"), "section 應寫進 symlink 目標");
+
+    let (changed2, _) = claudecat::claude_md::update_section(&path, &section, false).unwrap();
+    assert!(!changed2, "同內容重跑應 no-op");
+}
