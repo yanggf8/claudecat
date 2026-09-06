@@ -105,7 +105,10 @@ pub fn navigate(map: &ProjectMap, query: &str) -> NavigateResult {
             let f = files_hit.iter().next().unwrap();
             route.push(format!("用 cort 讀檔：`cort read {} -f lean`", f));
         }
-        route.push(format!("若仍不中，擴大：`cort struct -p '{}' --lang <lang>`", query));
+        route.push(format!(
+            "若仍不中，擴大：`cort struct -p '{}' --lang <lang>`",
+            query
+        ));
     }
 
     NavigateResult {
@@ -136,7 +139,10 @@ pub fn render(r: &NavigateResult) -> String {
         s.push_str("## 符號\n");
         s.push_str("| 位置 | 種類 | 符號 |\n|---|---|---|\n");
         for h in &r.symbols {
-            s.push_str(&format!("| `{}:{}` | {} | {} |\n", h.file, h.line, h.kind, h.name));
+            s.push_str(&format!(
+                "| `{}:{}` | {} | {} |\n",
+                h.file, h.line, h.kind, h.name
+            ));
         }
     }
     if !r.files.is_empty() {
@@ -164,10 +170,7 @@ pub fn navigate_with_cort(
     // 把 cort 命中疊進 symbols（去重：同 file+symbol 只留 cort 的行號，較精確）
     for h in &cort_hits {
         if let Some(sym) = &h.symbol {
-            let exists = r
-                .symbols
-                .iter()
-                .any(|s| s.file == h.file && s.name == *sym);
+            let exists = r.symbols.iter().any(|s| s.file == h.file && s.name == *sym);
             if !exists {
                 r.symbols.push(NavigateHit {
                     kind: h.chunk_type.clone(),
@@ -236,7 +239,10 @@ pub fn navigate_with_cort(
             render_dependents(&deps)
         ));
     }
-    new_route.push(format!("若仍不中，擴大：`cort struct -p '{}' --lang <lang>`", query));
+    new_route.push(format!(
+        "若仍不中，擴大：`cort struct -p '{}' --lang <lang>`",
+        query
+    ));
     r.route = new_route;
     r
 }
@@ -247,7 +253,10 @@ fn render_dependents(deps: &[CortDependent]) -> String {
         .take(8)
         .map(|d| {
             let sym = d.source_symbol.as_deref().unwrap_or("(file-level)");
-            format!("{}:{} {} ({})", d.source_file, d.source_start_line, sym, d.rel_type)
+            format!(
+                "{}:{} {} ({})",
+                d.source_file, d.source_start_line, sym, d.rel_type
+            )
         })
         .collect();
     parts.join("; ")

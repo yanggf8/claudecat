@@ -5,7 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn temp_dir() -> PathBuf {
     let base = std::env::temp_dir().join(format!("claudecat-test-{}", std::process::id()));
-    let d = base.join(format!("{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    let d = base.join(format!(
+        "{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     fs::create_dir_all(&d).unwrap();
     d
 }

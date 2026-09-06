@@ -7,13 +7,24 @@ use std::path::{Path, PathBuf};
 
 /// (副檔名, 語言名, 是否為「可解析程式碼」)
 pub const CODE_EXT: &[(&str, &str, bool)] = &[
-    ("js", "javascript", true), ("jsx", "javascript", true), ("mjs", "javascript", true), ("cjs", "javascript", true),
-    ("ts", "typescript", true), ("tsx", "typescript", true), ("mts", "typescript", true), ("cts", "typescript", true),
+    ("js", "javascript", true),
+    ("jsx", "javascript", true),
+    ("mjs", "javascript", true),
+    ("cjs", "javascript", true),
+    ("ts", "typescript", true),
+    ("tsx", "typescript", true),
+    ("mts", "typescript", true),
+    ("cts", "typescript", true),
     ("py", "python", true),
     ("rs", "rust", true),
     ("go", "go", true),
-    ("c", "c", true), ("h", "c", true),
-    ("cpp", "cpp", true), ("cc", "cpp", true), ("cxx", "cpp", true), ("hpp", "cpp", true), ("hh", "cpp", true),
+    ("c", "c", true),
+    ("h", "c", true),
+    ("cpp", "cpp", true),
+    ("cc", "cpp", true),
+    ("cxx", "cpp", true),
+    ("hpp", "cpp", true),
+    ("hh", "cpp", true),
     ("java", "java", true),
     ("rb", "ruby", true),
     ("php", "php", true),
@@ -21,23 +32,52 @@ pub const CODE_EXT: &[(&str, &str, bool)] = &[
     ("swift", "swift", true),
     ("kt", "kotlin", true),
     ("sh", "shell", true),
-    ("toml", "config", false), ("json", "config", false),
-    ("yaml", "config", false), ("yml", "config", false),
+    ("toml", "config", false),
+    ("json", "config", false),
+    ("yaml", "config", false),
+    ("yml", "config", false),
 ];
 
 pub fn lang_for_ext(ext: &str) -> Option<(&'static str, bool)> {
-    CODE_EXT.iter().find(|(e, _, _)| *e == ext).map(|(_, l, code)| (*l, *code))
+    CODE_EXT
+        .iter()
+        .find(|(e, _, _)| *e == ext)
+        .map(|(_, l, code)| (*l, *code))
 }
 
 /// Always-excluded directory names（無 gitignore 也排除）。
 /// 注意：排除清單會寫進地圖的 excluded_paths，供使用者檢視。
 pub const ALWAYS_EXCLUDE: &[&str] = &[
-    ".git", ".hg", ".svn", "node_modules", "target", "dist", "build", "out",
-    ".next", ".nuxt", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".cache", "coverage", ".idea", ".vscode", "Pods", "DerivedData",
-    ".terraform", ".claudecat", "pids", "logs",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".cache",
+    "coverage",
+    ".idea",
+    ".vscode",
+    "Pods",
+    "DerivedData",
+    ".terraform",
+    ".claudecat",
+    "pids",
+    "logs",
     // 封存目錄：排除但會顯示在地圖的 excluded 清單（非靜默）
-    "legacy", "archive", "archived", "old",
+    "legacy",
+    "archive",
+    "archived",
+    "old",
 ];
 
 /// 收集全部 code/config 檔案，並回報被排除的目錄名。
@@ -58,11 +98,11 @@ pub fn collect_files(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
             return true;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            if ALWAYS_EXCLUDE.contains(&name.as_str()) {
-                ex.lock().unwrap().push(name);
-                return false;
-            }
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            && ALWAYS_EXCLUDE.contains(&name.as_str())
+        {
+            ex.lock().unwrap().push(name);
+            return false;
         }
         true
     });
@@ -114,9 +154,8 @@ pub fn rollup(dir_stats: &BTreeMap<String, DirStat>, prefix: &str) -> DirStat {
             continue;
         }
         if let Some(rest) = k.strip_prefix(prefix) {
-            if rest.starts_with('/') {
+            if let Some(rest) = rest.strip_prefix('/') {
                 // 直接子目錄（不含更深層；深層會在遞迴時處理）→ 這裡不遞迴，改為全部算一次
-                let rest = &rest[1..];
                 if !rest.contains('/') {
                     out.files += s.files;
                     out.loc += s.loc;
@@ -141,9 +180,13 @@ pub fn analyze_project(root: &Path, top_n: usize, map_flag: Option<MapProfile>) 
     let mut candidates: Vec<crate::model::FileInfo> = Vec::new();
 
     for f in &files {
-        let Some((_, non_blank)) = count_loc(f) else { continue };
+        let Some((_, non_blank)) = count_loc(f) else {
+            continue;
+        };
         let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let Some((lang, is_code)) = lang_for_ext(ext) else { continue };
+        let Some((lang, is_code)) = lang_for_ext(ext) else {
+            continue;
+        };
         total_files += 1;
         *languages.entry(lang.to_string()).or_insert(0) += 1;
 
@@ -171,7 +214,7 @@ pub fn analyze_project(root: &Path, top_n: usize, map_flag: Option<MapProfile>) 
     }
 
     // top-k by loc（全量統計，不截斷）
-    candidates.sort_by(|a, b| b.loc.cmp(&a.loc));
+    candidates.sort_by_key(|f| std::cmp::Reverse(f.loc));
     let top_n_files: Vec<crate::model::FileInfo> = candidates.into_iter().take(top_n).collect();
 
     map.total_files = total_files;
@@ -185,10 +228,15 @@ pub fn analyze_project(root: &Path, top_n: usize, map_flag: Option<MapProfile>) 
 }
 
 /// 渲染目錄樹：top-level 目錄（rollup 子樹）+ 直接子目錄摘要。
-pub fn tree_lines(dir_stats: &BTreeMap<String, DirStat>, max_depth: usize, budget: usize, total_loc: usize) -> Vec<String> {
+pub fn tree_lines(
+    dir_stats: &BTreeMap<String, DirStat>,
+    max_depth: usize,
+    budget: usize,
+    total_loc: usize,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut roots: Vec<String> = Vec::new();
-    for (dir, _) in dir_stats {
+    for dir in dir_stats.keys() {
         let comps: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
         if comps.len() == 1 && dir != "." {
             roots.push(comps[0].to_string());
@@ -202,7 +250,11 @@ pub fn tree_lines(dir_stats: &BTreeMap<String, DirStat>, max_depth: usize, budge
         }
         remaining -= 1;
         let stats = rollup(dir_stats, &root_name);
-        let mut line = format!("{root_name}/ ({files} files, {loc} LOC)", files = stats.files, loc = stats.loc);
+        let mut line = format!(
+            "{root_name}/ ({files} files, {loc} LOC)",
+            files = stats.files,
+            loc = stats.loc
+        );
         if max_depth >= 2 {
             let mut subs: Vec<(String, &DirStat)> = Vec::new();
             for (k, s) in dir_stats {
@@ -212,7 +264,7 @@ pub fn tree_lines(dir_stats: &BTreeMap<String, DirStat>, max_depth: usize, budge
                     }
                 }
             }
-            subs.sort_by(|a, b| b.1.loc.cmp(&a.1.loc));
+            subs.sort_by_key(|(_, s)| std::cmp::Reverse(s.loc));
             if !subs.is_empty() {
                 let take = subs.len().min(6);
                 let parts: Vec<String> = subs[..take]
@@ -240,7 +292,7 @@ pub fn tree_lines(dir_stats: &BTreeMap<String, DirStat>, max_depth: usize, budge
 fn total_loc_files(dir_stats: &BTreeMap<String, DirStat>) -> usize {
     // 全部 code 檔案數 = 所有直接目錄 files 加總（含 "."）
     let mut n = 0;
-    for (_, s) in dir_stats {
+    for s in dir_stats.values() {
         n += s.files;
     }
     n

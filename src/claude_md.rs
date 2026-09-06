@@ -13,7 +13,11 @@ pub fn find_claude_md(root: &Path) -> PathBuf {
 
 /// Update (or insert) the claudecat section in `path`.
 /// Returns (changed: bool, new_content: String).
-pub fn update_section(path: &Path, section: &str, dry_run: bool) -> std::io::Result<(bool, String)> {
+pub fn update_section(
+    path: &Path,
+    section: &str,
+    dry_run: bool,
+) -> std::io::Result<(bool, String)> {
     let existing = if path.is_file() {
         fs::read_to_string(path).unwrap_or_default()
     } else {
@@ -62,10 +66,7 @@ pub fn update_section(path: &Path, section: &str, dry_run: bool) -> std::io::Res
         // 寫入目標必須是解析後的本體；tmp 也放目標目錄，rename 才是同檔案系統原子操作。
         let target = match fs::read_link(path) {
             Ok(link) if link.is_absolute() => link,
-            Ok(link) => path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(link),
+            Ok(link) => path.parent().unwrap_or_else(|| Path::new(".")).join(link),
             Err(_) => path.to_path_buf(),
         };
         if let Some(parent) = target.parent() {

@@ -1,12 +1,12 @@
+pub mod claude_md;
 pub mod cort;
 pub mod cort_audit;
 pub mod dates;
-pub mod navigate;
-pub mod claude_md;
 pub mod explore;
 pub mod guardrails;
 pub mod manifest;
 pub mod model;
+pub mod navigate;
 pub mod outline;
 pub mod symbols;
 pub mod walk;

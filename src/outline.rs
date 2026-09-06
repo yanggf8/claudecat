@@ -27,10 +27,16 @@ fn render_full(map: &ProjectMap) -> String {
         s.push_str(&format!("- **Framework**: {}\n", map.meta.framework));
     }
     if !map.meta.package_manager.is_empty() {
-        s.push_str(&format!("- **Package manager**: {}\n", map.meta.package_manager));
+        s.push_str(&format!(
+            "- **Package manager**: {}\n",
+            map.meta.package_manager
+        ));
     }
     if !map.meta.entry_points.is_empty() {
-        s.push_str(&format!("- **Entry points**: {}\n", map.meta.entry_points.join(", ")));
+        s.push_str(&format!(
+            "- **Entry points**: {}\n",
+            map.meta.entry_points.join(", ")
+        ));
     }
     if let Some(c) = &map.meta.run_command {
         s.push_str(&format!("- **Run**: `{}`\n", c));
@@ -96,7 +102,11 @@ fn render_full(map: &ProjectMap) -> String {
                 continue;
             }
             let take = g.deps.len().min(30);
-            s.push_str(&format!("- `{}`: {}\n", g.ecosystem, g.deps[..take].join(", ")));
+            s.push_str(&format!(
+                "- `{}`: {}\n",
+                g.ecosystem,
+                g.deps[..take].join(", ")
+            ));
             if g.deps.len() > take {
                 s.push_str(&format!("  … +{} more\n", g.deps.len() - take));
             }
@@ -134,7 +144,10 @@ fn render_mini(map: &ProjectMap) -> String {
     .collect();
     s.push_str(&format!("- **About**: {}\n", bits.join(" · ")));
     if !map.meta.entry_points.is_empty() {
-        s.push_str(&format!("- **Entry points**: {}\n", map.meta.entry_points.join(", ")));
+        s.push_str(&format!(
+            "- **Entry points**: {}\n",
+            map.meta.entry_points.join(", ")
+        ));
     }
     if let Some(c) = &map.meta.run_command {
         s.push_str(&format!("- **Run**: `{}`\n", c));
@@ -143,7 +156,12 @@ fn render_mini(map: &ProjectMap) -> String {
         s.push_str(&format!("- **Build**: `{}`\n", c));
     }
     let top_ = crate::walk::tree_lines(&map.dir_stats, 1, 6, map.total_loc);
-    let top: String = top_.iter().filter(|l| !l.starts_with("Total:")).cloned().collect::<Vec<_>>().join("; ");
+    let top: String = top_
+        .iter()
+        .filter(|l| !l.starts_with("Total:"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
     if !top.is_empty() {
         s.push_str(&format!("- **Structure**: {}\n", top));
     }
@@ -151,7 +169,18 @@ fn render_mini(map: &ProjectMap) -> String {
         let dep_bits: Vec<String> = map
             .deps
             .iter()
-            .map(|g| format!("{}: {}", g.ecosystem, g.deps.iter().take(8).cloned().collect::<Vec<_>>().join(", ")))
+            .map(|g| {
+                format!(
+                    "{}: {}",
+                    g.ecosystem,
+                    g.deps
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
             .collect();
         s.push_str(&format!("- **Deps**: {}\n", dep_bits.join("; ")));
     }

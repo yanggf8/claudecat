@@ -36,7 +36,8 @@ fn go_functions_methods() {
 
 #[test]
 fn c_functions_structs() {
-    let src = "#include <stdio.h>\nstruct Point { int x; };\nint add(int a, int b) { return a + b; }\n";
+    let src =
+        "#include <stdio.h>\nstruct Point { int x; };\nint add(int a, int b) { return a + b; }\n";
     let syms = extract_symbols("c", src);
     let names: Vec<String> = syms.iter().map(|s| s.name.clone()).collect();
     assert!(names.contains(&"add".to_string()));

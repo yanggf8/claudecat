@@ -15,16 +15,27 @@ fn analyze_project_counts_files_loc_and_langs() {
 
     // legacy/node_modules excluded
     assert!(!map.key_files.iter().any(|f| f.path.contains("legacy")));
-    assert!(!map.key_files.iter().any(|f| f.path.contains("node_modules")));
+    assert!(!map
+        .key_files
+        .iter()
+        .any(|f| f.path.contains("node_modules")));
     // package.json 是 config：計入 total_files，但不計 code LOC、不進 key_files
     assert_eq!(map.total_files, 4, "package.json + 3 code files");
     assert!(map.languages.contains_key("javascript"));
     assert!(map.languages.contains_key("python"));
     assert!(map.languages.contains_key("typescript"));
     // LOC: a.js=2, b.py=2(non-blank: def f / pass), c.ts=1
-    let js = map.key_files.iter().find(|f| f.path.ends_with("a.js")).unwrap();
+    let js = map
+        .key_files
+        .iter()
+        .find(|f| f.path.ends_with("a.js"))
+        .unwrap();
     assert_eq!(js.loc, 2);
-    let py = map.key_files.iter().find(|f| f.path.ends_with("b.py")).unwrap();
+    let py = map
+        .key_files
+        .iter()
+        .find(|f| f.path.ends_with("b.py"))
+        .unwrap();
     assert_eq!(py.loc, 3); // "# hi", "def f()", "    pass"
     assert_eq!(map.total_loc, 6); // a.js 2 + b.py 3 + c.ts 1 (config 不列入)
 
@@ -33,14 +44,22 @@ fn analyze_project_counts_files_loc_and_langs() {
     // 雙重計數修復：src + src/lib 的 LOC 總和必須等於 total_loc
     let src_loc = map.dir_stats.get("src").map(|d| d.loc).unwrap_or(0);
     let lib_loc = map.dir_stats.get("src/lib").map(|d| d.loc).unwrap_or(0);
-    assert_eq!(src_loc + lib_loc, map.total_loc, "dir LOC sum must equal total_loc");
+    assert_eq!(
+        src_loc + lib_loc,
+        map.total_loc,
+        "dir LOC sum must equal total_loc"
+    );
 }
 
 #[test]
 fn top_n_limits_key_files() {
     let t = common::Tmp(common::temp_dir());
     for i in 0..6 {
-        common::write(&t.0, &format!("src/f{i}.rs"), &format!("pub fn f{i}() {{}}\n"));
+        common::write(
+            &t.0,
+            &format!("src/f{i}.rs"),
+            &format!("pub fn f{i}() {{}}\n"),
+        );
     }
     let map = walk::analyze_project(&t.0, 3, None);
     assert_eq!(map.key_files.len(), 3);

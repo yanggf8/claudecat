@@ -1,6 +1,5 @@
 use std::fs;
 
-
 #[test]
 fn manifest_detects_rust_and_deps() {
     let dir = temp_project();
@@ -11,7 +10,9 @@ fn manifest_detects_rust_and_deps() {
     .unwrap();
     let (meta, deps) = claudecat::manifest::detect_project_meta(&dir);
     assert_eq!(meta.language, "Rust");
-    assert!(deps.iter().any(|g| g.ecosystem == "crates.io" && g.deps.contains(&"serde".to_string())));
+    assert!(deps
+        .iter()
+        .any(|g| g.ecosystem == "crates.io" && g.deps.contains(&"serde".to_string())));
 }
 
 #[test]
@@ -26,7 +27,8 @@ fn symbols_extract_rust_items() {
 
 #[test]
 fn symbols_skip_nested_fn_noise() {
-    let src = "function outer() {\n  const tmp = 1;\n  function inner() {}\n}\nclass A { method() {} }\n";
+    let src =
+        "function outer() {\n  const tmp = 1;\n  function inner() {}\n}\nclass A { method() {} }\n";
     let syms = claudecat::symbols::extract_symbols("javascript", src);
     // nested const / inner fn must not be reported; class A + method() should
     assert!(!syms.iter().any(|s| s.name == "tmp"));
@@ -48,7 +50,9 @@ fn claude_md_update_is_idempotent_and_atomic() {
     assert!(content.contains("<!-- claudecat:auto:begin -->"));
     assert!(content.contains("# My Project"));
     // no temp leftovers
-    assert!(fs::read_dir(dir).unwrap().all(|e| e.unwrap().file_name() != ".claudecat.tmp"));
+    assert!(fs::read_dir(dir)
+        .unwrap()
+        .all(|e| e.unwrap().file_name() != ".claudecat.tmp"));
 }
 
 /// 暫時覆寫環境變數，drop 時還原（避免污染其他並行測試）
@@ -78,7 +82,10 @@ fn temp_project() -> std::path::PathBuf {
 
 fn rand_suffix() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 #[test]
@@ -157,7 +164,6 @@ fn claudecat_lib_scan(root: &std::path::Path) -> claudecat::model::ProjectMap {
     map
 }
 
-
 #[test]
 fn track_appends_and_updates_same_day_row() {
     let dir = temp_project();
@@ -187,10 +193,17 @@ fn auto_profile_picks_mini_for_small_project() {
     fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
     let map = claudecat_lib_scan(&dir);
     let profile = claudecat::model::resolve_profile(map.total_loc, map.total_files, None);
-    assert!(profile.is_mini(), "small project should resolve to Mini, got {:?}", profile);
+    assert!(
+        profile.is_mini(),
+        "small project should resolve to Mini, got {:?}",
+        profile
+    );
     let md = claudecat::outline::render_with_profile(&map, profile);
     assert!(md.contains("Mini"));
-    assert!(!md.contains("Key files & symbols"), "mini must skip symbols");
+    assert!(
+        !md.contains("Key files & symbols"),
+        "mini must skip symbols"
+    );
 }
 
 #[test]
@@ -225,7 +238,11 @@ fn track_update_handles_multiple_repos() {
     let (changed, _) = claudecat::explore::track_update(&target, &refs).unwrap();
     assert!(changed);
     let content = fs::read_to_string(&target).unwrap();
-    assert_eq!(content.matches("| 日期").count(), 1, "single header expected");
+    assert_eq!(
+        content.matches("| 日期").count(),
+        1,
+        "single header expected"
+    );
     assert_eq!(content.matches(&format!("`{}`", r1.display())).count(), 1);
     assert_eq!(content.matches(&format!("`{}`", r2.display())).count(), 1);
 }
@@ -292,9 +309,15 @@ fn navigate_finds_symbol_and_route() {
     .unwrap();
     let map = claudecat_lib_scan(&dir);
     let r = claudecat::navigate::navigate(&map, "auth");
-    assert!(r.symbols.iter().any(|h| h.name == "authenticate"), "should hit authenticate");
+    assert!(
+        r.symbols.iter().any(|h| h.name == "authenticate"),
+        "should hit authenticate"
+    );
     // mod auth 精確命中優先；路線應含 cort context <命中符號>
-    assert!(r.route.iter().any(|s| s.contains("cort context")), "route should suggest cort context");
+    assert!(
+        r.route.iter().any(|s| s.contains("cort context")),
+        "route should suggest cort context"
+    );
     let report_auth = claudecat::navigate::render(&r);
     assert!(report_auth.contains("auth") || report_auth.contains("authenticate"));
     let report = claudecat::navigate::render(&r);
@@ -339,7 +362,11 @@ fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     let db_path = cache.join(format!("{pid}.db"));
 
@@ -390,15 +417,15 @@ fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
         .execute_batch("PRAGMA locking_mode=EXCLUSIVE;")
         .unwrap();
     holder
-        .execute_batch("BEGIN; INSERT INTO chunks VALUES ('c3', 'x', 'x', 'x', 'x', 1, 1, 'x', 'x'); COMMIT;")
+        .execute_batch(
+            "BEGIN; INSERT INTO chunks VALUES ('c3', 'x', 'x', 'x', 'x', 1, 1, 'x', 'x'); COMMIT;",
+        )
         .unwrap();
 
     // 4) 情境成立：一般唯讀可以開，但第一次 query 就 BUSY
-    let normal = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open 本身應成功");
+    let normal =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open 本身應成功");
     let err = normal.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0));
     assert!(
         err.is_err(),
@@ -437,7 +464,11 @@ fn cort_fts_finds_content_only_match() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     let db_path = cache.join(format!("{pid}.db"));
 
@@ -563,7 +594,11 @@ fn cort_audit_reports_health_and_coverage() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     let db_path = cache.join(format!("{pid}.db"));
 
@@ -738,7 +773,11 @@ fn cort_freshness_ms_stale_after_7_days_and_consistent() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     let db_path = cache.join(format!("{pid}.db"));
     let old_ms = std::time::SystemTime::now()
@@ -772,10 +811,7 @@ fn cort_freshness_ms_stale_after_7_days_and_consistent() {
     std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
 
     let info = claudecat::cort::index_info(&proj).expect("index_info 應有結果");
-    assert!(
-        !info.fresh,
-        "40 天前的索引（毫秒），cort-status 應報 STALE"
-    );
+    assert!(!info.fresh, "40 天前的索引（毫秒），cort-status 應報 STALE");
     let audit = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
     assert!(!audit.fresh, "audit 的 fresh 判定口徑應與 index_info 一致");
     drop(guard);
@@ -834,7 +870,10 @@ fn track_table_preserves_sibling_sections_in_one_file() {
 
     // 3) 同日再更新 audit（audit 表格本身等價重建；重點在下方內容斷言）
     let (changed, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
-    assert!(changed, "重寫會壓掉表格與下一個 section 間的空行 → 內容有變");
+    assert!(
+        changed,
+        "重寫會壓掉表格與下一個 section 間的空行 → 內容有變"
+    );
     let after = fs::read_to_string(&f).unwrap();
     assert!(
         after.contains("## 長期指標 (claudecat explore)"),
@@ -893,7 +932,11 @@ fn cort_audit_missing_file_state_table_is_not_silent_zero() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     let db_path = cache.join(format!("{pid}.db"));
     let now_ms = std::time::SystemTime::now()
@@ -923,7 +966,10 @@ fn cort_audit_missing_file_state_table_is_not_silent_zero() {
     std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
 
     let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
-    assert_eq!(a.not_chunked_total, None, "查詢失敗必須是「無法判讀」，不是 0");
+    assert_eq!(
+        a.not_chunked_total, None,
+        "查詢失敗必須是「無法判讀」，不是 0"
+    );
     assert_eq!(a.file_state_files, None);
 
     let audit = claudecat::cort::CortAudit {
@@ -935,7 +981,10 @@ fn cort_audit_missing_file_state_table_is_not_silent_zero() {
         usage_7d: None,
     };
     let report = claudecat::cort_audit::render(&audit);
-    assert!(report.contains("無法判讀"), "報告應明說無法判讀，不假裝無缺口");
+    assert!(
+        report.contains("無法判讀"),
+        "報告應明說無法判讀，不假裝無缺口"
+    );
     drop(guard);
 }
 
@@ -950,7 +999,11 @@ fn cort_audit_fts_drift_detects_missing_and_extra_fts_rows() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     let db_path = cache.join(format!("{pid}.db"));
     let now_ms = std::time::SystemTime::now()
@@ -1001,8 +1054,7 @@ fn cort_sqlite_uri_escapes_special_chars() {
     let p = std::path::Path::new("/home/u#1/my cache/db?x.db");
     let uri = claudecat::cort::sqlite_uri(p);
     assert_eq!(
-        uri,
-        "file:/home/u%231/my%20cache/db%3Fx.db?immutable=1",
+        uri, "file:/home/u%231/my%20cache/db%3Fx.db?immutable=1",
         "URI 邊界字元必須編碼"
     );
     assert!(!uri.contains(' '));
@@ -1019,10 +1071,18 @@ fn cort_audit_distinguishes_unreadable_db_from_missing_index() {
         rand_suffix()
     ));
     fs::create_dir_all(&cache).unwrap();
-    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let pid = claudecat::cort::project_id(&real_str);
     // 檔案在，但不是 SQLite 資料庫
-    fs::write(cache.join(format!("{pid}.db")), b"definitely not a database").unwrap();
+    fs::write(
+        cache.join(format!("{pid}.db")),
+        b"definitely not a database",
+    )
+    .unwrap();
 
     let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(

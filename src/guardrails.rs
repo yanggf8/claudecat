@@ -8,9 +8,13 @@ pub const GR_END: &str = "<!-- claudecat:guardrails:end -->";
 /// 從 marker 區塊抽出每一條決策（去掉 markdown 前綴與註解）
 pub fn extract(content: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let Some(b) = content.find(GR_BEGIN) else { return out };
+    let Some(b) = content.find(GR_BEGIN) else {
+        return out;
+    };
     let rest = &content[b + GR_BEGIN.len()..];
-    let Some(e) = rest.find(GR_END) else { return out };
+    let Some(e) = rest.find(GR_END) else {
+        return out;
+    };
     for line in rest[..e].lines() {
         let l = line.trim().trim_start_matches('-').trim();
         if !l.is_empty() && !l.starts_with("<!--") {

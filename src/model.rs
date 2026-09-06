@@ -75,7 +75,11 @@ impl MapProfile {
 }
 
 /// auto：依專案規模選（小專案用迷你地圖，避免負效益）
-pub fn resolve_profile(total_loc: usize, _total_files: usize, flag: Option<MapProfile>) -> MapProfile {
+pub fn resolve_profile(
+    total_loc: usize,
+    _total_files: usize,
+    flag: Option<MapProfile>,
+) -> MapProfile {
     match flag {
         Some(MapProfile::Mini) | Some(MapProfile::Full) => flag.unwrap(),
         _ => {

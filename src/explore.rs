@@ -100,9 +100,15 @@ pub fn render(m: &ExploreMetrics) -> String {
         m.read_tokens
     ));
     if m.map_overhead {
-        s.push_str(&format!("- **Map overhead**: +{:.0}% (地圖成本高於全讀，小專案建議 mini)\n", m.savings_pct.abs()));
+        s.push_str(&format!(
+            "- **Map overhead**: +{:.0}% (地圖成本高於全讀，小專案建議 mini)\n",
+            m.savings_pct.abs()
+        ));
     } else {
-        s.push_str(&format!("- **Map vs full-read**: 地圖省 ~{:.1}% token\n", m.savings_pct));
+        s.push_str(&format!(
+            "- **Map vs full-read**: 地圖省 ~{:.1}% token\n",
+            m.savings_pct
+        ));
     }
 
     s.push_str("\n## 只看 top-K 檔案的覆蓋率\n\n");
@@ -115,9 +121,15 @@ pub fn render(m: &ExploreMetrics) -> String {
     }
 
     s.push_str("\n## 解讀\n\n");
-    s.push_str("- **Map token cost** = `claudecat update` 寫進 CLAUDE.md 的地圖成本（不到 1k tokens）。\n");
-    s.push_str("- **Read-everything cost** = 若 Claude 沒有地圖、只能把全部程式碼讀完的粗估（LOC×6）。\n");
-    s.push_str("- 真實 session 資料顯示 64–96% 工具呼叫花在探索；地圖把「找結構」變成「看地圖」。\n");
+    s.push_str(
+        "- **Map token cost** = `claudecat update` 寫進 CLAUDE.md 的地圖成本（不到 1k tokens）。\n",
+    );
+    s.push_str(
+        "- **Read-everything cost** = 若 Claude 沒有地圖、只能把全部程式碼讀完的粗估（LOC×6）。\n",
+    );
+    s.push_str(
+        "- 真實 session 資料顯示 64–96% 工具呼叫花在探索；地圖把「找結構」變成「看地圖」。\n",
+    );
     s
 }
 
@@ -172,8 +184,7 @@ pub fn track_table(
     let zone: Option<(usize, usize)> = existing.find(section).map(|start| {
         let after_title = start + section.len();
         let end = after_title
-            + next_heading_offset(&existing[after_title..])
-                .unwrap_or(existing.len() - after_title);
+            + next_heading_offset(&existing[after_title..]).unwrap_or(existing.len() - after_title);
         (start, end)
     });
 
@@ -190,8 +201,7 @@ pub fn track_table(
 
     fn row_root(row: &str) -> Option<String> {
         let cols: Vec<&str> = row.split('|').collect();
-        cols.get(2)
-            .map(|c| c.trim().trim_matches('`').to_string())
+        cols.get(2).map(|c| c.trim().trim_matches('`').to_string())
     }
 
     // 欄數正規化：舊格式（例如多一個裝飾欄）對齊新 header
@@ -212,7 +222,10 @@ pub fn track_table(
             for nr in new_rows {
                 let cols: Vec<&str> = nr.split('|').collect();
                 let date = cols.get(1).map(|c| c.trim()).unwrap_or("");
-                let root = cols.get(2).map(|c| c.trim().trim_matches('`')).unwrap_or("");
+                let root = cols
+                    .get(2)
+                    .map(|c| c.trim().trim_matches('`'))
+                    .unwrap_or("");
                 if row.contains(date) && r.as_deref() == Some(root) {
                     return false;
                 }

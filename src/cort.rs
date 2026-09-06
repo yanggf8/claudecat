@@ -3,8 +3,8 @@
 //! 不做任何寫入；DB 不存在或 schema 不符時回退到 None。
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
-use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// 與 cort 完全一致：project_id = sha256(real_path) hex
@@ -187,16 +187,16 @@ fn freshness(real_str: &str, indexed_head: Option<&str>, last_indexed_at: Option
 }
 
 fn git_head(real_str: &str) -> Option<String> {
-    let head = std::path::Path::new(real_str)
-        .join(".git")
-        .join("HEAD");
+    let head = std::path::Path::new(real_str).join(".git").join("HEAD");
     let content = std::fs::read_to_string(head).ok()?;
     let content = content.trim();
     if let Some(ref_path) = content.strip_prefix("ref: ") {
         let full = std::path::Path::new(real_str)
             .join(".git")
             .join(ref_path.trim());
-        std::fs::read_to_string(full).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(full)
+            .ok()
+            .map(|s| s.trim().to_string())
     } else {
         Some(content.to_string())
     }
@@ -423,12 +423,11 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             None => return Ok(None), // 專案尚未被 cort 索引
         };
 
-        let chunk_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM chunks WHERE project_id = ?1",
-                [&pid],
-                |r| r.get(0),
-            )?;
+        let chunk_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE project_id = ?1",
+            [&pid],
+            |r| r.get(0),
+        )?;
         let relationships_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM chunks c JOIN relationships r \
@@ -505,8 +504,7 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             (Some(now), Some(idx)) => now == idx,
             _ => true, // 非 git repo 時不追究
         };
-        let age_days = last_indexed_at
-            .map(|t| (now_ms() - t).max(0) / (24 * 3600 * 1000));
+        let age_days = last_indexed_at.map(|t| (now_ms() - t).max(0) / (24 * 3600 * 1000));
         let fresh = is_fresh(git_head_matches, last_indexed_at);
 
         Ok(Some(CortAuditIndex {
@@ -553,9 +551,9 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
         window_days,
         ..Default::default()
     };
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT command, COUNT(*) FROM command_log WHERE ts >= ?1 GROUP BY command",
-    ) {
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT command, COUNT(*) FROM command_log WHERE ts >= ?1 GROUP BY command")
+    {
         if let Ok(rows) = stmt.query_map([&since], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         }) {
@@ -570,9 +568,9 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
         ("hook-suggest", &mut u.suggest_outcomes),
         ("hook-refresh", &mut u.refresh_outcomes),
     ] {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT args_summary FROM command_log WHERE command = ?1 AND ts >= ?2",
-        ) {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT args_summary FROM command_log WHERE command = ?1 AND ts >= ?2")
+        {
             if let Ok(rows) =
                 stmt.query_map(rusqlite::params![cmd, since], |r| r.get::<_, String>(0))
             {

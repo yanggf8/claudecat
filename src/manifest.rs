@@ -140,11 +140,13 @@ fn refine_package_manager(root: &Path, meta: &mut ProjectMeta) {
 fn parse_package_json(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let mut meta = ProjectMeta::default();
-    meta.project_type = "Node.js application/library".into();
-    meta.package_manager = "npm".into();
-    meta.name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").into();
-    meta.language = "TypeScript/JavaScript".into();
+    let mut meta = ProjectMeta {
+        project_type: "Node.js application/library".into(),
+        package_manager: "npm".into(),
+        name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").into(),
+        language: "TypeScript/JavaScript".into(),
+        ..ProjectMeta::default()
+    };
 
     if let Some(bins) = v.get("bin") {
         let mut entries = vec![];
@@ -172,7 +174,10 @@ fn parse_package_json(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
                         meta.run_command = Some(format!("npm start ({value})"));
                     }
                     "dev" => {
-                        meta.run_command = meta.run_command.clone().or(Some(format!("npm run dev ({value})")));
+                        meta.run_command = meta
+                            .run_command
+                            .clone()
+                            .or(Some(format!("npm run dev ({value})")));
                     }
                     "build" => {
                         meta.build_command = Some(format!("npm run build ({value})"));
@@ -194,19 +199,28 @@ fn parse_package_json(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     }
     deps.sort();
     deps.dedup();
-    let group = DepGroup { ecosystem: "npm".into(), deps };
+    let group = DepGroup {
+        ecosystem: "npm".into(),
+        deps,
+    };
     Some((meta, group))
 }
 
 fn parse_cargo_toml(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: toml::Value = toml::from_str(&text).ok()?;
-    let mut meta = ProjectMeta::default();
-    meta.project_type = "Rust application/library".into();
-    meta.package_manager = "cargo".into();
-    meta.language = "Rust".into();
+    let mut meta = ProjectMeta {
+        project_type: "Rust application/library".into(),
+        package_manager: "cargo".into(),
+        language: "Rust".into(),
+        ..ProjectMeta::default()
+    };
     if let Some(pkg) = v.get("package") {
-        meta.name = pkg.get("name").and_then(|x| x.as_str()).unwrap_or("").into();
+        meta.name = pkg
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into();
         if let Some(bin_path) = pkg.get("default-run").and_then(|x| x.as_str()) {
             meta.entry_points.push(bin_path.to_string());
         }
@@ -219,7 +233,11 @@ fn parse_cargo_toml(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
         }
     }
     // workspace members：入口併入
-    if let Some(ws) = v.get("workspace").and_then(|x| x.get("members")).and_then(|x| x.as_array()) {
+    if let Some(ws) = v
+        .get("workspace")
+        .and_then(|x| x.get("members"))
+        .and_then(|x| x.as_array())
+    {
         for mem in ws {
             if let Some(m) = mem.as_str() {
                 let mp = path.parent().map(|p| p.join(m)).unwrap_or_default();
@@ -229,7 +247,11 @@ fn parse_cargo_toml(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
             }
         }
     }
-    if path.parent().map(|p| p.join("src/main.rs").is_file()).unwrap_or(false) {
+    if path
+        .parent()
+        .map(|p| p.join("src/main.rs").is_file())
+        .unwrap_or(false)
+    {
         meta.entry_points.push("src/main.rs".into());
     }
     meta.run_command = Some("cargo run".into());
@@ -245,19 +267,28 @@ fn parse_cargo_toml(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     }
     deps.sort();
     deps.dedup();
-    let group = DepGroup { ecosystem: "crates.io".into(), deps };
+    let group = DepGroup {
+        ecosystem: "crates.io".into(),
+        deps,
+    };
     Some((meta, group))
 }
 
 fn parse_pyproject(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: toml::Value = toml::from_str(&text).ok()?;
-    let mut meta = ProjectMeta::default();
-    meta.project_type = "Python application/library".into();
-    meta.package_manager = "uv/pip".into();
-    meta.language = "Python".into();
+    let mut meta = ProjectMeta {
+        project_type: "Python application/library".into(),
+        package_manager: "uv/pip".into(),
+        language: "Python".into(),
+        ..ProjectMeta::default()
+    };
     if let Some(proj) = v.get("project") {
-        meta.name = proj.get("name").and_then(|x| x.as_str()).unwrap_or("").into();
+        meta.name = proj
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into();
         if let Some(scripts) = proj.get("scripts").and_then(|x| x.as_table()) {
             for (k, val) in scripts {
                 if let Some(v) = val.as_str() {
@@ -285,7 +316,10 @@ fn parse_pyproject(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     }
     deps.sort();
     deps.dedup();
-    let group = DepGroup { ecosystem: "PyPI".into(), deps };
+    let group = DepGroup {
+        ecosystem: "PyPI".into(),
+        deps,
+    };
     Some((meta, group))
 }
 
@@ -308,15 +342,20 @@ fn parse_requirements(path: &Path) -> Option<DepGroup> {
     }
     deps.sort();
     deps.dedup();
-    Some(DepGroup { ecosystem: "PyPI".into(), deps })
+    Some(DepGroup {
+        ecosystem: "PyPI".into(),
+        deps,
+    })
 }
 
 fn parse_go_mod(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut meta = ProjectMeta::default();
-    meta.project_type = "Go application/library".into();
-    meta.package_manager = "go modules".into();
-    meta.language = "Go".into();
+    let mut meta = ProjectMeta {
+        project_type: "Go application/library".into(),
+        package_manager: "go modules".into(),
+        language: "Go".into(),
+        ..ProjectMeta::default()
+    };
     let mut deps: Vec<String> = Vec::new();
     let mut in_require = false;
     for line in text.lines() {
@@ -327,8 +366,8 @@ fn parse_go_mod(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
             in_require = true;
         } else if t == ")" {
             in_require = false;
-        } else if t.starts_with("require ") {
-            let rest = t["require ".len()..].trim();
+        } else if let Some(rest) = t.strip_prefix("require ") {
+            let rest = rest.trim();
             let name = rest.split_whitespace().next().unwrap_or(rest).to_string();
             deps.push(name);
         } else if in_require {
@@ -338,23 +377,32 @@ fn parse_go_mod(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
             }
         }
     }
-    if path.parent().map(|p| p.join("main.go").is_file()).unwrap_or(false) {
+    if path
+        .parent()
+        .map(|p| p.join("main.go").is_file())
+        .unwrap_or(false)
+    {
         meta.entry_points.push("main.go".into());
     }
     meta.run_command = Some("go run .".into());
     meta.build_command = Some("go build".into());
     deps.sort();
     deps.dedup();
-    let group = DepGroup { ecosystem: "Go modules".into(), deps };
+    let group = DepGroup {
+        ecosystem: "Go modules".into(),
+        deps,
+    };
     Some((meta, group))
 }
 
 fn parse_gemfile(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut meta = ProjectMeta::default();
-    meta.project_type = "Ruby application".into();
-    meta.package_manager = "bundler".into();
-    meta.language = "Ruby".into();
+    let mut meta = ProjectMeta {
+        project_type: "Ruby application".into(),
+        package_manager: "bundler".into(),
+        language: "Ruby".into(),
+        ..ProjectMeta::default()
+    };
     let mut deps = Vec::new();
     for line in text.lines() {
         let t = line.trim();
@@ -373,16 +421,24 @@ fn parse_gemfile(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     meta.run_command = Some("bundle exec".into());
     deps.sort();
     deps.dedup();
-    Some((meta, DepGroup { ecosystem: "RubyGems".into(), deps }))
+    Some((
+        meta,
+        DepGroup {
+            ecosystem: "RubyGems".into(),
+            deps,
+        },
+    ))
 }
 
 fn parse_composer(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let mut meta = ProjectMeta::default();
-    meta.project_type = "PHP application".into();
-    meta.package_manager = "composer".into();
-    meta.language = "PHP".into();
+    let mut meta = ProjectMeta {
+        project_type: "PHP application".into(),
+        package_manager: "composer".into(),
+        language: "PHP".into(),
+        ..ProjectMeta::default()
+    };
     meta.name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").into();
     let mut deps = Vec::new();
     for key in ["require", "require-dev"] {
@@ -394,7 +450,13 @@ fn parse_composer(path: &Path) -> Option<(ProjectMeta, DepGroup)> {
     }
     deps.sort();
     deps.dedup();
-    Some((meta, DepGroup { ecosystem: "Packagist".into(), deps }))
+    Some((
+        meta,
+        DepGroup {
+            ecosystem: "Packagist".into(),
+            deps,
+        },
+    ))
 }
 
 fn infer_framework(meta: &mut ProjectMeta, deps: &[DepGroup]) {
@@ -434,9 +496,7 @@ fn infer_framework(meta: &mut ProjectMeta, deps: &[DepGroup]) {
             let low = d.to_lowercase();
             for (frame, needles) in known {
                 if needles.iter().any(|n| {
-                    low == *n
-                        || low.starts_with(&format!("{n} "))
-                        || low.contains(&format!("/{n}"))
+                    low == *n || low.starts_with(&format!("{n} ")) || low.contains(&format!("/{n}"))
                 }) {
                     all.push(frame);
                 }

@@ -21,8 +21,7 @@ fn deep_verb_count(u: &UsageWindow) -> i64 {
 
 /// Option<i64> 呈現：None = 無法判讀，顯示 `?`（絕不顯示 0 假裝健康）
 fn opt_i64(v: &Option<i64>) -> String {
-    v.map(|n| n.to_string())
-        .unwrap_or_else(|| "?".to_string())
+    v.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string())
 }
 
 fn render_index(i: &CortAuditIndex, s: &mut String) {
@@ -31,7 +30,9 @@ fn render_index(i: &CortAuditIndex, s: &mut String) {
         "- fresh={}（git head 相符={}，索引距今 {} 天）\n",
         if i.fresh { "fresh" } else { "STALE" },
         i.git_head_matches,
-        i.index_age_days.map(|d| d.to_string()).unwrap_or_else(|| "?".into())
+        i.index_age_days
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "?".into())
     ));
     s.push_str(&format!(
         "- chunks={} relationships={} name={} path={}\n",
@@ -54,9 +55,7 @@ fn render_coverage(i: &CortAuditIndex, s: &mut String) {
     s.push_str("\n## 覆蓋缺口\n");
     match i.not_chunked_total {
         None => {
-            s.push_str(
-                "- 覆蓋狀態無法判讀（file_state/chunks 查詢失敗）——不假裝「無缺口」\n",
-            );
+            s.push_str("- 覆蓋狀態無法判讀（file_state/chunks 查詢失敗）——不假裝「無缺口」\n");
         }
         Some(0) => {
             if i.chunk_count == 0 && i.file_state_files == Some(0) {
@@ -158,10 +157,14 @@ pub fn render(a: &CortAudit) -> String {
     let mut hints: Vec<String> = Vec::new();
     if let Some(i) = &a.index {
         if !i.fresh {
-            hints.push("索引 STALE → 執行 `cort index`（或檢查 hook-refresh 是否在跑）".to_string());
+            hints
+                .push("索引 STALE → 執行 `cort index`（或檢查 hook-refresh 是否在跑）".to_string());
         }
         if i.chunk_count == 0 && i.file_state_files == Some(0) {
-            hints.push("空索引（0 chunks、0 file_state）→ 執行 `cort index` 或檢查 extractor/路徑".to_string());
+            hints.push(
+                "空索引（0 chunks、0 file_state）→ 執行 `cort index` 或檢查 extractor/路徑"
+                    .to_string(),
+            );
         }
         match i.not_chunked_total {
             Some(n) if n > 0 => hints.push(format!(
@@ -177,9 +180,9 @@ pub fn render(a: &CortAudit) -> String {
             Some(n) => hints.push(format!(
                 "FTS 索引與 chunks 不同步（drift={n}）→ cort 端重建 FTS"
             )),
-            None => hints.push(
-                "FTS 同步無法判讀（chunks_fts 查詢失敗）→ 不假裝 synced".to_string(),
-            ),
+            None => {
+                hints.push("FTS 同步無法判讀（chunks_fts 查詢失敗）→ 不假裝 synced".to_string())
+            }
         }
     }
     if let Some(u) = &a.usage {

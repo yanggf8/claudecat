@@ -16,7 +16,11 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "claudecat", version, about = "ClaudeCat V2 — 給 Claude Code 一張可信任的專案導航地圖")]
+#[command(
+    name = "claudecat",
+    version,
+    about = "ClaudeCat V2 — 給 Claude Code 一張可信任的專案導航地圖"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -158,11 +162,7 @@ fn now_iso() -> String {
     // UTC-ish timestamp without extra deps
     let days = secs / 86400;
     let (y, m, d) = claudecat::dates::civil_from_days(days as i64);
-    let (hh, mm, ss) = (
-        (secs % 86400) / 3600,
-        (secs % 3600) / 60,
-        secs % 60,
-    );
+    let (hh, mm, ss) = ((secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
@@ -208,7 +208,12 @@ fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> Pr
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { root, format, top_files, map: mf } => {
+        Commands::Scan {
+            root,
+            format,
+            top_files,
+            map: mf,
+        } => {
             let map = analyze(&root, top_files, mf.into_profile());
             match format {
                 Format::Markdown => {
@@ -228,7 +233,12 @@ fn main() {
                 },
             }
         }
-        Commands::Explore { root, top_files, json, map: mf } => {
+        Commands::Explore {
+            root,
+            top_files,
+            json,
+            map: mf,
+        } => {
             let map = analyze(&root, top_files, mf.into_profile());
             let m = explore::compute_with_profile(&map, map.profile_used);
             if json {
@@ -243,38 +253,41 @@ fn main() {
                 println!("{}", explore::render(&m));
             }
         }
-        Commands::CortStatus { root } => {
-            match cort::index_info(&root) {
-                Some(info) => {
-                    println!(
-                        "cort index: {} ({}) — chunks={} relationships={} fresh={}",
-                        info.name,
-                        info.path,
-                        info.chunk_count,
-                        info.relationships_count,
-                        if info.fresh { "fresh" } else { "STALE or old" }
-                    );
-                    if let Some(head) = &info.git_head {
-                        println!("  git head: {}", &head[..head.len().min(12)]);
-                    }
-                    if let Some(t) = info.last_indexed_at {
-                        println!("  last indexed: {}", t);
-                    }
-                    if !info.fresh {
-                        eprintln!("  hint: 執行 `cort index` 更新索引");
-                    }
+        Commands::CortStatus { root } => match cort::index_info(&root) {
+            Some(info) => {
+                println!(
+                    "cort index: {} ({}) — chunks={} relationships={} fresh={}",
+                    info.name,
+                    info.path,
+                    info.chunk_count,
+                    info.relationships_count,
+                    if info.fresh { "fresh" } else { "STALE or old" }
+                );
+                if let Some(head) = &info.git_head {
+                    println!("  git head: {}", &head[..head.len().min(12)]);
                 }
-                None => {
-                    if cort::db_exists(&root) {
-                        println!("cort index: DB 存在但無法讀取（{}）——schema 不相容或檔案損毀？不假裝「尚未索引」", root.display());
-                    } else {
-                        println!("cort index: 無（尚未對 {} 建立索引）", root.display());
-                        eprintln!("  hint: 在該專案執行 `cort index` 後再用 navigate --cort");
-                    }
+                if let Some(t) = info.last_indexed_at {
+                    println!("  last indexed: {}", t);
+                }
+                if !info.fresh {
+                    eprintln!("  hint: 執行 `cort index` 更新索引");
                 }
             }
-        }
-        Commands::CortAudit { root, window, json, track } => {
+            None => {
+                if cort::db_exists(&root) {
+                    println!("cort index: DB 存在但無法讀取（{}）——schema 不相容或檔案損毀？不假裝「尚未索引」", root.display());
+                } else {
+                    println!("cort index: 無（尚未對 {} 建立索引）", root.display());
+                    eprintln!("  hint: 在該專案執行 `cort index` 後再用 navigate --cort");
+                }
+            }
+        },
+        Commands::CortAudit {
+            root,
+            window,
+            json,
+            track,
+        } => {
             let a = cort::audit(&root, window);
             if json {
                 match serde_json::to_string_pretty(&a) {
@@ -291,7 +304,11 @@ fn main() {
                 match cort_audit::track_update(&f, &[&a]) {
                     Ok((changed, path)) => println!(
                         "{} {}",
-                        if changed { "Audit metrics ->" } else { "Up to date:" },
+                        if changed {
+                            "Audit metrics ->"
+                        } else {
+                            "Up to date:"
+                        },
                         path
                     ),
                     Err(e) => {
@@ -301,7 +318,13 @@ fn main() {
                 }
             }
         }
-        Commands::Navigate { query, root, top_files, json, cort: use_cort } => {
+        Commands::Navigate {
+            query,
+            root,
+            top_files,
+            json,
+            cort: use_cort,
+        } => {
             let map = analyze(&root, top_files, Some(MapProfile::Full));
             let mut r = navigate::navigate(&map, &query);
             if use_cort {
@@ -325,7 +348,13 @@ fn main() {
                 println!("{}", navigate::render(&r));
             }
         }
-        Commands::Track { file, root, roots_file, top_files, map: mf } => {
+        Commands::Track {
+            file,
+            root,
+            roots_file,
+            top_files,
+            map: mf,
+        } => {
             // roots：--root 可重複；有 --roots-file 時忽略預設 "."；最後去重
             let mut roots: Vec<PathBuf> = Vec::new();
             if let Some(rf) = roots_file {
@@ -366,7 +395,11 @@ fn main() {
                     let n = metrics.len();
                     println!(
                         "{} {} ({} repo{})",
-                        if changed { "Recorded metrics ->" } else { "Up to date:" },
+                        if changed {
+                            "Recorded metrics ->"
+                        } else {
+                            "Up to date:"
+                        },
                         path,
                         n,
                         if n == 1 { "" } else { "s" }
@@ -378,7 +411,12 @@ fn main() {
                 }
             }
         }
-        Commands::Update { root, dry_run, top_files, map: mf } => {
+        Commands::Update {
+            root,
+            dry_run,
+            top_files,
+            map: mf,
+        } => {
             let map = analyze(&root, top_files, mf.into_profile());
             let section = outline::render_with_profile(&map, map.profile_used);
             let path = claude_md::find_claude_md(&root);
@@ -387,7 +425,11 @@ fn main() {
                     if dry_run {
                         println!(
                             "{} (dry-run) {}",
-                            if changed { "WOULD UPDATE" } else { "UP TO DATE" },
+                            if changed {
+                                "WOULD UPDATE"
+                            } else {
+                                "UP TO DATE"
+                            },
                             path.display()
                         );
                     } else if changed {
