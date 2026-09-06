@@ -88,7 +88,8 @@ claudecat navigate --cort "extractSymbolDefinitions"   # 優先查 cort 全量�
 - `cort-status fresh`：git HEAD 相符 + 索引 ≤7 天；STALE 時提示 `cort index`。
 - `navigate --cort`：命中 cort `chunks`（**比 tree-sitter top-N 更完整**——實測 legacy 檔的
   `extractSymbolDefinitions`：tree-sitter 0 命中、cort 全量索引 1 命中）。
-  symbol_name 未命中時自動 fallback 到 **`chunks_fts` 全文**（content/file 命中，`cort recall` 對應）。
+  symbol_name 未命中時自動 fallback 到 **`chunks_fts` 全文**（content/file 命中；
+  與 `cort context` 的 `resolution=fts` 同源；注意 `cort recall` 是搜 reading_notes，非 code 索引）。
   路線自動含 **content 摘要**（省一次 read）/ `cort context` / `cort impact` / **反向依賴清單**。
 - 唯讀雙保險：一般 `SQLITE_OPEN_READ_ONLY`；失敗（唯讀 FS / 缺 sidecar / 寫入端持鎖 BUSY）
   自動退回 `immutable=1` 直接讀主檔。claudecat 永不寫 cort 的 DB；

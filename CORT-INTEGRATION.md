@@ -49,6 +49,14 @@
 - `navigate --cort "staleness"`：找到 tree-sitter top-30 找不到的符號
   （`rust/tests/staleness_cwd.rs:72`），路線含 cort context / impact / 反向依賴 ✅
 
+## 對照（2026-09-06，`cort recall` / `cort context` vs `navigate --cort`）
+- `cort context "immutable"` → `resolution=fts seeds=4`：cort 自己的 code 全文也是走 `chunks_fts`，
+  且 4 個 seeds 與 `claudecat navigate --cort "immutable"` 的 4 筆 FTS 命中**完全相同** ✅
+- `cort recall "immutable"` → `readings=0`：recall 是搜 `reading_notes`（需先有 read/note 進度），
+  非 code 索引；**claudecat 的 FTS fallback 對應的是 `cort context`（resolution=fts），不是 recall**（文件已修正）
+- 分工不變：`navigate --cort` 給路線 + 壓縮摘要（省 read）+ 反向依賴；
+  `cort context` 給全量 content + call graph（icalls/ocalls/unresolved）——到達後的深挖層
+
 ## 再確認（2026-09-06，cortexyoung 又改版）
 - 新版索引仍為 v4 schema（`projects/chunks/relationships/chunks_fts` 欄位對 claudecat 零影響），
   `extractor_version` 同前一版；新增 `usage.db`（command_log）與 claudecat 無關
@@ -59,7 +67,7 @@
 - `navigate --cort` 命中時帶 cort `content` 摘要進路線（省一次 read）— ✅ 已做：
   路線加「內文摘要（省一次 read）」步驟（壓縮空白、截 220 字），
   `content_summary()` + 命中 route 帶上；實測 `with_readonly` 路線直接含函式簽名
-- FTS 全文檢索 fallback（`chunks_fts` / `cort recall` 對應）— ✅ 已做：
+- FTS 全文檢索 fallback（`chunks_fts`，與 `cort context` 的 fts resolution 同源）— ✅ 已做：
   symbol_name 未命中時查 `chunks_fts MATCH <"token1" AND "token2">`（token 加雙引號防
   FTS 運算子注入），JOIN `chunks` 還原 CortHit，路線標示「cort FTS 全文命中」；
   實測 `immutable`（content-only）4 命中、`"immutable" AND "fallback"` 也通
