@@ -325,17 +325,21 @@ pub struct CortAuditIndex {
     pub index_age_days: Option<i64>,
     pub chunk_count: i64,
     pub relationships_count: i64,
-    /// 覆蓋：file_state 有、chunks 沒有的檔案（completeness 缺口）
-    pub file_state_files: i64,
-    pub chunked_files: i64,
+    /// 覆蓋：file_state 有、chunks 沒有的檔案（completeness 缺口）。
+    /// 查詢失敗（schema 差異等）一律 None＝「無法判讀」，絕不用 0 假裝「無缺口」
+    /// ——當初 ?1 參數 bug 就是被 unwrap_or(0) 吞成「無缺口」。
+    pub file_state_files: Option<i64>,
+    pub chunked_files: Option<i64>,
     /// 未 chunk 檔案的「總數」（清單只保留前 20 筆，避免輸出過長）
-    pub not_chunked_total: i64,
+    pub not_chunked_total: Option<i64>,
     pub not_chunked_files: Vec<String>,
-    /// 含至少一個 unparsed chunk 的檔案數
+    /// 含至少一個 unparsed chunk 的檔案數（純資訊欄）
     pub files_with_unparsed_chunks: i64,
-    /// FTS 同步：chunks_fts docs vs chunks 數
-    pub fts_docs: i64,
-    pub fts_synced: bool,
+    /// chunks_fts 列數（表不存在 → None）
+    pub fts_docs: Option<i64>,
+    /// FTS 與 chunks 的 rowid 雙向差異數（None = 無法判讀）。
+    /// 0 才是同步——「數量相等」會在一多一少時偽稱 synced。
+    pub fts_drift: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -356,6 +360,8 @@ pub struct CortAudit {
     pub window_days: u32,
     pub index: Option<CortAuditIndex>,
     pub usage: Option<UsageWindow>,
+    /// 固定 7 天窗口（早期訊號；與 `--window` 的長期趨勢互補）
+    pub usage_7d: Option<UsageWindow>,
 }
 
 fn now_ms() -> i64 {
@@ -407,38 +413,41 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        let file_state_files: i64 = conn
+        // 以下健康聲明欄位：查詢失敗 → None（無法判讀），絕不 unwrap_or(0) 假裝健康
+        let file_state_files: Option<i64> = conn
             .query_row(
                 "SELECT COUNT(*) FROM file_state WHERE project_id = ?1",
                 [&pid],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
-        let chunked_files: i64 = conn
+            .ok();
+        let chunked_files: Option<i64> = conn
             .query_row(
                 "SELECT COUNT(DISTINCT file_path) FROM chunks WHERE project_id = ?1",
                 [&pid],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
+            .ok();
         let not_chunked_sql = "SELECT file_path FROM file_state WHERE project_id = ? \
              AND file_path NOT IN (SELECT DISTINCT file_path FROM chunks WHERE project_id = ?) \
              ORDER BY file_path";
-        let not_chunked_total: i64 = conn
+        let not_chunked_total: Option<i64> = conn
             .query_row(
                 "SELECT COUNT(*) FROM file_state WHERE project_id = ? \
                  AND file_path NOT IN (SELECT DISTINCT file_path FROM chunks WHERE project_id = ?)",
                 [&pid, &pid],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
+            .ok();
         let mut not_chunked: Vec<String> = Vec::new();
-        if let Ok(mut stmt) = conn.prepare(not_chunked_sql) {
-            let rows = stmt.query_map([&pid, &pid], |r| r.get::<_, String>(0));
-            if let Ok(rows) = rows {
-                for r in rows.flatten() {
-                    if not_chunked.len() < 20 {
-                        not_chunked.push(r);
+        if not_chunked_total.is_some() {
+            if let Ok(mut stmt) = conn.prepare(not_chunked_sql) {
+                let rows = stmt.query_map([&pid, &pid], |r| r.get::<_, String>(0));
+                if let Ok(rows) = rows {
+                    for r in rows.flatten() {
+                        if not_chunked.len() < 20 {
+                            not_chunked.push(r);
+                        }
                     }
                 }
             }
@@ -451,9 +460,21 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        let fts_docs: i64 = conn
+        let fts_docs: Option<i64> = conn
             .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))
-            .unwrap_or(0);
+            .ok();
+        // drift 用 rowid 雙向差異，不用數量相等（一多一少會偽稱 synced）
+        let fts_drift: Option<i64> = conn
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM chunks c LEFT JOIN chunks_fts f ON f.rowid = c.rowid \
+                     WHERE f.rowid IS NULL AND c.project_id = ?1) + \
+                   (SELECT COUNT(*) FROM chunks_fts f LEFT JOIN chunks c ON c.rowid = f.rowid \
+                     WHERE c.rowid IS NULL)",
+                [&pid],
+                |r| r.get(0),
+            )
+            .ok();
 
         // 新鮮度：git head 相符 + ≤7 天
         let git_head_matches = match (&head_now, &indexed_head) {
@@ -478,7 +499,7 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             not_chunked_files: not_chunked,
             files_with_unparsed_chunks,
             fts_docs,
-            fts_synced: fts_docs == chunk_count,
+            fts_drift,
         }))
     })?
 }
@@ -565,13 +586,20 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
     Some(u)
 }
 
-/// 完整審計：索引健康/覆蓋 + 用量（window 天）
+/// 完整審計：索引健康/覆蓋 + 用量（window 天）+ 固定 7 天早期訊號
 pub fn audit(root: &Path, window_days: u32) -> CortAudit {
     let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let usage = audit_usage(window_days);
+    let usage_7d = if window_days == 7 {
+        usage.clone()
+    } else {
+        audit_usage(7)
+    };
     CortAudit {
         root: real.to_string_lossy().into_owned(),
         window_days,
         index: audit_index(&real),
-        usage: audit_usage(window_days),
+        usage,
+        usage_7d,
     }
 }

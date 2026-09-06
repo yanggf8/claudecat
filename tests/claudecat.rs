@@ -602,14 +602,14 @@ fn cort_audit_reports_health_and_coverage() {
     assert!(a.fresh, "索引 0 天前應 fresh");
     assert_eq!(a.chunk_count, 2);
     assert_eq!(a.relationships_count, 1);
-    assert_eq!(a.file_state_files, 2);
-    assert_eq!(a.chunked_files, 1);
-    assert_eq!(a.not_chunked_total, 1);
+    assert_eq!(a.file_state_files, Some(2));
+    assert_eq!(a.chunked_files, Some(1));
+    assert_eq!(a.not_chunked_total, Some(1));
     assert_eq!(a.not_chunked_files, vec!["legacy/test-x.js".to_string()]);
     assert_eq!(a.files_with_unparsed_chunks, 1);
-    // 無 chunks_fts 表 → docs=0、不同步（誠實，不當成 synced）
-    assert_eq!(a.fts_docs, 0);
-    assert!(!a.fts_synced);
+    // 無 chunks_fts 表 → docs/drift 皆「無法判讀」（None），不得偽稱 synced 或 0
+    assert_eq!(a.fts_docs, None);
+    assert_eq!(a.fts_drift, None);
 
     drop(guard);
 }
@@ -695,6 +695,7 @@ fn cort_audit_track_updates_table() {
         window_days: 7,
         index: None,
         usage: None,
+        usage_7d: None,
     };
     let dir = temp_project();
     let f = dir.join("EVIDENCE.md");
@@ -703,6 +704,9 @@ fn cort_audit_track_updates_table() {
     let content1 = fs::read_to_string(&f).unwrap();
     assert!(content1.contains("## 長期指標 (claudecat cort-audit)"));
     assert!(content1.contains("| 日期 | 專案 | fresh |"));
+    assert!(content1.contains("core/7d"), "追蹤列應含 core 動詞欄");
+    assert!(content1.contains("deep/7d"), "追蹤列應含 deep 動詞欄");
+    assert!(content1.contains("命令數/7d"), "追蹤列應含 7 天早期訊號欄");
     assert!(content1.contains("`/tmp/fake-root`"));
 
     let (changed2, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
@@ -773,6 +777,7 @@ fn cort_audit_track_preserves_content_after_section() {
         window_days: 7,
         index: None,
         usage: None,
+        usage_7d: None,
     };
     let dir = temp_project();
     let f = dir.join("EVIDENCE.md");
@@ -799,6 +804,7 @@ fn track_table_preserves_sibling_sections_in_one_file() {
         window_days: 7,
         index: None,
         usage: None,
+        usage_7d: None,
     };
     let dir = temp_project();
     let f = dir.join("SESSION-EVIDENCE.md");
@@ -859,4 +865,113 @@ fn claude_md_update_writes_through_symlink() {
 
     let (changed2, _) = claudecat::claude_md::update_section(&path, &section, false).unwrap();
     assert!(!changed2, "同內容重跑應 no-op");
+}
+
+/// P2 回歸：file_state 表不存在（cort schema 版本差異）時，覆蓋必須是「無法判讀」，
+/// 不得被 unwrap_or(0) 吞成「無缺口」——與當初 ?1 bug 同類的靜默零值。
+#[test]
+fn cort_audit_missing_file_state_table_is_not_silent_zero() {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let db_path = cache.join(format!("{pid}.db"));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // 故意不建 file_state / chunks_fts 表
+        conn.execute_batch(&format!(
+            "CREATE TABLE projects (
+               project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+               git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+             );
+             CREATE TABLE chunks (
+               chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL
+             );
+             INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, {now_ms}, 'test');"
+        ))
+        .unwrap();
+    }
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    assert_eq!(a.not_chunked_total, None, "查詢失敗必須是「無法判讀」，不是 0");
+    assert_eq!(a.file_state_files, None);
+
+    let audit = claudecat::cort::CortAudit {
+        root: real_str,
+        window_days: 30,
+        index: Some(a),
+        usage: None,
+        usage_7d: None,
+    };
+    let report = claudecat::cort_audit::render(&audit);
+    assert!(report.contains("無法判讀"), "報告應明說無法判讀，不假裝無缺口");
+    drop(guard);
+}
+
+/// P2 回歸：FTS 同步判定用 rowid 雙向差異（drift），不用數量相等——
+/// 一多一少時「數量相等」會偽稱 synced。
+#[test]
+fn cort_audit_fts_drift_detects_missing_and_extra_fts_rows() {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let db_path = cache.join(format!("{pid}.db"));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // drift 查詢只用 rowid join——測試用普通表即可，不需 fts5 模組
+        conn.execute_batch(&format!(
+            "CREATE TABLE projects (
+               project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+               git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+             );
+             CREATE TABLE chunks (
+               chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL
+             );
+             CREATE TABLE chunks_fts (content TEXT);
+             INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, {now_ms}, 'test');
+             INSERT INTO chunks VALUES ('c1', '{pid}', 'a.rs');
+             INSERT INTO chunks VALUES ('c2', '{pid}', 'b.rs');
+             INSERT INTO chunks VALUES ('c3', '{pid}', 'c.rs');
+             INSERT INTO chunks_fts (rowid, content) VALUES (1, 'x');
+             INSERT INTO chunks_fts (rowid, content) VALUES (99, 'ghost');"
+        ))
+        .unwrap();
+    }
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    // docs 數量相等（2 == 2）但內容錯位：c2/c3 沒進 FTS、rowid 99 是孤兒
+    assert_eq!(a.fts_docs, Some(2));
+    assert_eq!(a.chunk_count, 3);
+    assert_eq!(a.fts_drift, Some(3), "缺 2（c2,c3）+ 孤兒 1（rowid 99）= 3");
+    assert_ne!(a.fts_drift, Some(0), "數量相等不得判為 synced");
+    drop(guard);
 }

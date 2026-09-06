@@ -33,6 +33,17 @@ fn core_verb_count(u: &UsageWindow) -> i64 {
         .sum()
 }
 
+fn deep_verb_count(u: &UsageWindow) -> i64 {
+    u.by_command.get("context").copied().unwrap_or(0)
+        + u.by_command.get("recall").copied().unwrap_or(0)
+}
+
+/// Option<i64> 呈現：None = 無法判讀，顯示 `?`（絕不顯示 0 假裝健康）
+fn opt_i64(v: &Option<i64>) -> String {
+    v.map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
 fn render_index(i: &CortAuditIndex, s: &mut String) {
     s.push_str("## 索引健康\n");
     s.push_str(&format!(
@@ -46,27 +57,47 @@ fn render_index(i: &CortAuditIndex, s: &mut String) {
         i.chunk_count, i.relationships_count, i.name, i.path
     ));
     s.push_str(&format!(
-        "- file_state={} files，chunked={} files，FTS docs={}（synced={}）\n",
-        i.file_state_files, i.chunked_files, i.fts_docs, i.fts_synced
+        "- file_state={} files，chunked={} files，FTS docs={}（{}）\n",
+        opt_i64(&i.file_state_files),
+        opt_i64(&i.chunked_files),
+        opt_i64(&i.fts_docs),
+        match i.fts_drift {
+            Some(0) => "synced".to_string(),
+            Some(n) => format!("drift={n}"),
+            None => "unknown".to_string(),
+        }
     ));
 }
 
 fn render_coverage(i: &CortAuditIndex, s: &mut String) {
     s.push_str("\n## 覆蓋缺口\n");
-    if i.not_chunked_total == 0 {
-        s.push_str(&format!(
-            "- 無缺口（file_state 全部都有 chunk；含 unparsed chunk 的檔案 {} 檔）\n",
-            i.files_with_unparsed_chunks
-        ));
-        return;
-    }
-    s.push_str(&format!(
-        "- {} 檔在 file_state 但從未被 chunk（completeness 缺口；列出前 {} 檔）：\n",
-        i.not_chunked_total,
-        i.not_chunked_files.len()
-    ));
-    for f in &i.not_chunked_files {
-        s.push_str(&format!("  - `{f}`\n"));
+    match i.not_chunked_total {
+        None => {
+            s.push_str(
+                "- 覆蓋狀態無法判讀（file_state/chunks 查詢失敗）——不假裝「無缺口」\n",
+            );
+        }
+        Some(0) => {
+            if i.chunk_count == 0 && i.file_state_files == Some(0) {
+                s.push_str(
+                    "- 空索引（chunks=0、file_state=0）——索引可能壞了或尚未掃描，不算「無缺口」\n",
+                );
+            } else {
+                s.push_str(&format!(
+                    "- 無缺口（file_state 全部都有 chunk；含 unparsed chunk 的檔案 {} 檔）\n",
+                    i.files_with_unparsed_chunks
+                ));
+            }
+        }
+        Some(total) => {
+            s.push_str(&format!(
+                "- {total} 檔在 file_state 但從未被 chunk（completeness 缺口；列出前 {} 檔）：\n",
+                i.not_chunked_files.len()
+            ));
+            for f in &i.not_chunked_files {
+                s.push_str(&format!("  - `{f}`\n"));
+            }
+        }
     }
     s.push_str(&format!(
         "- 含 unparsed chunk 的檔案：{} 檔\n",
@@ -127,23 +158,41 @@ pub fn render(a: &CortAudit) -> String {
         }
     }
 
+    // 7 天早期訊號（與 --window 的長期趨勢互補）
+    if let Some(u7) = &a.usage_7d {
+        s.push_str(&format!(
+            "\n## 7 天早期訊號\n- 命令 {}、deep（context+recall）{}\n",
+            u7.total_commands,
+            deep_verb_count(u7)
+        ));
+    }
+
     s.push_str("\n## 解讀 & 行動（規則式）\n");
     let mut hints: Vec<String> = Vec::new();
     if let Some(i) = &a.index {
         if !i.fresh {
             hints.push("索引 STALE → 執行 `cort index`（或檢查 hook-refresh 是否在跑）".to_string());
         }
-        if i.not_chunked_total > 0 {
-            hints.push(format!(
-                "coverage 缺口：{} 檔在 file_state 但從未被 chunk → 先確認是否本來就沒有可 chunk 的宣告（如只 import 後呼叫的 driver 檔，實測 5/5 是這種；見 cortexyoung#2），再查 extractor 規則",
-                i.not_chunked_total
-            ));
+        if i.chunk_count == 0 && i.file_state_files == Some(0) {
+            hints.push("空索引（0 chunks、0 file_state）→ 執行 `cort index` 或檢查 extractor/路徑".to_string());
         }
-        if !i.fts_synced {
-            hints.push(format!(
-                "FTS 索引與 chunks 不同步（docs={} vs chunks={}）→ cort 端重建 FTS",
-                i.fts_docs, i.chunk_count
-            ));
+        match i.not_chunked_total {
+            Some(n) if n > 0 => hints.push(format!(
+                "coverage 缺口：{n} 檔在 file_state 但從未被 chunk → 先確認是否本來就沒有可 chunk 的宣告（如只 import 後呼叫的 driver 檔，實測 5/5 是這種；見 cortexyoung#2），再查 extractor 規則"
+            )),
+            None => hints.push(
+                "覆蓋查詢失敗 → 不視為「無缺口」；檢查 cort schema 版本差異".to_string(),
+            ),
+            _ => {}
+        }
+        match i.fts_drift {
+            Some(0) => {}
+            Some(n) => hints.push(format!(
+                "FTS 索引與 chunks 不同步（drift={n}）→ cort 端重建 FTS"
+            )),
+            None => hints.push(
+                "FTS 同步無法判讀（chunks_fts 查詢失敗）→ 不假裝 synced".to_string(),
+            ),
         }
     }
     if let Some(u) = &a.usage {
@@ -189,7 +238,7 @@ pub fn render(a: &CortAudit) -> String {
     s
 }
 
-/// cort-audit 長期指標列（單行）
+/// cort-audit 長期指標列（單行）：長期趨勢（30d）+ 早期訊號（7d）+ deep 動詞
 pub fn row_md(a: &CortAudit) -> String {
     let idx = a.index.as_ref();
     let fresh = idx
@@ -202,11 +251,15 @@ pub fn row_md(a: &CortAudit) -> String {
         .map(|i| i.relationships_count.to_string())
         .unwrap_or_else(|| "-".into());
     let not_chunked = idx
-        .map(|i| i.not_chunked_total.to_string())
+        .map(|i| opt_i64(&i.not_chunked_total))
         .unwrap_or_else(|| "-".into());
     let fts = idx
-        .map(|i| if i.fts_synced { "synced" } else { "diff" })
-        .unwrap_or("-");
+        .map(|i| match i.fts_drift {
+            Some(0) => "synced".to_string(),
+            Some(n) => format!("drift={n}"),
+            None => "unknown".to_string(),
+        })
+        .unwrap_or_else(|| "-".into());
     let usage = a.usage.as_ref();
     let cmds = usage
         .map(|u| u.total_commands.to_string())
@@ -214,8 +267,18 @@ pub fn row_md(a: &CortAudit) -> String {
     let core = usage
         .map(|u| core_verb_count(u).to_string())
         .unwrap_or_else(|| "-".into());
+    let deep = usage
+        .map(|u| deep_verb_count(u).to_string())
+        .unwrap_or_else(|| "-".into());
+    let u7 = a.usage_7d.as_ref();
+    let cmds7 = u7
+        .map(|u| u.total_commands.to_string())
+        .unwrap_or_else(|| "-".into());
+    let deep7 = u7
+        .map(|u| deep_verb_count(u).to_string())
+        .unwrap_or_else(|| "-".into());
     format!(
-        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         today_iso(),
         a.root,
         fresh,
@@ -225,6 +288,9 @@ pub fn row_md(a: &CortAudit) -> String {
         fts,
         cmds,
         core,
+        deep,
+        cmds7,
+        deep7,
     )
 }
 
@@ -232,7 +298,7 @@ pub fn row_md(a: &CortAudit) -> String {
 pub fn track_update(path: &Path, audits: &[&CortAudit]) -> std::io::Result<(bool, String)> {
     let window = audits.first().map(|a| a.window_days).unwrap_or(30);
     let header = format!(
-        "{}\n\n| 日期 | 專案 | fresh | chunks | relationships | 未chunk檔 | FTS | 命令數/{window}d | core動詞 |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n",
+        "{}\n\n| 日期 | 專案 | fresh | chunks | relationships | 未chunk檔 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         TRACK_SECTION
     );
     let rows: Vec<String> = audits.iter().map(|a| row_md(a)).collect();
