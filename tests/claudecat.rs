@@ -710,3 +710,126 @@ fn cort_audit_track_updates_table() {
     let content2 = fs::read_to_string(&f).unwrap();
     assert_eq!(content1, content2);
 }
+
+/// P1 回歸：last_indexed_at 是「毫秒」（與 cort 寫入一致）——40 天前的索引必須 STALE，
+/// 且 index_info（cort-status）與 audit_index（cort-audit）兩套判定口徑一致。
+#[test]
+fn cort_freshness_ms_stale_after_7_days_and_consistent() {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let db_path = cache.join(format!("{pid}.db"));
+    let old_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        - 40 * 24 * 3600 * 1000;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE projects (
+               project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+               git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+             );
+             CREATE TABLE chunks (
+               chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL
+             );
+             CREATE TABLE relationships (
+               source_chunk_id TEXT NOT NULL, target_chunk_id TEXT NOT NULL,
+               rel_type TEXT NOT NULL, call_site_line INTEGER, confidence_score REAL NOT NULL
+             );
+             INSERT INTO projects VALUES ('{pid}', 'old', '{real_str}', NULL, {old_ms}, 'test');"
+        ))
+        .unwrap();
+    }
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let info = claudecat::cort::index_info(&proj).expect("index_info 應有結果");
+    assert!(
+        !info.fresh,
+        "40 天前的索引（毫秒），cort-status 應報 STALE"
+    );
+    let audit = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    assert!(!audit.fresh, "audit 的 fresh 判定口徑應與 index_info 一致");
+    drop(guard);
+}
+
+/// P1 回歸：--track 表格之後的內容（使用者筆記）必須原樣保留，
+/// 不得被「section 掃到 EOF」的重寫刪掉。
+#[test]
+fn cort_audit_track_preserves_content_after_section() {
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        window_days: 7,
+        index: None,
+        usage: None,
+    };
+    let dir = temp_project();
+    let f = dir.join("EVIDENCE.md");
+    let (c1, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
+    assert!(c1);
+    // 使用者緊接在表格後加自己的筆記（無空行，讓同日重跑可精確 no-op）
+    let mut content = fs::read_to_string(&f).unwrap();
+    content.push_str("## 我的筆記\n\n重要結論 KEEPME-123\n");
+    fs::write(&f, &content).unwrap();
+
+    let (changed, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
+    assert!(!changed, "同日同 root、內容不變 → 應是 no-op");
+    let after = fs::read_to_string(&f).unwrap();
+    assert!(after.contains("KEEPME-123"), "表格後的筆記不應被刪除");
+    assert!(after.contains("## 我的筆記"), "筆記 section 標題應保留");
+}
+
+/// P1 回歸：同一檔案裡 audit section 之後還有 explore section 時，
+/// 更新 audit 不得刪除 explore section、也不得把它的資料列吞進 audit 表。
+#[test]
+fn track_table_preserves_sibling_sections_in_one_file() {
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        window_days: 7,
+        index: None,
+        usage: None,
+    };
+    let dir = temp_project();
+    let f = dir.join("SESSION-EVIDENCE.md");
+    // 1) 先建立 audit 表格
+    claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
+    // 2) 之後接一段 explore section（兩種指標共用同一份證據檔）
+    let mut content = fs::read_to_string(&f).unwrap();
+    content.push_str(
+        "\n## 長期指標 (claudecat explore)\n\n| 日期 | 專案 |\n|---|---|\n| 2026-09-01 | `/old` |\n",
+    );
+    fs::write(&f, &content).unwrap();
+
+    // 3) 同日再更新 audit（audit 表格本身等價重建；重點在下方內容斷言）
+    let (changed, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
+    assert!(changed, "重寫會壓掉表格與下一個 section 間的空行 → 內容有變");
+    let after = fs::read_to_string(&f).unwrap();
+    assert!(
+        after.contains("## 長期指標 (claudecat explore)"),
+        "explore section 標題不應被刪除"
+    );
+    assert!(
+        after.contains("| 2026-09-01 | `/old` |"),
+        "explore 的資料列不應被吞進 audit 表或刪除"
+    );
+    assert_eq!(
+        after.matches(claudecat::cort_audit::TRACK_SECTION).count(),
+        1,
+        "audit section 標題應恰有一個"
+    );
+    assert!(
+        after.matches("`/tmp/fake-root`").count() == 1,
+        "audit 資料列應恰有一列（同日更新不重複）"
+    );
+}

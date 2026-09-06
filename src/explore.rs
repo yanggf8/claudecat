@@ -135,9 +135,25 @@ pub fn row_md(m: &ExploreMetrics) -> String {
     )
 }
 
+/// s 內第一個以 `#` 開頭之行的 byte offset（找不到 → None）。
+/// 用 `split_inclusive` 逐行累加，offset 是位元組位置，對 UTF-8 安全。
+fn next_heading_offset(s: &str) -> Option<usize> {
+    let mut off = 0usize;
+    for line in s.split_inclusive('\n') {
+        if line.starts_with('#') {
+            return Some(off);
+        }
+        off += line.len();
+    }
+    None
+}
+
 /// 通用長期指標表更新：把一組新列（已含日期+root）寫進文件的某個 section
 /// - 同一天 + root 精確相等 的舊列 -> 以新列取代
 /// - 其餘歷史列保留；新 root 追加
+/// - section 範圍 = 標題起至下一個 `#` 標題（或 EOF）；**範圍外的內容原樣保留**
+///   （曾掃到 EOF 重寫，把表格後的使用者筆記/其他 section 靜默刪除）
+///
 /// 原子寫入；回傳 (changed, file_path)。
 /// `header` 必須是完整區塊（含 section 標題 + 表頭 + 分隔列）。
 pub fn track_table(
@@ -152,10 +168,19 @@ pub fn track_table(
         String::new()
     };
 
-    // 解析既有表格資料列（`|` 開頭）
+    // 定位 section：從標題到下一個 `#` 標題（或 EOF）為止
+    let zone: Option<(usize, usize)> = existing.find(section).map(|start| {
+        let after_title = start + section.len();
+        let end = after_title
+            + next_heading_offset(&existing[after_title..])
+                .unwrap_or(existing.len() - after_title);
+        (start, end)
+    });
+
+    // 解析既有表格資料列（`|` 開頭）——只在 section 範圍內找
     let mut old_rows: Vec<String> = Vec::new();
-    if let Some(b) = existing.find(section) {
-        for line in existing[b..].lines() {
+    if let Some((b, e)) = zone {
+        for line in existing[b..e].lines() {
             let t = line.trim();
             if t.starts_with('|') && !t.starts_with("|---") && !t.starts_with("| 日期") {
                 old_rows.push(t.to_string());
@@ -197,17 +222,18 @@ pub fn track_table(
         .map(|row| normalize_row(&row, ncols))
         .collect();
 
-    let prefix = if let Some(b) = existing.find(section) {
-        existing[..b].to_string()
-    } else {
-        let mut p = existing.clone();
-        if !p.is_empty() && !p.ends_with('\n') {
-            p.push('\n');
+    let (prefix, suffix) = match zone {
+        Some((b, e)) => (existing[..b].to_string(), existing[e..].to_string()),
+        None => {
+            let mut p = existing.clone();
+            if !p.is_empty() && !p.ends_with('\n') {
+                p.push('\n');
+            }
+            if !p.is_empty() {
+                p.push('\n');
+            }
+            (p, String::new())
         }
-        if !p.is_empty() {
-            p.push('\n');
-        }
-        p
     };
 
     let mut table = String::new();
@@ -221,7 +247,7 @@ pub fn track_table(
         table.push_str(nr);
         table.push('\n');
     }
-    let new_content = format!("{prefix}{table}");
+    let new_content = format!("{prefix}{table}{suffix}");
     let changed = new_content != existing;
     if changed {
         let tmp = path.with_extension("track.tmp");

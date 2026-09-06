@@ -146,24 +146,22 @@ pub fn index_info(root: &Path) -> Option<CortIndexInfo> {
     })
 }
 
+/// 索引新鮮度：git head 相符 + 索引時間在 7 天內。
+/// `last_indexed_at` 與 cort 的寫入一致，是**毫秒**（epoch ms）——
+/// 曾因誤當秒數比較，7 天關卡永不觸發（cort-status 對 40 天前的索引仍報 fresh）。
+const FRESH_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
+
+fn is_fresh(head_matches: bool, last_indexed_at: Option<i64>) -> bool {
+    head_matches && last_indexed_at.is_some_and(|t| now_ms() - t <= FRESH_WINDOW_MS)
+}
+
 fn freshness(real_str: &str, indexed_head: Option<&str>, last_indexed_at: Option<i64>) -> bool {
-    // 1) git head 相符（若專案是 git repo）
-    if let Some(head) = git_head(real_str) {
-        if indexed_head.is_some_and(|ih| ih != head.as_str()) {
-            return false;
-        }
-    }
-    // 2) 索引不超過 7 天
-    match last_indexed_at {
-        Some(t) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            now - t <= 7 * 24 * 3600
-        }
-        None => false,
-    }
+    // git head 相符（非 git repo 或索引未記錄 head 時不追究）
+    let head_matches = match (&git_head(real_str), indexed_head) {
+        (Some(now), Some(ih)) => now == ih,
+        _ => true,
+    };
+    is_fresh(head_matches, last_indexed_at)
 }
 
 fn git_head(real_str: &str) -> Option<String> {
@@ -464,7 +462,7 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
         };
         let age_days = last_indexed_at
             .map(|t| (now_ms() - t).max(0) / (24 * 3600 * 1000));
-        let fresh = git_head_matches && last_indexed_at.is_some_and(|t| now_ms() - t <= 7 * 24 * 3600 * 1000);
+        let fresh = is_fresh(git_head_matches, last_indexed_at);
 
         Ok(Some(CortAuditIndex {
             name,

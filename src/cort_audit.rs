@@ -206,7 +206,7 @@ pub fn row_md(a: &CortAudit) -> String {
         .unwrap_or_else(|| "-".into());
     let fts = idx
         .map(|i| if i.fts_synced { "synced" } else { "diff" })
-        .unwrap_or_else(|| "-".into());
+        .unwrap_or("-");
     let usage = a.usage.as_ref();
     let cmds = usage
         .map(|u| u.total_commands.to_string())
