@@ -370,6 +370,9 @@ pub struct UsageWindow {
     pub total_commands: i64,
     pub by_command: BTreeMap<String, i64>,
     pub suggest_outcomes: BTreeMap<String, i64>,
+    /// hook-suggest 的 decline 歸因（鍵如 "no_shape/context_flag"）——
+    /// cortexyoung c290c383（2026-09-06）起的新列才帶 decline，舊列自然缺席
+    pub declines: BTreeMap<String, i64>,
     pub refresh_outcomes: BTreeMap<String, i64>,
     pub errors: i64,
     pub index_stale_queries: i64,
@@ -586,11 +589,20 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
                 stmt.query_map(rusqlite::params![cmd, since], |r| r.get::<_, String>(0))
             {
                 for r in rows.flatten() {
-                    let hook = serde_json::from_str::<serde_json::Value>(&r)
-                        .ok()
+                    let parsed = serde_json::from_str::<serde_json::Value>(&r).ok();
+                    let hook = parsed
+                        .as_ref()
                         .and_then(|v| v.get("hook").and_then(|h| h.as_str()).map(String::from))
                         .unwrap_or_else(|| "unparsed".to_string());
-                    *target.entry(hook).or_insert(0) += 1;
+                    *target.entry(hook.clone()).or_insert(0) += 1;
+                    if cmd == "hook-suggest" {
+                        if let Some(d) = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("decline").and_then(|d| d.as_str()))
+                        {
+                            *u.declines.entry(format!("{hook}/{d}")).or_insert(0) += 1;
+                        }
+                    }
                 }
             }
         }

@@ -1165,3 +1165,91 @@ fn doctor_track_cron_line_detection_and_merge_idempotent() {
         "既有條目必須保留"
     );
 }
+
+/// cort-audit：hook-suggest 的 decline 歸因進 UsageWindow（cortexyoung c290c383 起，
+/// 新列才帶 decline；舊列與無 decline 的 outcome 自然缺席）+ 報告呈現 top declines。
+#[test]
+fn cort_audit_usage_tracks_decline_distribution() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let db_path = cache.join("usage.db");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, project_id TEXT,
+               command TEXT NOT NULL, args_summary TEXT NOT NULL,
+               status TEXT NOT NULL, error_code TEXT,
+               read_source TEXT, requested_content_mode TEXT, effective_content_mode TEXT,
+               receipt_hit INTEGER, index_stale INTEGER,
+               bytes_out INTEGER NOT NULL, saved_bytes INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        let ins = |conn: &rusqlite::Connection, summary: &str| {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+                 VALUES (?1, 'hook-suggest', ?2, 'ok', 0, 0, 0)",
+                rusqlite::params![now, summary],
+            )
+            .unwrap();
+        };
+        ins(
+            &conn,
+            r#"{"hook":"no_shape","v":3,"decline":"context_flag"}"#,
+        );
+        ins(
+            &conn,
+            r#"{"hook":"no_shape","v":3,"decline":"context_flag"}"#,
+        );
+        ins(
+            &conn,
+            r#"{"hook":"no_shape","v":3,"decline":"pattern_not_symbol"}"#,
+        );
+        ins(&conn, r#"{"hook":"hit","v":3}"#);
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    assert_eq!(u.suggest_outcomes.get("no_shape"), Some(&3));
+    assert_eq!(u.suggest_outcomes.get("hit"), Some(&1));
+    assert_eq!(
+        u.declines.get("no_shape/context_flag"),
+        Some(&2),
+        "同標籤要累計"
+    );
+    assert_eq!(u.declines.get("no_shape/pattern_not_symbol"), Some(&1));
+    assert_eq!(u.declines.len(), 2, "無 decline 的列不得進分佈");
+
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    };
+    let report = claudecat::cort_audit::render(&a);
+    assert!(report.contains("top declines"), "報告應有 top declines 段");
+    assert!(
+        report.contains("no_shape/context_flag: 2"),
+        "排序後最高者第一"
+    );
+    let row = claudecat::cort_audit::row_md(&a);
+    assert!(row.contains("context_flag=2"), "追蹤列應帶 decline-top");
+    drop(guard);
+}

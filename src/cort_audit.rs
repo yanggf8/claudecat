@@ -103,6 +103,18 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
             s.push_str(&format!("- {k}: {v}\n"));
         }
     }
+    if !u.declines.is_empty() {
+        s.push_str("\ntop declines（no_shape 歸因；cortexyoung c290c383 起有數據）：\n");
+        let no_shape = u.suggest_outcomes.get("no_shape").copied().unwrap_or(0);
+        let mut ranked: Vec<_> = u.declines.iter().collect();
+        ranked.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+        for (k, c) in ranked.iter().take(5) {
+            s.push_str(&format!(
+                "- {k}: {c}（佔 no_shape {:.0}%）\n",
+                **c as f64 / no_shape.max(1) as f64 * 100.0
+            ));
+        }
+    }
     if !u.refresh_outcomes.is_empty() {
         s.push_str("\nhook-refresh 結果：\n");
         for (k, v) in &u.refresh_outcomes {
@@ -267,8 +279,17 @@ pub fn row_md(a: &CortAudit) -> String {
     let deep7 = u7
         .map(|u| deep_verb_count(u).to_string())
         .unwrap_or_else(|| "-".into());
+    let decline_top = usage
+        .and_then(|u| {
+            u.declines
+                .iter()
+                .max_by_key(|(_, c)| **c)
+                .map(|(k, c)| (k.rsplit('/').next().unwrap_or(k).to_string(), *c))
+        })
+        .map(|(tag, c)| format!("{tag}={c}"))
+        .unwrap_or_else(|| "-".into());
     format!(
-        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         today_iso(),
         a.root,
         a.host,
@@ -282,6 +303,7 @@ pub fn row_md(a: &CortAudit) -> String {
         deep,
         cmds7,
         deep7,
+        decline_top,
     )
 }
 
@@ -289,7 +311,7 @@ pub fn row_md(a: &CortAudit) -> String {
 pub fn track_update(path: &Path, audits: &[&CortAudit]) -> std::io::Result<(bool, String)> {
     let window = audits.first().map(|a| a.window_days).unwrap_or(30);
     let header = format!(
-        "{}\n\n| 日期 | 專案 | host | fresh | chunks | relationships | 未chunk檔 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "{}\n\n| 日期 | 專案 | host | fresh | chunks | relationships | 未chunk檔 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d | decline-top |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
         TRACK_SECTION
     );
     let rows: Vec<String> = audits.iter().map(|a| row_md(a)).collect();
