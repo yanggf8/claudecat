@@ -16,7 +16,8 @@
 | `chunks_fts` | FTS5 external-content（content/symbol/file，tokenize unicode61） | `navigate --cort` 全文 fallback（symbol 未命中時） |
 
 - DB 路徑：`$CORT_CACHE_DIR/<sha256>.db`，`project_id = sha256(real_path)`（0.40 rusqlite 唯讀開啟）
-- cort 的 `last_indexed_at` 是 **epoch 毫秒**（13 位數）；freshness 相容秒/毫秒
+- cort 的 `last_indexed_at` 是 **epoch 毫秒**（13 位數）；freshness 以毫秒比對
+  （曾誤當秒導致 7 天關卡失效，2026-09-06 修復，見下方複審）
 
 ## 誠實與邊界
 - claudecat **唯讀** cort DB（`SQLITE_OPEN_READ_ONLY`）；永不寫入
@@ -78,6 +79,27 @@
 - 附帶收穫：驗證過程抓出 `?1` 重複綁定參數的 rusqlite bug（`InvalidParameterCount` 被
   `unwrap_or(0)` 吞掉、假裝「無缺口」）→ 改 qmark 後正確回報 5 檔——正是「收集數據驗證」
   的價值，另有 3 支回歸測試保護
+
+## 複審（2026-09-06 同日：數據正確性審查 → 兩個 P1 修復 → 三個 cortexyoung 議題）
+逐項對照真實 DB 重驗首筆實測（多數可重現），審查抓到兩個 bug 並已當場修復（`03c509a`）：
+- **P1：`cort-status` 的 fresh 關卡永不觸發** — `freshness()` 把 `last_indexed_at` 當秒，
+  實際是毫秒（DB 實測 `1788686742481`）：40 天前的索引 `cort-status` 報 `fresh`、
+  `cort-audit` 報 `STALE`，同一欄位兩套口徑。修復：共用 `is_fresh()`（`FRESH_WINDOW_MS`），
+  附 40 天→STALE 回歸測試；上節「相容秒/毫秒」的說法一併修正。
+- **P1：`--track` 靜默刪除表格後的內容** — `track_table()` 從 section 掃到 EOF 重寫，
+  使用者筆記／其他 section 直接消失（實測重現）。修復：section 範圍改為「到下一個
+  `#` 標題為止」，範圍外原樣保留；附 2 支回歸測試（含 explore+audit 雙 section 共存檔）。
+  修好前 `CORT-AUDIT.md` 的時間序列其實不可信——這是先修它的理由。
+- 數據覆核（直接 SQL 查 usage.db / 專案 DB）：
+  - hook-suggest 命中 36/7056（0.5%），其中 `no_shape` 5857（83%）——最大槓桿（cortexyoung#3）
+  - 報告裡 1032 筆 `unparsed` 全是 2026-09-01→02 的舊格式歷史列（`args_summary` 為字串
+    `hook`）；09-02 起即為 `{"hook":…,"v":1}`——量測問題已自解，不需行動
+  - `saved_bytes` 只在 `source=store && effective=receipt` 非零（cort `usage.rs:176-186`），
+    30 天 11.4k 命令僅 1 筆非零（13 bytes）→「省了多少」目前實際沒被量到（cortexyoung#4）
+  - coverage「缺口」5 檔全是 2–3 行、只 import 後呼叫的 driver script（無任何宣告）→
+    extractor 沒漏，是指標語意問題（cortexyoung#2）；hint 文案已對齊（`0dc1599`）
+- 修復後複驗：40 tests 綠（+3 回歸）、touched files clippy 0 warnings、兩個重現腳本行為翻轉
+  為正確；`CORT-AUDIT.md` 同日列更新（11461 命令 / chunks 581）
 
 ## 待辦
 - `navigate --cort` 命中時帶 cort `content` 摘要進路線（省一次 read）— ✅ 已做：
