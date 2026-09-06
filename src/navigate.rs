@@ -152,15 +152,17 @@ pub fn render(r: &NavigateResult) -> String {
     s
 }
 
-/// 用 cort 全量索引強化導航：cort 命中 → 附反向依賴（誰呼叫它）
+/// 用 cort 索引強化導航：cort 命中 → 附 content 摘要（省一次 read）+ 反向依賴。
+/// `from_fts` 表示命中來自 FTS 全文（symbol_name 未命中、content/file 命中）。
 pub fn navigate_with_cort(
     map: &ProjectMap,
     query: &str,
     cort_hits: Vec<CortHit>,
+    from_fts: bool,
 ) -> NavigateResult {
     let mut r = navigate(map, query);
     // 把 cort 命中疊進 symbols（去重：同 file+symbol 只留 cort 的行號，較精確）
-    for h in cort_hits {
+    for h in &cort_hits {
         if let Some(sym) = &h.symbol {
             let exists = r
                 .symbols
@@ -168,15 +170,28 @@ pub fn navigate_with_cort(
                 .any(|s| s.file == h.file && s.name == *sym);
             if !exists {
                 r.symbols.push(NavigateHit {
-                    kind: h.chunk_type,
+                    kind: h.chunk_type.clone(),
                     name: sym.clone(),
-                    file: h.file,
+                    file: h.file.clone(),
                     line: h.start_line as usize,
                     exact: sym.to_lowercase() == query.to_lowercase(),
                 });
             }
         }
     }
+    // cort hits 是 push 到已排序清單後面，這裡重整 exact（併入 cort 後可能比 tree-sitter
+    // 的子字串命中更精確，例如查 with_readonly 時 tree-sitter 因 token with 命中 render_with_profile）
+    let toks = tokens(query);
+    for sym in &mut r.symbols {
+        sym.exact = sym.name.to_lowercase() == query.to_lowercase()
+            || toks.iter().any(|t| sym.name.to_lowercase() == *t);
+    }
+    r.symbols.sort_by(|a, b| {
+        b.exact
+            .cmp(&a.exact)
+            .then_with(|| b.kind.cmp(&a.kind))
+            .then_with(|| a.line.cmp(&b.line))
+    });
     // 依賴路線：cort 命中取第一個主要符號，查反向依賴
     if r.symbols.is_empty() {
         r.route = vec![format!(
@@ -187,11 +202,26 @@ pub fn navigate_with_cort(
     }
     let primary = r.symbols.first().unwrap();
     let root = std::path::Path::new(&map.root);
+    let primary_hit = cort_hits
+        .iter()
+        .find(|h| h.symbol.as_deref() == Some(primary.name.as_str()) && h.file == primary.file);
     // cort 命中時：第一條路線改為「先讀 cort 命中」，而非 fallback 文案
+    let source_label = if from_fts {
+        "cort FTS 全文命中"
+    } else {
+        "cort 全量索引命中"
+    };
+    let summary = primary_hit
+        .and_then(|h| h.content.as_deref())
+        .map(|c| crate::cort::content_summary(c, 220))
+        .filter(|s| !s.is_empty());
     let mut new_route = vec![format!(
-        "先讀 {}:{}（cort 全量索引命中：{} {}）",
-        primary.file, primary.line, primary.kind, primary.name
+        "先讀 {}:{}（{}：{} {}）",
+        primary.file, primary.line, source_label, primary.kind, primary.name
     )];
+    if let Some(s) = summary {
+        new_route.push(format!("內文摘要（省一次 read）：{s}"));
+    }
     new_route.push(format!(
         "深挖符號：`cort context {} --content full -f lean`",
         primary.name

@@ -13,7 +13,7 @@
 | `projects` | project_id / name / path / git_head / last_indexed_at / extractor_version | `cort-status` 新鮮度 |
 | `chunks` | file_path / symbol_name / chunk_type / start_line / end_line / content / language | `navigate --cort` 全量符號查詢 |
 | `relationships` | source→target 邊（imports/exports/calls）+ call_site_line + confidence | 反向依賴路線 |
-| `chunks_fts` | FTS5（content/symbol/file） | （未來）`navigate` 全文檢索 |
+| `chunks_fts` | FTS5 external-content（content/symbol/file，tokenize unicode61） | `navigate --cort` 全文 fallback（symbol 未命中時） |
 
 - DB 路徑：`$CORT_CACHE_DIR/<sha256>.db`，`project_id = sha256(real_path)`（0.40 rusqlite 唯讀開啟）
 - cort 的 `last_indexed_at` 是 **epoch 毫秒**（13 位數）；freshness 相容秒/毫秒
@@ -49,8 +49,21 @@
 - `navigate --cort "staleness"`：找到 tree-sitter top-30 找不到的符號
   （`rust/tests/staleness_cwd.rs:72`），路線含 cort context / impact / 反向依賴 ✅
 
+## 再確認（2026-09-06，cortexyoung 又改版）
+- 新版索引仍為 v4 schema（`projects/chunks/relationships/chunks_fts` 欄位對 claudecat 零影響），
+  `extractor_version` 同前一版；新增 `usage.db`（command_log）與 claudecat 無關
+- `chunks_fts` 確認為 **external-content FTS5**（`content=chunks, content_rowid=rowid`），
+  唯讀 MATCH + JOIN chunks 實測可用 → 實作 FTS fallback（見下）
+
 ## 待辦
-- `navigate --cort` 命中時把 cort 的 `content` 摘要帶進路線（省一次 read）— 未做
-- FTS 全文檢索 fallback（`chunks_fts` / `cort recall` 對應）— 未做
+- `navigate --cort` 命中時帶 cort `content` 摘要進路線（省一次 read）— ✅ 已做：
+  路線加「內文摘要（省一次 read）」步驟（壓縮空白、截 220 字），
+  `content_summary()` + 命中 route 帶上；實測 `with_readonly` 路線直接含函式簽名
+- FTS 全文檢索 fallback（`chunks_fts` / `cort recall` 對應）— ✅ 已做：
+  symbol_name 未命中時查 `chunks_fts MATCH <"token1" AND "token2">`（token 加雙引號防
+  FTS 運算子注入），JOIN `chunks` 還原 CortHit，路線標示「cort FTS 全文命中」；
+  實測 `immutable`（content-only）4 命中、`"immutable" AND "fallback"` 也通
+- 附帶修正：cort 命中合併後重算 exact（子字串 token 命中不再壓過精確命中）並重新排序，
+  路線優先指向精確符號（`with_readonly` 優先於 `render_with_profile`）
 - STALE 提示 `cort index --incremental` — ✅ 已隨新版 cort 解決（`cort status` 提供
   `index_is_stale`；`hook-refresh` 編輯後自動增量，不需 claudecat 再提示）

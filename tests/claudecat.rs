@@ -51,6 +51,17 @@ fn claude_md_update_is_idempotent_and_atomic() {
     assert!(fs::read_dir(dir).unwrap().all(|e| e.unwrap().file_name() != ".claudecat.tmp"));
 }
 
+/// 暫時覆寫環境變數，drop 時還原（避免污染其他並行測試）
+struct EnvVarGuard(String, Option<String>);
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(&self.0, v),
+            None => std::env::remove_var(&self.0),
+        }
+    }
+}
+
 fn temp_project() -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!("claudecat-test-{}", std::process::id()));
     let dir = base.join(format!("{}", rand_suffix()));
@@ -313,16 +324,6 @@ fn cort_search_symbols_none_when_db_missing() {
 fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
     use std::os::unix::fs::PermissionsExt;
 
-    struct EnvGuard(String, Option<String>);
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.1 {
-                Some(v) => std::env::set_var(&self.0, v),
-                None => std::env::remove_var(&self.0),
-            }
-        }
-    }
-
     // 1) project + cache dir（cache 內放 cort 風格的 WAL DB）
     let proj = temp_project();
     let cache = std::env::temp_dir().join(format!(
@@ -398,7 +399,7 @@ fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
     );
 
     // 5) claudecat 的 fallback 仍可唯讀讀到索引（不寫入）
-    let guard = EnvGuard(
+    let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
     );
@@ -415,4 +416,130 @@ fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
     drop(holder);
     drop(guard);
     let _ = std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755));
+}
+
+/// FTS 全文 fallback：symbol_name 未命中但 content 命中（`cort recall` 對應）。
+/// 用 external-content FTS5 建合成 DB 實測唯讀查詢。
+#[test]
+fn cort_fts_finds_content_only_match() {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let db_path = cache.join(format!("{pid}.db"));
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE projects (
+           project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+           git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+         );
+         CREATE TABLE chunks (
+           chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL,
+           symbol_name TEXT, chunk_type TEXT, start_line INTEGER NOT NULL,
+           end_line INTEGER NOT NULL, content TEXT NOT NULL, language TEXT
+         );
+         CREATE VIRTUAL TABLE chunks_fts USING fts5(
+           content, symbol_name, file_path,
+           content=chunks, content_rowid=rowid, tokenize='unicode61'
+         );
+         INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, 0, 'test');
+         INSERT INTO chunks VALUES ('c1', '{pid}', 'src/cort.rs', 'with_readonly', 'function', 71, 90, 'fn with_readonly uses the immutable fallback to open the db', 'Rust');
+         INSERT INTO chunks VALUES ('c2', '{pid}', 'src/main.rs', 'parse_cli', 'function', 10, 30, 'fn parse_cli parses the argv arguments', 'Rust');
+         INSERT INTO chunks_fts(rowid, content, symbol_name, file_path)
+           SELECT rowid, content, symbol_name, file_path FROM chunks;"
+    ))
+    .unwrap();
+    drop(conn);
+
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    // symbol_name LIKE 找不到（immutable 只在 content）→ FTS 全文找得到
+    assert!(
+        claudecat::cort::search_symbols(&proj, "immutable").is_none(),
+        "symbol LIKE 不應命中 content"
+    );
+    let hits = claudecat::cort::search_fts(&proj, "immutable").expect("FTS 應命中 content");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].symbol.as_deref(), Some("with_readonly"));
+    assert!(hits[0]
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("immutable"));
+
+    // 多詞 AND（`"immutable" AND "fallback"`）
+    let two = claudecat::cort::search_fts(&proj, "immutable fallback").expect("AND 應命中");
+    assert_eq!(two.len(), 1);
+    // 無關詞 → None（誠實回退）
+    assert!(claudecat::cort::search_fts(&proj, "zzz_nothing").is_none());
+
+    drop(guard);
+}
+
+/// navigate_with_cort：content 摘要進路線（省一次 read）+ FTS 來源標示
+#[test]
+fn navigate_with_cort_includes_content_summary() {
+    use claudecat::model::{FileInfo, ProjectMap, Symbol};
+
+    let map = ProjectMap {
+        root: "/tmp/claudecat-nav-test".to_string(),
+        key_files: vec![FileInfo {
+            path: "src/cort.rs".to_string(),
+            language: Some("rust".to_string()),
+            loc: 100,
+            symbols: vec![Symbol {
+                kind: "fn".to_string(),
+                name: "with_readonly".to_string(),
+                line: 71,
+            }],
+        }],
+        ..Default::default()
+    };
+    let hit = claudecat::cort::CortHit {
+        symbol: Some("with_readonly".to_string()),
+        chunk_type: "function".to_string(),
+        file: "src/cort.rs".to_string(),
+        start_line: 71,
+        end_line: 90,
+        language: Some("Rust".to_string()),
+        content: Some(
+            "fn with_readonly uses the immutable fallback to open the database file read-only"
+                .to_string(),
+        ),
+    };
+
+    // FTS 來源：標示 FTS 全文命中 + content 摘要 + 仍給 cort context 深挖路徑
+    let r = claudecat::navigate::navigate_with_cort(&map, "immutable", vec![hit.clone()], true);
+    assert!(
+        r.route.iter().any(|s| s.contains("FTS 全文命中")),
+        "FTS 來源應標示，實際：{:?}",
+        r.route
+    );
+    assert!(
+        r.route
+            .iter()
+            .any(|s| s.contains("內文摘要") && s.contains("immutable fallback")),
+        "路線應含 content 摘要"
+    );
+    assert!(
+        r.route
+            .iter()
+            .any(|s| s.contains("cort context with_readonly")),
+        "仍應含 cort context 深挖路徑"
+    );
+
+    // 一般命中（symbol LIKE）：標示全量索引命中、摘要同樣帶上
+    let r2 = claudecat::navigate::navigate_with_cort(&map, "with_readonly", vec![hit], false);
+    assert!(r2.route.iter().any(|s| s.contains("全量索引命中")));
+    assert!(r2.route.iter().any(|s| s.contains("內文摘要")));
 }

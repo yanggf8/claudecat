@@ -273,7 +273,9 @@ fn main() {
             let mut r = navigate::navigate(&map, &query);
             if use_cort {
                 if let Some(hits) = cort::search_symbols(&root, &query) {
-                    r = navigate::navigate_with_cort(&map, &query, hits);
+                    r = navigate::navigate_with_cort(&map, &query, hits, false);
+                } else if let Some(hits) = cort::search_fts(&root, &query) {
+                    r = navigate::navigate_with_cort(&map, &query, hits, true);
                 } else {
                     eprintln!("cort index 無命中（或未索引）。已回退到 tree-sitter 地圖結果。");
                 }

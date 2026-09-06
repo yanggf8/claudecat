@@ -52,6 +52,7 @@ pub struct CortHit {
     pub start_line: i64,
     pub end_line: i64,
     pub language: Option<String>,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,7 +190,7 @@ pub fn search_symbols(root: &Path, query: &str) -> Option<Vec<CortHit>> {
 
     let hits = with_readonly(real_str, |conn| {
         let mut stmt = conn.prepare(
-            "SELECT symbol_name, chunk_type, file_path, start_line, end_line, language \
+            "SELECT symbol_name, chunk_type, file_path, start_line, end_line, language, content \
              FROM chunks WHERE project_id = ?1 AND lower(symbol_name) LIKE ?2 \
              ORDER BY start_line LIMIT 50",
         )?;
@@ -201,6 +202,7 @@ pub fn search_symbols(root: &Path, query: &str) -> Option<Vec<CortHit>> {
                 start_line: r.get(3)?,
                 end_line: r.get(4)?,
                 language: r.get(5)?,
+                content: r.get(6)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<CortHit>>>()
@@ -210,6 +212,68 @@ pub fn search_symbols(root: &Path, query: &str) -> Option<Vec<CortHit>> {
     } else {
         Some(hits)
     }
+}
+
+/// 把使用者查詢轉成 FTS5 MATCH 字串：拆成 alnum token、逐個加雙引號（字面 token，
+/// 不讓 FTS 運算子影響）、以 AND 連接。例：`user creation` → `"user" AND "creation"`。
+fn fts_match_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" AND "))
+    }
+}
+
+/// FTS 全文 fallback（`cort recall` 的資料源 `chunks_fts`）：symbol_name 未命中時，
+/// 搜 content / symbol / file 全文（external-content FTS5，唯讀 join 回 chunks）。
+pub fn search_fts(root: &Path, query: &str) -> Option<Vec<CortHit>> {
+    let real = std::fs::canonicalize(root).ok()?;
+    let real_str = real.to_str()?;
+    let pid = project_id(real_str);
+    let match_q = fts_match_query(query)?;
+
+    let hits = with_readonly(real_str, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT c.symbol_name, c.chunk_type, c.file_path, c.start_line, c.end_line, c.language, c.content \
+             FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid \
+             WHERE chunks_fts MATCH ?1 AND c.project_id = ?2 \
+             ORDER BY f.rank LIMIT 20",
+        )?;
+        let rows = stmt.query_map([&match_q, &pid], |r| {
+            Ok(CortHit {
+                symbol: r.get(0)?,
+                chunk_type: r.get(1)?,
+                file: r.get(2)?,
+                start_line: r.get(3)?,
+                end_line: r.get(4)?,
+                language: r.get(5)?,
+                content: r.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<CortHit>>>()
+    })?;
+    if hits.is_empty() {
+        None
+    } else {
+        Some(hits)
+    }
+}
+
+/// 摘要 cort content：壓縮空白、取前 max_chars 字元（省 read 用，單行可讀）。
+pub fn content_summary(content: &str, max_chars: usize) -> String {
+    let collapsed: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapsed.trim();
+    let mut out: String = collapsed.chars().take(max_chars).collect();
+    if collapsed.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 /// 「誰呼叫/import 這個符號」——反向依賴（cort impact 的資料來源）
