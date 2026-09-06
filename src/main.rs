@@ -157,27 +157,13 @@ fn now_iso() -> String {
         .unwrap_or(0);
     // UTC-ish timestamp without extra deps
     let days = secs / 86400;
-    let (y, m, d) = civil_from_days(days as i64);
+    let (y, m, d) = claudecat::dates::civil_from_days(days as i64);
     let (hh, mm, ss) = (
         (secs % 86400) / 3600,
         (secs % 3600) / 60,
         secs % 60,
     );
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
-// Howard Hinnant's algorithm
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> ProjectMap {
@@ -279,8 +265,12 @@ fn main() {
                     }
                 }
                 None => {
-                    println!("cort index: 無（尚未對 {} 建立索引）", root.display());
-                    eprintln!("  hint: 在該專案執行 `cort index` 後再用 navigate --cort");
+                    if cort::db_exists(&root) {
+                        println!("cort index: DB 存在但無法讀取（{}）——schema 不相容或檔案損毀？不假裝「尚未索引」", root.display());
+                    } else {
+                        println!("cort index: 無（尚未對 {} 建立索引）", root.display());
+                        eprintln!("  hint: 在該專案執行 `cort index` 後再用 navigate --cort");
+                    }
                 }
             }
         }

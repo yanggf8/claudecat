@@ -66,6 +66,28 @@ pub struct CortDependent {
     pub confidence_score: f64,
 }
 
+/// SQLite URI：路徑裡的 `%` `?` `#` 空白 會被 URI 語法吃掉（query/fragment 邊界、
+/// percent-decode），必須 percent-encode；其餘位元組（含 UTF-8）原樣。
+pub fn sqlite_uri(path: &Path) -> String {
+    let mut out = String::from("file:");
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '%' | '?' | '#' | ' ' => out.push_str(&format!("%{:02X}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push_str("?immutable=1");
+    out
+}
+
+/// cort 的 DB 檔案是否存在（區分「尚未索引」與「存在但讀取失敗」）
+pub fn db_exists(root: &Path) -> bool {
+    std::fs::canonicalize(root)
+        .ok()
+        .and_then(|r| r.to_str().map(db_path_for))
+        .is_some_and(|p| p.is_file())
+}
+
 /// 對 cort DB 跑唯讀查詢：先試一般唯讀（sidecar 齊全時最準）；若開檔失敗
 /// （唯讀檔案系統缺 -shm/-wal、sandbox 擋 lock 等）或查詢時 BUSY（cort 正持有寫鎖），
 /// 自動退回 `immutable=1`（SQLite 完全不碰 sidecar/lock，直接讀主檔；代價是 cort 若有
@@ -75,7 +97,7 @@ fn with_readonly<T>(real_path: &str, f: impl Fn(&Connection) -> rusqlite::Result
     if !db.is_file() {
         return None;
     }
-    let uri = format!("file:{}?immutable=1", db.display());
+    let uri = sqlite_uri(&db);
     let candidates = [
         Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY),
         Connection::open_with_flags(
@@ -359,6 +381,8 @@ pub struct CortAudit {
     pub root: String,
     pub window_days: u32,
     pub index: Option<CortAuditIndex>,
+    /// DB 檔案存在但 index=None → 「讀取失敗」，不是「尚未索引」
+    pub db_exists: bool,
     pub usage: Option<UsageWindow>,
     /// 固定 7 天窗口（早期訊號；與 `--window` 的長期趨勢互補）
     pub usage_7d: Option<UsageWindow>,
@@ -509,7 +533,7 @@ fn open_usage_readonly() -> Option<Connection> {
     if !db.is_file() {
         return None;
     }
-    let uri = format!("file:{}?immutable=1", db.display());
+    let uri = sqlite_uri(&db);
     Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .or_else(|_| {
             Connection::open_with_flags(
@@ -599,6 +623,7 @@ pub fn audit(root: &Path, window_days: u32) -> CortAudit {
         root: real.to_string_lossy().into_owned(),
         window_days,
         index: audit_index(&real),
+        db_exists: db_exists(&real),
         usage,
         usage_7d,
     }

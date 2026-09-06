@@ -52,6 +52,13 @@ fn claude_md_update_is_idempotent_and_atomic() {
 }
 
 /// 暫時覆寫環境變數，drop 時還原（避免污染其他並行測試）
+/// 序列化所有會改 process-global env（CORT_CACHE_DIR）的測試，
+/// 避免 cargo 平行測試互相踩環境變數。
+fn cort_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct EnvVarGuard(String, Option<String>);
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
@@ -399,6 +406,7 @@ fn cort_readonly_fallback_when_writer_holds_exclusive_lock() {
     );
 
     // 5) claudecat 的 fallback 仍可唯讀讀到索引（不寫入）
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -457,6 +465,7 @@ fn cort_fts_finds_content_only_match() {
     .unwrap();
     drop(conn);
 
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -592,6 +601,7 @@ fn cort_audit_reports_health_and_coverage() {
         .unwrap();
     }
 
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -668,6 +678,7 @@ fn cort_audit_usage_counts_window() {
         )
         .unwrap();
     }
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -694,6 +705,7 @@ fn cort_audit_track_updates_table() {
         root: "/tmp/fake-root".to_string(),
         window_days: 7,
         index: None,
+        db_exists: false,
         usage: None,
         usage_7d: None,
     };
@@ -752,6 +764,7 @@ fn cort_freshness_ms_stale_after_7_days_and_consistent() {
         ))
         .unwrap();
     }
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -776,6 +789,7 @@ fn cort_audit_track_preserves_content_after_section() {
         root: "/tmp/fake-root".to_string(),
         window_days: 7,
         index: None,
+        db_exists: false,
         usage: None,
         usage_7d: None,
     };
@@ -803,6 +817,7 @@ fn track_table_preserves_sibling_sections_in_one_file() {
         root: "/tmp/fake-root".to_string(),
         window_days: 7,
         index: None,
+        db_exists: false,
         usage: None,
         usage_7d: None,
     };
@@ -900,6 +915,7 @@ fn cort_audit_missing_file_state_table_is_not_silent_zero() {
         ))
         .unwrap();
     }
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -914,6 +930,7 @@ fn cort_audit_missing_file_state_table_is_not_silent_zero() {
         root: real_str,
         window_days: 30,
         index: Some(a),
+        db_exists: true,
         usage: None,
         usage_7d: None,
     };
@@ -961,6 +978,7 @@ fn cort_audit_fts_drift_detects_missing_and_extra_fts_rows() {
         ))
         .unwrap();
     }
+    let _env_serial = cort_env_lock();
     let guard = EnvVarGuard(
         "CORT_CACHE_DIR".to_string(),
         std::env::var("CORT_CACHE_DIR").ok(),
@@ -973,5 +991,55 @@ fn cort_audit_fts_drift_detects_missing_and_extra_fts_rows() {
     assert_eq!(a.chunk_count, 3);
     assert_eq!(a.fts_drift, Some(3), "缺 2（c2,c3）+ 孤兒 1（rowid 99）= 3");
     assert_ne!(a.fts_drift, Some(0), "數量相等不得判為 synced");
+    drop(guard);
+}
+
+/// P3 回歸：immutable URI 的路徑必須 percent-encode `%` `?` `#` 空白，
+/// 否則 URI 語法會把路徑截斷在 query/fragment 邊界。
+#[test]
+fn cort_sqlite_uri_escapes_special_chars() {
+    let p = std::path::Path::new("/home/u#1/my cache/db?x.db");
+    let uri = claudecat::cort::sqlite_uri(p);
+    assert_eq!(
+        uri,
+        "file:/home/u%231/my%20cache/db%3Fx.db?immutable=1",
+        "URI 邊界字元必須編碼"
+    );
+    assert!(!uri.contains(' '));
+}
+
+/// P3 回歸：DB 檔存在但讀取失敗（如非 SQLite 檔、schema 全不相容）時，
+/// 必須回報「存在但無法讀取」，不是誤報「尚未建立索引」。
+#[test]
+fn cort_audit_distinguishes_unreadable_db_from_missing_index() {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    // 檔案在，但不是 SQLite 資料庫
+    fs::write(cache.join(format!("{pid}.db")), b"definitely not a database").unwrap();
+
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    assert!(claudecat::cort::db_exists(&proj), "DB 檔存在");
+    assert!(claudecat::cort::audit_index(&proj).is_none(), "讀取失敗");
+    let a = claudecat::cort::audit(&proj, 30);
+    assert!(a.db_exists);
+    assert!(a.index.is_none());
+    let report = claudecat::cort_audit::render(&a);
+    assert!(
+        report.contains("存在但無法讀取"),
+        "應說「DB 存在但無法讀取」，不是「尚未建立索引」"
+    );
     drop(guard);
 }
