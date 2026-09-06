@@ -738,6 +738,7 @@ fn cort_audit_usage_counts_window() {
 fn cort_audit_track_updates_table() {
     let a = claudecat::cort::CortAudit {
         root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
         window_days: 7,
         index: None,
         db_exists: false,
@@ -750,7 +751,7 @@ fn cort_audit_track_updates_table() {
     assert!(changed1);
     let content1 = fs::read_to_string(&f).unwrap();
     assert!(content1.contains("## 長期指標 (claudecat cort-audit)"));
-    assert!(content1.contains("| 日期 | 專案 | fresh |"));
+    assert!(content1.contains("| 日期 | 專案 | host | fresh |"));
     assert!(content1.contains("core/7d"), "追蹤列應含 core 動詞欄");
     assert!(content1.contains("deep/7d"), "追蹤列應含 deep 動詞欄");
     assert!(content1.contains("命令數/7d"), "追蹤列應含 7 天早期訊號欄");
@@ -823,6 +824,7 @@ fn cort_freshness_ms_stale_after_7_days_and_consistent() {
 fn cort_audit_track_preserves_content_after_section() {
     let a = claudecat::cort::CortAudit {
         root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
         window_days: 7,
         index: None,
         db_exists: false,
@@ -851,6 +853,7 @@ fn cort_audit_track_preserves_content_after_section() {
 fn track_table_preserves_sibling_sections_in_one_file() {
     let a = claudecat::cort::CortAudit {
         root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
         window_days: 7,
         index: None,
         db_exists: false,
@@ -974,6 +977,7 @@ fn cort_audit_missing_file_state_table_is_not_silent_zero() {
 
     let audit = claudecat::cort::CortAudit {
         root: real_str,
+        host: "test-host".to_string(),
         window_days: 30,
         index: Some(a),
         db_exists: true,
@@ -1102,4 +1106,62 @@ fn cort_audit_distinguishes_unreadable_db_from_missing_index() {
         "應說「DB 存在但無法讀取」，不是「尚未建立索引」"
     );
     drop(guard);
+}
+
+/// P2 回歸：usage.db 是每台機器各自的——同一天、同 root、不同 host 的兩列
+/// 必須並存，不得互相覆蓋（多機匯集到同一份 CORT-AUDIT.md 時）。
+#[test]
+fn cort_audit_track_rows_from_different_hosts_coexist() {
+    let mk = |host: &str| claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: host.to_string(),
+        window_days: 7,
+        index: None,
+        db_exists: false,
+        usage: None,
+        usage_7d: None,
+    };
+    let dir = temp_project();
+    let f = dir.join("CORT-AUDIT.md");
+    let (c1, _) = claudecat::cort_audit::track_update(&f, &[&mk("machine-a")]).unwrap();
+    assert!(c1);
+    let (c2, _) = claudecat::cort_audit::track_update(&f, &[&mk("machine-b")]).unwrap();
+    assert!(c2, "不同 host 的新列應新增，不覆蓋 machine-a");
+    let content = fs::read_to_string(&f).unwrap();
+    assert_eq!(content.matches("/tmp/fake-root").count(), 2, "兩列並存");
+    assert!(content.contains("machine-a") && content.contains("machine-b"));
+    // 同 host 同日重跑 → 只更新自己那列
+    let (_, _) = claudecat::cort_audit::track_update(&f, &[&mk("machine-a")]).unwrap();
+    let content2 = fs::read_to_string(&f).unwrap();
+    assert_eq!(
+        content2.matches("/tmp/fake-root").count(),
+        2,
+        "同日同 host 重跑不增列"
+    );
+}
+
+/// doctor：cron 條目的產生、偵測與幂等合併（部署一件事的純函式核心）
+#[test]
+fn doctor_track_cron_line_detection_and_merge_idempotent() {
+    let line = claudecat::doctor::track_cron_line(
+        "/home/u/claudecat",
+        std::path::Path::new("/home/u/proj"),
+    );
+    assert!(line.starts_with("17 9 * * * "), "避開整點的分鐘數");
+    assert!(line.contains("cort-audit --root /home/u/proj --track CORT-AUDIT.md"));
+    assert!(line.contains("cort-audit.log"), "輸出要落 log 便于診斷");
+
+    assert!(!claudecat::doctor::has_track_entry(""));
+    assert!(claudecat::doctor::has_track_entry(&line));
+
+    let once = claudecat::doctor::merge_crontab("", &line);
+    assert_eq!(once.lines().count(), 1);
+    let twice = claudecat::doctor::merge_crontab(&once, &line);
+    assert_eq!(twice, once, "幂等：已安裝不得重複");
+
+    let kept = claudecat::doctor::merge_crontab("0 0 * * * echo hi\n", &line);
+    assert!(
+        kept.starts_with("0 0 * * * echo hi\n") && kept.lines().count() == 2,
+        "既有條目必須保留"
+    );
 }

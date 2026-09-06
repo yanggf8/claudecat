@@ -2,6 +2,7 @@ pub mod claude_md;
 pub mod cort;
 pub mod cort_audit;
 pub mod dates;
+pub mod doctor;
 pub mod explore;
 pub mod guardrails;
 pub mod manifest;

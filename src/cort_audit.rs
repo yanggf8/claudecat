@@ -268,9 +268,10 @@ pub fn row_md(a: &CortAudit) -> String {
         .map(|u| deep_verb_count(u).to_string())
         .unwrap_or_else(|| "-".into());
     format!(
-        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         today_iso(),
         a.root,
+        a.host,
         fresh,
         chunks,
         rels,
@@ -288,9 +289,9 @@ pub fn row_md(a: &CortAudit) -> String {
 pub fn track_update(path: &Path, audits: &[&CortAudit]) -> std::io::Result<(bool, String)> {
     let window = audits.first().map(|a| a.window_days).unwrap_or(30);
     let header = format!(
-        "{}\n\n| 日期 | 專案 | fresh | chunks | relationships | 未chunk檔 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "{}\n\n| 日期 | 專案 | host | fresh | chunks | relationships | 未chunk檔 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         TRACK_SECTION
     );
     let rows: Vec<String> = audits.iter().map(|a| row_md(a)).collect();
-    crate::explore::track_table(path, TRACK_SECTION, &header, &rows)
+    crate::explore::track_table(path, TRACK_SECTION, &header, &rows, Some(3))
 }

@@ -1,0 +1,143 @@
+//! doctor：體檢本機的追蹤循環（cron / 數據源 / host / cort 索引），並可一鍵部署。
+//! 數據（usage.db）天生是每台機器各自的，所以「部署」= 每台機器跑一次
+//! `claudecat doctor --install-track`；各機的列靠 host 欄位在 CORT-AUDIT.md 共存。
+use std::path::Path;
+
+/// 每日追蹤的 cron 條目（09:17，避開整點；cargo 用絕對路徑——cron 的 PATH 很瘦）
+pub fn track_cron_line(manifest_dir: &str, root: &Path) -> String {
+    format!(
+        "17 9 * * * cd {manifest_dir} && $HOME/.cargo/bin/cargo run -q --manifest-path \
+         {manifest_dir}/Cargo.toml -- cort-audit --root {} --track CORT-AUDIT.md >> \
+         {manifest_dir}/cort-audit.log 2>&1",
+        root.display()
+    )
+}
+
+/// 判斷既有 crontab 是否已含追蹤條目（寬鬆比對：cort-audit + --track）
+pub fn has_track_entry(crontab: &str) -> bool {
+    crontab
+        .lines()
+        .any(|l| l.contains("cort-audit") && l.contains("--track"))
+}
+
+/// 把追蹤條目併進既有 crontab（幂等：已存在 → 原樣返回）
+pub fn merge_crontab(existing: &str, line: &str) -> String {
+    if has_track_entry(existing) {
+        return existing.to_string();
+    }
+    let mut out = existing.trim_end().to_string();
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(line);
+    out.push('\n');
+    out
+}
+
+/// 讀目前使用者的 crontab（無 crontab 或 crontab 不存在 → 空字串）
+pub fn read_crontab() -> String {
+    std::process::Command::new("crontab")
+        .arg("-l")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// 寫回 crontab（完整內容走 stdin 的 `crontab -`）
+pub fn write_crontab(content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_ref()
+        .expect("stdin must be piped")
+        .write_all(content.as_bytes())?;
+    if child.wait()?.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("crontab - exited non-zero"))
+    }
+}
+
+/// 體檢報告：循環賴以運作的每一環，逐項 ✓/✗，✗ 帶下一步
+pub fn report(root: &Path) -> String {
+    let mut s = String::from("# claudecat doctor\n\n");
+    let host = std::fs::read_to_string("/etc/hostname")
+        .map(|h| h.trim().to_string())
+        .ok()
+        .filter(|h| !h.is_empty());
+    s.push_str(&format!(
+        "- [{}] host 可讀（{}）——多機的列靠它區分\n",
+        tick(host.is_some()),
+        host.as_deref().unwrap_or("unknown")
+    ));
+
+    let cache = crate::cort::cache_dir();
+    s.push_str(&format!(
+        "- [{}] cort cache dir：{}\n",
+        tick(cache.is_dir()),
+        cache.display()
+    ));
+    let usage = cache.join("usage.db");
+    s.push_str(&format!(
+        "- [{}] usage.db（用量數據源）{}\n",
+        tick(usage.is_file()),
+        if usage.is_file() {
+            String::new()
+        } else {
+            "— 裝了 cort 並用過之後就會有".to_string()
+        }
+    ));
+
+    let pid_db = std::fs::canonicalize(root)
+        .ok()
+        .and_then(|r| r.to_str().map(crate::cort::db_path_for));
+    let indexed = pid_db.as_ref().is_some_and(|p| p.is_file());
+    s.push_str(&format!(
+        "- [{}] 本專案 cort 索引（{}）{}\n",
+        tick(indexed),
+        root.display(),
+        if indexed {
+            match crate::cort::index_info(root) {
+                Some(info) if info.fresh => "— fresh".to_string(),
+                Some(_) => "— STALE（執行 `cort index`）".to_string(),
+                None => "— 存在但無法讀取".to_string(),
+            }
+        } else {
+            "— 執行 `cort index` 後可用 navigate --cort".to_string()
+        }
+    ));
+
+    let track_file = root.join("CORT-AUDIT.md");
+    s.push_str(&format!(
+        "- [{}] 長期指標檔：{}\n",
+        tick(track_file.is_file()),
+        track_file.display()
+    ));
+
+    let crontab = read_crontab();
+    let installed = has_track_entry(&crontab);
+    s.push_str(&format!(
+        "- [{}] 每日追蹤 crontab {}\n",
+        tick(installed),
+        if installed {
+            String::new()
+        } else {
+            "— 跑 `claudecat doctor --install-track` 一鍵安裝".to_string()
+        }
+    ));
+    s
+}
+
+fn tick(ok: bool) -> char {
+    if ok {
+        '✓'
+    } else {
+        '✗'
+    }
+}

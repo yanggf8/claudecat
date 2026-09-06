@@ -173,6 +173,7 @@ pub fn track_table(
     section: &str,
     header: &str,
     new_rows: &[String],
+    host_col: Option<usize>,
 ) -> std::io::Result<(bool, String)> {
     let existing = if path.is_file() {
         fs::read_to_string(path).unwrap_or_default()
@@ -214,10 +215,18 @@ pub fn track_table(
         format!("| {} |", kept.join(" | "))
     }
     let ncols = header.matches('|').count() - 1; // 欄數 = 管道數 - 1（前後各一）
+                                                 // host 欄位（多機情境）：usage.db 是每台機器各自的，同日 + root 但 host
+                                                 // 不同的列必須並存。舊格式列（沒有 host 欄）視為 host 相符 → 同日可被替換。
+    let host_of = |row: &str| -> Option<String> {
+        host_col
+            .and_then(|i| row.split('|').nth(i))
+            .map(|c| c.trim().to_string())
+    };
     let keep: Vec<String> = old_rows
         .into_iter()
         .filter(|row| {
-            // 只刪「同一天 + root 精確相等」的舊列（避免 foo 誤刪 foo-bar）
+            // 只刪「同一天 + root 精確相等」（+ host 相符或舊列無 host 欄）的舊列
+            // （避免 foo 誤刪 foo-bar）
             let r = row_root(row);
             for nr in new_rows {
                 let cols: Vec<&str> = nr.split('|').collect();
@@ -227,7 +236,10 @@ pub fn track_table(
                     .map(|c| c.trim().trim_matches('`'))
                     .unwrap_or("");
                 if row.contains(date) && r.as_deref() == Some(root) {
-                    return false;
+                    match (host_of(row), host_of(nr)) {
+                        (Some(oh), Some(nh)) if oh != nh => continue, // 他機的列，保留
+                        _ => return false,
+                    }
                 }
             }
             true
@@ -279,7 +291,7 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
         TRACK_SECTION
     );
     let rows: Vec<String> = metrics.iter().map(|m| row_md(m)).collect();
-    track_table(path, TRACK_SECTION, &header, &rows)
+    track_table(path, TRACK_SECTION, &header, &rows, None)
 }
 
 /// 相容舊 API（單 repo）

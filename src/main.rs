@@ -1,6 +1,7 @@
 use claudecat::claude_md;
 use claudecat::cort;
 use claudecat::cort_audit;
+use claudecat::doctor;
 use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
@@ -63,6 +64,15 @@ enum Commands {
         /// 專案根目錄
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// 體檢本機的追蹤循環；--install-track 一鍵部署每日 crontab（幂等）
+    Doctor {
+        /// 專案根目錄
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// 安裝每日追蹤 crontab 條目
+        #[arg(long)]
+        install_track: bool,
     },
     /// cort 整合審計：索引健康 / 覆蓋缺口 / FTS 同步 / 用量（收集數據驗證 → 據此改善）
     CortAudit {
@@ -282,6 +292,27 @@ fn main() {
                 }
             }
         },
+        Commands::Doctor {
+            root,
+            install_track,
+        } => {
+            if install_track {
+                let line = doctor::track_cron_line(env!("CARGO_MANIFEST_DIR"), &root);
+                let existing = doctor::read_crontab();
+                if doctor::has_track_entry(&existing) {
+                    println!("Track cron: 已存在，不重複安裝");
+                } else {
+                    match doctor::write_crontab(&doctor::merge_crontab(&existing, &line)) {
+                        Ok(()) => println!("Track cron -> 已安裝：\n  {line}"),
+                        Err(e) => {
+                            eprintln!("Failed to install track crontab: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+            println!("{}", doctor::report(&root));
+        }
         Commands::CortAudit {
             root,
             window,
