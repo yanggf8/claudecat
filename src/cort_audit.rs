@@ -135,7 +135,7 @@ pub fn render(a: &CortAudit) -> String {
         }
         if i.not_chunked_total > 0 {
             hints.push(format!(
-                "coverage 缺口：{} 檔從未被 chunk → 檢查 extractor 規則 / unparsed 原因",
+                "coverage 缺口：{} 檔在 file_state 但從未被 chunk → 先確認是否本來就沒有可 chunk 的宣告（如只 import 後呼叫的 driver 檔，實測 5/5 是這種；見 cortexyoung#2），再查 extractor 規則",
                 i.not_chunked_total
             ));
         }
