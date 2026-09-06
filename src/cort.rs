@@ -3,6 +3,7 @@
 //! 不做任何寫入；DB 不存在或 schema 不符時回退到 None。
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -307,5 +308,272 @@ pub fn dependents(root: &Path, symbol: &str) -> Option<Vec<CortDependent>> {
         None
     } else {
         Some(deps)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cort-audit：收集「整合是否達成」的驗證數據（唯讀）
+// 索引健康 + 覆蓋缺口 + FTS 同步 + 用量（usage.db），全部不寫入
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CortAuditIndex {
+    /// 索引健康（index_info 已有欄位）
+    pub name: String,
+    pub path: String,
+    pub fresh: bool,
+    pub git_head_matches: bool,
+    /// 索引距今幾天；無 last_indexed_at 時為 None
+    pub index_age_days: Option<i64>,
+    pub chunk_count: i64,
+    pub relationships_count: i64,
+    /// 覆蓋：file_state 有、chunks 沒有的檔案（completeness 缺口）
+    pub file_state_files: i64,
+    pub chunked_files: i64,
+    /// 未 chunk 檔案的「總數」（清單只保留前 20 筆，避免輸出過長）
+    pub not_chunked_total: i64,
+    pub not_chunked_files: Vec<String>,
+    /// 含至少一個 unparsed chunk 的檔案數
+    pub files_with_unparsed_chunks: i64,
+    /// FTS 同步：chunks_fts docs vs chunks 數
+    pub fts_docs: i64,
+    pub fts_synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct UsageWindow {
+    pub window_days: u32,
+    pub total_commands: i64,
+    pub by_command: BTreeMap<String, i64>,
+    pub suggest_outcomes: BTreeMap<String, i64>,
+    pub refresh_outcomes: BTreeMap<String, i64>,
+    pub errors: i64,
+    pub index_stale_queries: i64,
+    pub saved_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CortAudit {
+    pub root: String,
+    pub window_days: u32,
+    pub index: Option<CortAuditIndex>,
+    pub usage: Option<UsageWindow>,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 索引健康 + 覆蓋缺口 + FTS 同步（單一唯讀連線內完成）
+pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
+    let real = std::fs::canonicalize(root).ok()?;
+    let real_str = real.to_str()?;
+    let pid = project_id(real_str);
+    let head_now = git_head(real_str);
+
+    with_readonly(real_str, |conn| {
+        let row = conn
+            .query_row(
+                "SELECT name, path, git_head, last_indexed_at FROM projects WHERE project_id = ?1",
+                [&pid],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let (name, path, indexed_head, last_indexed_at) = match row {
+            Some(r) => r,
+            None => return Ok(None), // 專案尚未被 cort 索引
+        };
+
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE project_id = ?1",
+                [&pid],
+                |r| r.get(0),
+            )?;
+        let relationships_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks c JOIN relationships r \
+                 ON r.source_chunk_id = c.chunk_id WHERE c.project_id = ?1",
+                [&pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let file_state_files: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_state WHERE project_id = ?1",
+                [&pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let chunked_files: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT file_path) FROM chunks WHERE project_id = ?1",
+                [&pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let not_chunked_sql = "SELECT file_path FROM file_state WHERE project_id = ? \
+             AND file_path NOT IN (SELECT DISTINCT file_path FROM chunks WHERE project_id = ?) \
+             ORDER BY file_path";
+        let not_chunked_total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_state WHERE project_id = ? \
+                 AND file_path NOT IN (SELECT DISTINCT file_path FROM chunks WHERE project_id = ?)",
+                [&pid, &pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let mut not_chunked: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(not_chunked_sql) {
+            let rows = stmt.query_map([&pid, &pid], |r| r.get::<_, String>(0));
+            if let Ok(rows) = rows {
+                for r in rows.flatten() {
+                    if not_chunked.len() < 20 {
+                        not_chunked.push(r);
+                    }
+                }
+            }
+        }
+        let files_with_unparsed_chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT file_path) FROM chunks \
+                 WHERE project_id = ?1 AND chunk_source = 'unparsed'",
+                [&pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let fts_docs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        // 新鮮度：git head 相符 + ≤7 天
+        let git_head_matches = match (&head_now, &indexed_head) {
+            (Some(now), Some(idx)) => now == idx,
+            _ => true, // 非 git repo 時不追究
+        };
+        let age_days = last_indexed_at
+            .map(|t| (now_ms() - t).max(0) / (24 * 3600 * 1000));
+        let fresh = git_head_matches && last_indexed_at.is_some_and(|t| now_ms() - t <= 7 * 24 * 3600 * 1000);
+
+        Ok(Some(CortAuditIndex {
+            name,
+            path,
+            fresh,
+            git_head_matches,
+            index_age_days: age_days,
+            chunk_count,
+            relationships_count,
+            file_state_files,
+            chunked_files,
+            not_chunked_total,
+            not_chunked_files: not_chunked,
+            files_with_unparsed_chunks,
+            fts_docs,
+            fts_synced: fts_docs == chunk_count,
+        }))
+    })?
+}
+
+fn open_usage_readonly() -> Option<Connection> {
+    let db = cache_dir().join("usage.db");
+    if !db.is_file() {
+        return None;
+    }
+    let uri = format!("file:{}?immutable=1", db.display());
+    Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .or_else(|_| {
+            Connection::open_with_flags(
+                &uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )
+        })
+        .ok()
+}
+
+/// 用量統計（cort 自己的 usage.db command_log，唯讀）：window 天內
+pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
+    let conn = open_usage_readonly()?;
+    let since = now_ms() - (window_days as i64) * 24 * 3600 * 1000;
+
+    let mut u = UsageWindow {
+        window_days,
+        ..Default::default()
+    };
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT command, COUNT(*) FROM command_log WHERE ts >= ?1 GROUP BY command",
+    ) {
+        if let Ok(rows) = stmt.query_map([&since], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }) {
+            for r in rows.flatten() {
+                u.by_command.insert(r.0, r.1);
+                u.total_commands += r.1;
+            }
+        }
+    }
+    // hook 結果分佈（args_summary 是 JSON）
+    for (cmd, target) in [
+        ("hook-suggest", &mut u.suggest_outcomes),
+        ("hook-refresh", &mut u.refresh_outcomes),
+    ] {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT args_summary FROM command_log WHERE command = ?1 AND ts >= ?2",
+        ) {
+            if let Ok(rows) =
+                stmt.query_map(rusqlite::params![cmd, since], |r| r.get::<_, String>(0))
+            {
+                for r in rows.flatten() {
+                    let hook = serde_json::from_str::<serde_json::Value>(&r)
+                        .ok()
+                        .and_then(|v| v.get("hook").and_then(|h| h.as_str()).map(String::from))
+                        .unwrap_or_else(|| "unparsed".to_string());
+                    *target.entry(hook).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    u.errors = conn
+        .query_row(
+            "SELECT COUNT(*) FROM command_log WHERE status = 'error' AND ts >= ?1",
+            [&since],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    u.index_stale_queries = conn
+        .query_row(
+            "SELECT COUNT(*) FROM command_log WHERE index_stale = 1 AND ts >= ?1",
+            [&since],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    u.saved_bytes = conn
+        .query_row(
+            "SELECT COALESCE(SUM(saved_bytes), 0) FROM command_log WHERE ts >= ?1",
+            [&since],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Some(u)
+}
+
+/// 完整審計：索引健康/覆蓋 + 用量（window 天）
+pub fn audit(root: &Path, window_days: u32) -> CortAudit {
+    let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    CortAudit {
+        root: real.to_string_lossy().into_owned(),
+        window_days,
+        index: audit_index(&real),
+        usage: audit_usage(window_days),
     }
 }

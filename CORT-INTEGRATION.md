@@ -63,6 +63,22 @@
 - `chunks_fts` 確認為 **external-content FTS5**（`content=chunks, content_rowid=rowid`），
   唯讀 MATCH + JOIN chunks 實測可用 → 實作 FTS fallback（見下）
 
+## 驗證迴圈：cort-audit（2026-09-06）
+把「有沒有幫到 cort 的目的」變成**可收集、可追蹤的數據**（全部唯讀）：
+- `claudecat cort-audit --root X [--window 30] [--json] [--track FILE]`
+- 數據：①索引健康（fresh/HEAD 相符/age）②覆蓋缺口（file_state 有、chunks 無的檔案——
+  這是 cort 自己 CLAUDE.md 開出的 completeness 缺口之一「a file the screen never read」）
+  ③FTS 同步（chunks_fts docs vs chunks）④用量（cort usage.db：命令分佈、hook-suggest/
+  refresh 結果、errors、index_stale、saved_bytes）
+- 行動：報告尾「解讀 & 行動」依規則給建議；`--track` 每天一列寫 `CORT-AUDIT.md`（同日更新），
+  時間序列驗證改善（如：未 chunk 檔數量是否下降、命中率是否上升）
+- 首筆實測（2026-09-06，本 repo）：fresh、chunks=576 rels=294、FTS synced、
+  **coverage 缺口 5 檔（legacy/test-*.js）**、hook-suggest 命中率 **35/6816（<1%）**、
+  context+recall=3 —— 三條行動建議全部是有數據支撐的
+- 附帶收穫：驗證過程抓出 `?1` 重複綁定參數的 rusqlite bug（`InvalidParameterCount` 被
+  `unwrap_or(0)` 吞掉、假裝「無缺口」）→ 改 qmark 後正確回報 5 檔——正是「收集數據驗證」
+  的價值，另有 3 支回歸測試保護
+
 ## 待辦
 - `navigate --cort` 命中時帶 cort `content` 摘要進路線（省一次 read）— ✅ 已做：
   路線加「內文摘要（省一次 read）」步驟（壓縮空白、截 220 字），

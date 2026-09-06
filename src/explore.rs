@@ -135,25 +135,26 @@ pub fn row_md(m: &ExploreMetrics) -> String {
     )
 }
 
-/// 把多個指標更新進文件的「長期指標」表格：
-/// - 當天已存在且 root 在本次更新集合內的行 -> 以新值取代
-/// - 其餘歷史行保留；新 root 追加
+/// 通用長期指標表更新：把一組新列（已含日期+root）寫進文件的某個 section
+/// - 同一天 + root 精確相等 的舊列 -> 以新列取代
+/// - 其餘歷史列保留；新 root 追加
 /// 原子寫入；回傳 (changed, file_path)。
-pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result<(bool, String)> {
+/// `header` 必須是完整區塊（含 section 標題 + 表頭 + 分隔列）。
+pub fn track_table(
+    path: &Path,
+    section: &str,
+    header: &str,
+    new_rows: &[String],
+) -> std::io::Result<(bool, String)> {
     let existing = if path.is_file() {
         fs::read_to_string(path).unwrap_or_default()
     } else {
         String::new()
     };
 
-    let header = format!(
-        "{}\n\n| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省%(map-vs-read) | top-10 覆蓋% |\n|---|---|---:|---:|---:|---:|---:|---:|\n",
-        TRACK_SECTION
-    );
-
     // 解析既有表格資料列（`|` 開頭）
     let mut old_rows: Vec<String> = Vec::new();
-    if let Some(b) = existing.find(TRACK_SECTION) {
+    if let Some(b) = existing.find(section) {
         for line in existing[b..].lines() {
             let t = line.trim();
             if t.starts_with('|') && !t.starts_with("|---") && !t.starts_with("| 日期") {
@@ -183,8 +184,11 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
         .filter(|row| {
             // 只刪「同一天 + root 精確相等」的舊列（避免 foo 誤刪 foo-bar）
             let r = row_root(row);
-            for m in metrics.iter() {
-                if row.contains(&m.date) && r.as_deref() == Some(m.root.as_str()) {
+            for nr in new_rows {
+                let cols: Vec<&str> = nr.split('|').collect();
+                let date = cols.get(1).map(|c| c.trim()).unwrap_or("");
+                let root = cols.get(2).map(|c| c.trim().trim_matches('`')).unwrap_or("");
+                if row.contains(date) && r.as_deref() == Some(root) {
                     return false;
                 }
             }
@@ -193,7 +197,7 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
         .map(|row| normalize_row(&row, ncols))
         .collect();
 
-    let prefix = if let Some(b) = existing.find(TRACK_SECTION) {
+    let prefix = if let Some(b) = existing.find(section) {
         existing[..b].to_string()
     } else {
         let mut p = existing.clone();
@@ -207,13 +211,14 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
     };
 
     let mut table = String::new();
-    table.push_str(&header);
+    // header 帶尾端換行（慣例），這裡不再多 push，避免資料列前多一個空行
+    table.push_str(header);
     for r in &keep {
         table.push_str(r);
         table.push('\n');
     }
-    for m in metrics {
-        table.push_str(&row_md(m));
+    for nr in new_rows {
+        table.push_str(nr);
         table.push('\n');
     }
     let new_content = format!("{prefix}{table}");
@@ -226,6 +231,16 @@ pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result
         fs::rename(&tmp, path)?;
     }
     Ok((changed, path.to_string_lossy().into_owned()))
+}
+
+/// 把多個 explore 指標更新進文件的「長期指標」表格（走通用 track_table）
+pub fn track_update(path: &Path, metrics: &[&ExploreMetrics]) -> std::io::Result<(bool, String)> {
+    let header = format!(
+        "{}\n\n| 日期 | 專案 | 檔案 | LOC | map tokens | 全讀 tokens | 節省%(map-vs-read) | top-10 覆蓋% |\n|---|---|---:|---:|---:|---:|---:|---:|\n",
+        TRACK_SECTION
+    );
+    let rows: Vec<String> = metrics.iter().map(|m| row_md(m)).collect();
+    track_table(path, TRACK_SECTION, &header, &rows)
 }
 
 /// 相容舊 API（單 repo）

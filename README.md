@@ -83,6 +83,7 @@ claudecat **不重造索引**——直接唯讀 cort 的 SQLite
 ```bash
 claudecat cort-status --root <project>    # 索引新鮮度 / chunks / relationships
 claudecat navigate --cort "extractSymbolDefinitions"   # 優先查 cort 全量索引（tree-sitter 只掃 top-N）
+claudecat cort-audit --root <project>    # 驗證整合成效：健康 / 覆蓋缺口 / FTS / 用量；--track 寫長期指標
 ```
 
 - `cort-status fresh`：git HEAD 相符 + 索引 ≤7 天；STALE 時提示 `cort index`。
@@ -94,6 +95,11 @@ claudecat navigate --cort "extractSymbolDefinitions"   # 優先查 cort 全量�
 - 唯讀雙保險：一般 `SQLITE_OPEN_READ_ONLY`；失敗（唯讀 FS / 缺 sidecar / 寫入端持鎖 BUSY）
   自動退回 `immutable=1` 直接讀主檔。claudecat 永不寫 cort 的 DB；
   DB 不存在或未命中自動回退 tree-sitter。
+- `cort-audit`（收集數據驗證 → 據此改善）：唯讀彙整 ①索引健康（fresh/HEAD/age）
+  ②覆蓋缺口（file_state 有、chunks 無的檔案＝completeness 缺口）③FTS 同步
+  ④用量（cort usage.db：命令分佈、hook-suggest/refresh 結果、errors、index_stale、saved_bytes），
+  並依規則給「解讀 & 行動」；`--track <file>` 把每天一列寫進長期指標表（同日更新），
+  例如 `CORT-AUDIT.md`，讓「有沒有達成」變成可看的趨勢。
 
 ## 導航地圖內容（全部是事實）
 

@@ -543,3 +543,170 @@ fn navigate_with_cort_includes_content_summary() {
     assert!(r2.route.iter().any(|s| s.contains("全量索引命中")));
     assert!(r2.route.iter().any(|s| s.contains("內文摘要")));
 }
+
+/// cort-audit：索引健康 + 覆蓋缺口（file_state 有、chunks 無）+ FTS 同步
+#[test]
+fn cort_audit_reports_health_and_coverage() {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj).unwrap().to_str().unwrap().to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let db_path = cache.join(format!("{pid}.db"));
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE projects (
+               project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+               git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+             );
+             CREATE TABLE chunks (
+               chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL,
+               symbol_name TEXT, chunk_type TEXT, start_line INTEGER NOT NULL,
+               end_line INTEGER NOT NULL, content TEXT NOT NULL, language TEXT,
+               chunk_source TEXT DEFAULT 'ast'
+             );
+             CREATE TABLE file_state (
+               project_id TEXT NOT NULL, file_path TEXT NOT NULL, file_content_hash TEXT NOT NULL
+             );
+             CREATE TABLE relationships (
+               source_chunk_id TEXT NOT NULL, target_chunk_id TEXT NOT NULL,
+               rel_type TEXT NOT NULL, call_site_line INTEGER, confidence_score REAL NOT NULL
+             );
+             INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, {now_ms}, 'test');
+             INSERT INTO chunks VALUES ('c1', '{pid}', 'src/lib.rs', 'alpha', 'function', 1, 3, 'pub fn alpha()', 'Rust', 'ast');
+             INSERT INTO chunks VALUES ('c2', '{pid}', 'src/lib.rs', 'beta',  'function', 5, 9, 'pub fn beta()',  'Rust', 'unparsed');
+             INSERT INTO file_state VALUES ('{pid}', 'src/lib.rs', 'h1');
+             INSERT INTO file_state VALUES ('{pid}', 'legacy/test-x.js', 'h2');
+             INSERT INTO relationships VALUES ('c1', 'c2', 'calls', 2, 1.0);"
+        ))
+        .unwrap();
+    }
+
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    assert!(a.fresh, "索引 0 天前應 fresh");
+    assert_eq!(a.chunk_count, 2);
+    assert_eq!(a.relationships_count, 1);
+    assert_eq!(a.file_state_files, 2);
+    assert_eq!(a.chunked_files, 1);
+    assert_eq!(a.not_chunked_total, 1);
+    assert_eq!(a.not_chunked_files, vec!["legacy/test-x.js".to_string()]);
+    assert_eq!(a.files_with_unparsed_chunks, 1);
+    // 無 chunks_fts 表 → docs=0、不同步（誠實，不當成 synced）
+    assert_eq!(a.fts_docs, 0);
+    assert!(!a.fts_synced);
+
+    drop(guard);
+}
+
+/// cort-audit：用量窗口（usage.db command_log；window 外不計 + hook JSON 解析）
+#[test]
+fn cort_audit_usage_counts_window() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let db_path = cache.join("usage.db");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, project_id TEXT,
+               command TEXT NOT NULL, args_summary TEXT NOT NULL,
+               status TEXT NOT NULL, error_code TEXT,
+               read_source TEXT, requested_content_mode TEXT, effective_content_mode TEXT,
+               receipt_hit INTEGER, index_stale INTEGER,
+               bytes_out INTEGER NOT NULL, saved_bytes INTEGER NOT NULL
+             );
+             CREATE TABLE _usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+             VALUES (?1, 'impact', '{}', 'ok', 0, 100, 90)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+             VALUES (?1, 'hook-suggest', '{\"hook\":\"hit\"}', 'ok', 0, 0, 0)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+             VALUES (?1, 'impact', '{}', 'error', 1, 100, 10)",
+            [&now],
+        )
+        .unwrap();
+        // 窗口外（40 天前）不計
+        conn.execute(
+            "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+             VALUES (?1, 'context', '{}', 'ok', 0, 100, 0)",
+            [&(now - 40 * 24 * 3600 * 1000)],
+        )
+        .unwrap();
+    }
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    assert_eq!(u.window_days, 30);
+    assert_eq!(u.total_commands, 3);
+    assert_eq!(u.by_command.get("impact"), Some(&2));
+    assert_eq!(u.by_command.get("context"), None);
+    assert_eq!(u.suggest_outcomes.get("hit"), Some(&1));
+    assert_eq!(u.errors, 1);
+    assert_eq!(u.index_stale_queries, 1);
+    assert_eq!(u.saved_bytes, 100);
+
+    drop(guard);
+}
+
+/// cort-audit：--track 寫進長期指標表（同日重複不新增列）
+#[test]
+fn cort_audit_track_updates_table() {
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        window_days: 7,
+        index: None,
+        usage: None,
+    };
+    let dir = temp_project();
+    let f = dir.join("EVIDENCE.md");
+    let (changed1, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
+    assert!(changed1);
+    let content1 = fs::read_to_string(&f).unwrap();
+    assert!(content1.contains("## 長期指標 (claudecat cort-audit)"));
+    assert!(content1.contains("| 日期 | 專案 | fresh |"));
+    assert!(content1.contains("`/tmp/fake-root`"));
+
+    let (changed2, _) = claudecat::cort_audit::track_update(&f, &[&a]).unwrap();
+    assert!(!changed2, "同日同 root 重複 track 應是 no-op");
+    let content2 = fs::read_to_string(&f).unwrap();
+    assert_eq!(content1, content2);
+}

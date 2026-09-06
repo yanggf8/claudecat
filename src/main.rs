@@ -1,5 +1,6 @@
 use claudecat::claude_md;
 use claudecat::cort;
+use claudecat::cort_audit;
 use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
@@ -58,6 +59,21 @@ enum Commands {
         /// 專案根目錄
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// cort 整合審計：索引健康 / 覆蓋缺口 / FTS 同步 / 用量（收集數據驗證 → 據此改善）
+    CortAudit {
+        /// 專案根目錄
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// 用量統計窗口（天）
+        #[arg(long, default_value_t = 30)]
+        window: u32,
+        /// JSON 輸出
+        #[arg(long)]
+        json: bool,
+        /// 寫進文件的長期指標表（原子、同日更新），例如 SESSION-EVIDENCE.md
+        #[arg(long)]
+        track: Option<PathBuf>,
     },
     /// 導航：從一句話找到目的地符號/檔案，並給出 cort 低成本路線
     Navigate {
@@ -265,6 +281,33 @@ fn main() {
                 None => {
                     println!("cort index: 無（尚未對 {} 建立索引）", root.display());
                     eprintln!("  hint: 在該專案執行 `cort index` 後再用 navigate --cort");
+                }
+            }
+        }
+        Commands::CortAudit { root, window, json, track } => {
+            let a = cort::audit(&root, window);
+            if json {
+                match serde_json::to_string_pretty(&a) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("JSON serialization failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                println!("{}", cort_audit::render(&a));
+            }
+            if let Some(f) = track {
+                match cort_audit::track_update(&f, &[&a]) {
+                    Ok((changed, path)) => println!(
+                        "{} {}",
+                        if changed { "Audit metrics ->" } else { "Up to date:" },
+                        path
+                    ),
+                    Err(e) => {
+                        eprintln!("Failed to track cort audit into {}: {e}", f.display());
+                        std::process::exit(1);
+                    }
                 }
             }
         }
