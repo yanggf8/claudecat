@@ -1236,6 +1236,19 @@ fn cort_audit_usage_tracks_decline_distribution() {
             &conn,
             r#"{"hook":"no_shape","v":3,"decline":"pattern_not_symbol"}"#,
         );
+        // baseline（本來就不是搜尋的命令）比 context_flag 多，但不得贏走 decline-top
+        ins(
+            &conn,
+            r#"{"hook":"no_shape","v":3,"decline":"not_a_search_tool"}"#,
+        );
+        ins(
+            &conn,
+            r#"{"hook":"no_shape","v":3,"decline":"not_a_search_tool"}"#,
+        );
+        ins(
+            &conn,
+            r#"{"hook":"no_shape","v":3,"decline":"not_a_search_tool"}"#,
+        );
         ins(&conn, r#"{"hook":"hit","v":3}"#);
     }
     let _env_serial = cort_env_lock();
@@ -1246,7 +1259,11 @@ fn cort_audit_usage_tracks_decline_distribution() {
     std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
 
     let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
-    assert_eq!(u.suggest_outcomes.get("no_shape"), Some(&3));
+    assert_eq!(
+        u.suggest_outcomes.get("no_shape"),
+        Some(&6),
+        "2 context_flag + 1 pattern_not_symbol + 3 baseline"
+    );
     assert_eq!(u.suggest_outcomes.get("hit"), Some(&1));
     assert_eq!(
         u.declines.get("no_shape/context_flag"),
@@ -1254,7 +1271,8 @@ fn cort_audit_usage_tracks_decline_distribution() {
         "同標籤要累計"
     );
     assert_eq!(u.declines.get("no_shape/pattern_not_symbol"), Some(&1));
-    assert_eq!(u.declines.len(), 2, "無 decline 的列不得進分佈");
+    assert_eq!(u.declines.get("no_shape/not_a_search_tool"), Some(&3));
+    assert_eq!(u.declines.len(), 3, "無 decline 的列不得進分佈");
 
     let a = claudecat::cort::CortAudit {
         root: "/tmp/fake-root".to_string(),
@@ -1271,7 +1289,19 @@ fn cort_audit_usage_tracks_decline_distribution() {
         report.contains("no_shape/context_flag: 2"),
         "排序後最高者第一"
     );
+    assert!(
+        !report.contains("- no_shape/not_a_search_tool: 3"),
+        "baseline 不進可動作排序（呈報行的 - （baseline 前綴除外）"
+    );
+    assert!(
+        report.contains("baseline not_a_search_tool: 3"),
+        "baseline 另行呈報，不隱藏"
+    );
     let row = claudecat::cort_audit::row_md(&a);
     assert!(row.contains("context_flag=2"), "追蹤列應帶 decline-top");
+    assert!(
+        !row.contains("not_a_search_tool"),
+        "baseline 不得佔 decline-top"
+    );
     drop(guard);
 }

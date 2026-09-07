@@ -105,13 +105,30 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
     }
     if !u.declines.is_empty() {
         s.push_str("\ntop declines（no_shape 歸因；cortexyoung c290c383 起有數據）：\n");
+        // not_a_search_tool 是「本來就不是搜尋」的正確沉默（baseline），不是 tuning 目標——
+        // 混進排序會把行動靶心擠掉（2026-09-07 實測 165 筆 baseline 壓過一切），另行呈報。
+        let baseline = u
+            .declines
+            .get("no_shape/not_a_search_tool")
+            .copied()
+            .unwrap_or(0);
+        let actionable: Vec<_> = u
+            .declines
+            .iter()
+            .filter(|(k, _)| !k.ends_with("/not_a_search_tool"))
+            .collect();
         let no_shape = u.suggest_outcomes.get("no_shape").copied().unwrap_or(0);
-        let mut ranked: Vec<_> = u.declines.iter().collect();
+        let mut ranked: Vec<_> = actionable.to_vec();
         ranked.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
         for (k, c) in ranked.iter().take(5) {
             s.push_str(&format!(
                 "- {k}: {c}（佔 no_shape {:.0}%）\n",
                 **c as f64 / no_shape.max(1) as f64 * 100.0
+            ));
+        }
+        if baseline > 0 {
+            s.push_str(&format!(
+                "- （baseline not_a_search_tool: {baseline}，不列入排序）\n"
             ));
         }
     }
@@ -283,6 +300,8 @@ pub fn row_md(a: &CortAudit) -> String {
         .and_then(|u| {
             u.declines
                 .iter()
+                // baseline（本來就不是搜尋的命令）不是行動靶心——排序排除
+                .filter(|(k, _)| !k.ends_with("/not_a_search_tool"))
                 .max_by_key(|(_, c)| **c)
                 .map(|(k, c)| (k.rsplit('/').next().unwrap_or(k).to_string(), *c))
         })
