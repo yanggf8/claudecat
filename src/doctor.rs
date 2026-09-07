@@ -13,11 +13,11 @@ pub fn track_cron_line(manifest_dir: &str, root: &Path) -> String {
     )
 }
 
-/// 每日分析的 cron 條目（09:29；headless `claude -p`，prompt 檔在 repo 裡可審查、可版本化）。
-/// `claude` 的絕對路徑在安裝時解析（cron 的 PATH 很瘦）。
-pub fn analysis_cron_line(claude: &str, manifest_dir: &str) -> String {
+/// 每日分析的 cron 條目（09:29；headless agent，prompt 檔在 repo 裡可審查、可版本化）。
+/// 執行檔絕對路徑在安裝時解析（cron 的 PATH 很瘦）。
+pub fn analysis_cron_line(bin: &str, manifest_dir: &str) -> String {
     format!(
-        "29 9 * * * {claude} -p --dangerously-skip-permissions \
+        "29 9 * * * {bin} -p --dangerously-skip-permissions \
          \"$(cat {manifest_dir}/cort-audit-analysis-prompt.md)\" >> \
          {manifest_dir}/cort-audit-analysis.log 2>&1"
     )
@@ -37,10 +37,35 @@ pub fn has_analysis_entry(crontab: &str) -> bool {
         .any(|l| l.contains("cort-audit-analysis-prompt.md"))
 }
 
-/// 解析 headless 分析用的 `claude` 絕對路徑（互動 shell 的 PATH 正常，`which` 即可；
-/// 找不到再試 `~/.local/bin`——npm 全域的慣例位置）
-pub fn claude_path() -> Option<String> {
-    if let Ok(o) = std::process::Command::new("which").arg("claude").output() {
+/// 分析條目用哪顆執行檔。`CLAUDECAT_ANALYSIS_BIN` 指名（musecode/claude/絕對路徑）；
+/// 未指定 = auto：musecode 優先（額度與 claude 訂閱獨立，claude 限額週不會拖垮循環），
+/// 退 claude。額度狀況改變時調頭＝換 env 值重跑一次 `--install`，條目會被重寫。
+pub fn analysis_bin() -> Result<String, String> {
+    let prefer = std::env::var("CLAUDECAT_ANALYSIS_BIN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
+    let mut order: Vec<String> = Vec::new();
+    match &prefer {
+        Some(name) => order.push(name.clone()),
+        None => {
+            order.push("musecode".to_string());
+            order.push("claude".to_string());
+        }
+    }
+    for name in &order {
+        if let Some(p) = resolve_bin(name) {
+            return Ok(p);
+        }
+    }
+    Err(match prefer {
+        Some(n) => format!("找不到指定的分析執行檔：{n}"),
+        None => "找不到 musecode 也找不到 claude".to_string(),
+    })
+}
+
+fn resolve_bin(name: &str) -> Option<String> {
+    if let Ok(o) = std::process::Command::new("which").arg(name).output() {
         if o.status.success() {
             let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !p.is_empty() {
@@ -48,8 +73,29 @@ pub fn claude_path() -> Option<String> {
             }
         }
     }
-    let p = format!("{}/.local/bin/claude", std::env::var("HOME").ok()?);
+    let p = format!("{}/.local/bin/{name}", std::env::var("HOME").ok()?);
     Path::new(&p).is_file().then_some(p)
+}
+
+/// 併入分析條目：既有條目用的若不是目前偏好的執行檔（`bin`）→ 移除重寫；
+/// 已是偏好執行檔 → 不動。回傳 (新內容, 是否有變更)。
+pub fn merge_analysis_entry(existing: &str, line: &str, bin: &str) -> (String, bool) {
+    let is_analysis = |l: &str| l.contains("cort-audit-analysis-prompt.md");
+    let stale = |l: &str| is_analysis(l) && !l.contains(bin);
+    let kept: Vec<&str> = existing.lines().filter(|l| !stale(l)).collect();
+    let up_to_date = kept.iter().any(|l| is_analysis(l));
+    if up_to_date {
+        let out = format!("{}\n", kept.join("\n"));
+        let changed = existing != out;
+        return (out, changed);
+    }
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(line);
+    out.push('\n');
+    (out, true)
 }
 
 /// 把一條 cron 條目併進既有 crontab（幂等：`present` 判定已存在 → 原樣返回）
@@ -163,19 +209,33 @@ pub fn report(root: &Path) -> String {
             "— 跑 `claudecat doctor --install` 一鍵安裝".to_string()
         }
     ));
-    let claude = claude_path();
-    let analysis_ready = has_analysis_entry(&crontab) && claude.is_some();
-    s.push_str(&format!(
-        "- [{}] 每日分析 crontab（headless claude -p）{}\n",
-        tick(analysis_ready),
-        if analysis_ready {
-            String::new()
-        } else if claude.is_none() {
-            "— 找不到 `claude` 執行檔，先裝 Claude Code".to_string()
-        } else {
-            "— 跑 `claudecat doctor --install` 一鍵安裝".to_string()
+    match analysis_bin() {
+        Ok(bin) => {
+            let up_to_date = has_analysis_entry(&crontab)
+                && crontab
+                    .lines()
+                    .any(|l| l.contains("cort-audit-analysis-prompt.md") && l.contains(&bin));
+            let runner = Path::new(&bin)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| bin.clone());
+            s.push_str(&format!(
+                "- [{}] 每日分析 crontab（headless {} -p）{}\n",
+                tick(up_to_date),
+                runner,
+                if up_to_date {
+                    String::new()
+                } else if has_analysis_entry(&crontab) {
+                    "— 條目用的不是目前的執行檔，跑 `claudecat doctor --install` 切換".to_string()
+                } else {
+                    "— 跑 `claudecat doctor --install` 一鍵安裝".to_string()
+                }
+            ));
         }
-    ));
+        Err(e) => s.push_str(&format!(
+            "- [✗] 每日分析 crontab（{e}）——可用 CLAUDECAT_ANALYSIS_BIN 指定執行檔\n"
+        )),
+    }
     s
 }
 

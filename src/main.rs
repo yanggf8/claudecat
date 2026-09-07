@@ -307,22 +307,25 @@ fn main() {
                     );
                     println!("Track cron -> 已安裝");
                 }
-                match doctor::claude_path() {
-                    Some(claude) => {
-                        if doctor::has_analysis_entry(&updated) {
-                            println!("Analysis cron: 已存在，不重複安裝");
+                match doctor::analysis_bin() {
+                    Ok(bin) => {
+                        let line = doctor::analysis_cron_line(&bin, manifest_dir);
+                        let (next, changed) = doctor::merge_analysis_entry(&updated, &line, &bin);
+                        updated = next;
+                        let had = doctor::has_analysis_entry(&existing);
+                        let runner = std::path::Path::new(&bin)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| bin.clone());
+                        if changed && had {
+                            println!("Analysis cron -> 已切換至 {runner}");
+                        } else if changed {
+                            println!("Analysis cron -> 已安裝（{runner}）");
                         } else {
-                            updated = doctor::merge_entry(
-                                &updated,
-                                &doctor::analysis_cron_line(&claude, manifest_dir),
-                                doctor::has_analysis_entry,
-                            );
-                            println!("Analysis cron -> 已安裝");
+                            println!("Analysis cron: 已是最新（{runner}）");
                         }
                     }
-                    None => eprintln!(
-                        "Analysis cron: 找不到 `claude` 執行檔——先裝 Claude Code 再跑一次 --install"
-                    ),
+                    Err(e) => eprintln!("Analysis cron: {e}——既有條目維持原樣"),
                 }
                 if updated != existing {
                     if let Err(e) = doctor::write_crontab(&updated) {

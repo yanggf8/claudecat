@@ -1188,6 +1188,58 @@ fn doctor_track_cron_line_detection_and_merge_idempotent() {
     assert_eq!(again, both, "analysis 條目幂等");
 }
 
+/// 額度會枯竭，偏好就要能調頭：既有分析條目用的執行檔 ≠ 目前偏好 → 重寫；
+/// 已是偏好 → 不動。使用者調回來 = 換 CLAUDECAT_ANALYSIS_BIN 重跑 --install。
+#[test]
+fn doctor_analysis_entry_swaps_runner_on_preference_change() {
+    let old_line =
+        claudecat::doctor::analysis_cron_line("/home/u/.local/bin/claude", "/home/u/claudecat");
+    let new_line =
+        claudecat::doctor::analysis_cron_line("/home/u/.local/bin/musecode", "/home/u/claudecat");
+    let track = claudecat::doctor::track_cron_line(
+        "/home/u/claudecat",
+        std::path::Path::new("/home/u/proj"),
+    );
+    let existing = format!("{track}\n{old_line}");
+
+    // 偏好換成 musecode → 舊 claude 條目被替換，track 保留
+    let (out, changed) = claudecat::doctor::merge_analysis_entry(
+        &existing,
+        &new_line,
+        "/home/u/.local/bin/musecode",
+    );
+    assert!(changed);
+    assert!(out.contains("musecode") && !out.contains("/home/u/.local/bin/claude -p"));
+    assert!(out.contains("17 9 * * *"), "track 條目保留");
+
+    // 已是偏好 → 不動（幂等）
+    let (same, changed2) =
+        claudecat::doctor::merge_analysis_entry(&out, &new_line, "/home/u/.local/bin/musecode");
+    assert!(!changed2);
+    assert_eq!(same, out);
+}
+
+/// CLAUDECAT_ANALYSIS_BIN 指名時必須被尊重（額度調頭的開關）。
+#[test]
+fn doctor_analysis_bin_honors_env_override() {
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CLAUDECAT_ANALYSIS_BIN".to_string(),
+        std::env::var("CLAUDECAT_ANALYSIS_BIN").ok(),
+    );
+    std::env::set_var("CLAUDECAT_ANALYSIS_BIN", "no-such-analysis-binary-xyz");
+    let err = claudecat::doctor::analysis_bin().unwrap_err();
+    assert!(
+        err.contains("no-such-analysis-binary-xyz"),
+        "錯誤要指名找不到誰"
+    );
+
+    std::env::set_var("CLAUDECAT_ANALYSIS_BIN", "claude");
+    let bin = claudecat::doctor::analysis_bin().expect("claude 在本機存在");
+    assert!(bin.ends_with("claude"));
+    drop(guard);
+}
+
 /// cort-audit：hook-suggest 的 decline 歸因進 UsageWindow（cortexyoung c290c383 起，
 /// 新列才帶 decline；舊列與無 decline 的 outcome 自然缺席）+ 報告呈現 top declines。
 #[test]
