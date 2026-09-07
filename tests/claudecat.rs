@@ -1154,16 +1154,38 @@ fn doctor_track_cron_line_detection_and_merge_idempotent() {
     assert!(!claudecat::doctor::has_track_entry(""));
     assert!(claudecat::doctor::has_track_entry(&line));
 
-    let once = claudecat::doctor::merge_crontab("", &line);
+    let once = claudecat::doctor::merge_entry("", &line, claudecat::doctor::has_track_entry);
     assert_eq!(once.lines().count(), 1);
-    let twice = claudecat::doctor::merge_crontab(&once, &line);
+    let twice = claudecat::doctor::merge_entry(&once, &line, claudecat::doctor::has_track_entry);
     assert_eq!(twice, once, "幂等：已安裝不得重複");
 
-    let kept = claudecat::doctor::merge_crontab("0 0 * * * echo hi\n", &line);
+    let kept = claudecat::doctor::merge_entry(
+        "0 0 * * * echo hi\n",
+        &line,
+        claudecat::doctor::has_track_entry,
+    );
     assert!(
         kept.starts_with("0 0 * * * echo hi\n") && kept.lines().count() == 2,
         "既有條目必須保留"
     );
+
+    // 09:29 分析條目：headless claude -p + repo 裡的 prompt 檔 + 落 log
+    let aline =
+        claudecat::doctor::analysis_cron_line("/home/u/.local/bin/claude", "/home/u/claudecat");
+    assert!(aline.starts_with("29 9 * * * "), "與 09:17 錯開");
+    assert!(aline.contains("--dangerously-skip-permissions"));
+    assert!(aline.contains("$(cat /home/u/claudecat/cort-audit-analysis-prompt.md)"));
+    assert!(aline.contains("cort-audit-analysis.log"));
+    assert!(claudecat::doctor::has_analysis_entry(&aline));
+    assert!(
+        !claudecat::doctor::has_analysis_entry(&line),
+        "track 條目不得誤判為 analysis 條目"
+    );
+    let both = claudecat::doctor::merge_entry(&once, &aline, claudecat::doctor::has_analysis_entry);
+    assert_eq!(both.lines().count(), 2, "兩條並存");
+    let again =
+        claudecat::doctor::merge_entry(&both, &aline, claudecat::doctor::has_analysis_entry);
+    assert_eq!(again, both, "analysis 條目幂等");
 }
 
 /// cort-audit：hook-suggest 的 decline 歸因進 UsageWindow（cortexyoung c290c383 起，

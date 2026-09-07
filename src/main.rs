@@ -65,14 +65,14 @@ enum Commands {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
-    /// 體檢本機的追蹤循環；--install-track 一鍵部署每日 crontab（幂等）
+    /// 體檢本機的追蹤循環；--install 一鍵部署全部 crontab 條目（幂等）
     Doctor {
         /// 專案根目錄
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// 安裝每日追蹤 crontab 條目
+        /// 安裝每日追蹤 + 分析的 crontab 條目
         #[arg(long)]
-        install_track: bool,
+        install: bool,
     },
     /// cort 整合審計：索引健康 / 覆蓋缺口 / FTS 同步 / 用量（收集數據驗證 → 據此改善）
     CortAudit {
@@ -292,22 +292,42 @@ fn main() {
                 }
             }
         },
-        Commands::Doctor {
-            root,
-            install_track,
-        } => {
-            if install_track {
-                let line = doctor::track_cron_line(env!("CARGO_MANIFEST_DIR"), &root);
+        Commands::Doctor { root, install } => {
+            if install {
+                let manifest_dir = env!("CARGO_MANIFEST_DIR");
                 let existing = doctor::read_crontab();
-                if doctor::has_track_entry(&existing) {
+                let mut updated = existing.clone();
+                if doctor::has_track_entry(&updated) {
                     println!("Track cron: 已存在，不重複安裝");
                 } else {
-                    match doctor::write_crontab(&doctor::merge_crontab(&existing, &line)) {
-                        Ok(()) => println!("Track cron -> 已安裝：\n  {line}"),
-                        Err(e) => {
-                            eprintln!("Failed to install track crontab: {e}");
-                            std::process::exit(1);
+                    updated = doctor::merge_entry(
+                        &updated,
+                        &doctor::track_cron_line(manifest_dir, &root),
+                        doctor::has_track_entry,
+                    );
+                    println!("Track cron -> 已安裝");
+                }
+                match doctor::claude_path() {
+                    Some(claude) => {
+                        if doctor::has_analysis_entry(&updated) {
+                            println!("Analysis cron: 已存在，不重複安裝");
+                        } else {
+                            updated = doctor::merge_entry(
+                                &updated,
+                                &doctor::analysis_cron_line(&claude, manifest_dir),
+                                doctor::has_analysis_entry,
+                            );
+                            println!("Analysis cron -> 已安裝");
                         }
+                    }
+                    None => eprintln!(
+                        "Analysis cron: 找不到 `claude` 執行檔——先裝 Claude Code 再跑一次 --install"
+                    ),
+                }
+                if updated != existing {
+                    if let Err(e) = doctor::write_crontab(&updated) {
+                        eprintln!("Failed to write crontab: {e}");
+                        std::process::exit(1);
                     }
                 }
             }
