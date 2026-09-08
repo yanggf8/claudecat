@@ -16,6 +16,11 @@
 3. 台灣中文輸出（stdout 進 log 檔）：
    - deep/30d、deep/7d 趨勢（2026-09-06 基線 deep30=3、deep7=2；注意 30 天滾動窗口效應）
    - decline 排序與樣本數
+3b. **回報**（最後一步，不可省略）：把結論濃縮成 3–8 條 markdown bullet，寫進文件：
+   `/home/yanggf/.cargo/bin/cargo run -q -- findings - --file CORT-AUDIT.md`
+   （內容走 stdin）。只寫**判讀與該做什麼**，不要貼原始數字表——數字在同檔的長期指標表裡。
+   整段取代、只留最新一天，歷史在 git。**log 檔不算回報**：使用者看的是文件，
+   2026-09-09 之前這條循環跑完等於沒回報，就是因為終點只有 log。
 4. 樣本 ≥10 時：挑最大的可動作標籤，在 `/home/yanggf/a/cortexyoung/rust` 開下一條規則：
    - 規矩：`cargo fmt --all`、clippy 0 warnings、`cargo test --locked --all-targets` 全綠
    - **不自行 commit / push**——把 `git diff` 與說明寫進輸出，使用者會 gate

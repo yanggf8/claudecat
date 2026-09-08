@@ -1170,8 +1170,11 @@ fn doctor_track_cron_line_detection_and_merge_idempotent() {
     );
 
     // 09:29 分析條目：headless claude -p + repo 裡的 prompt 檔 + 落 log
-    let aline =
-        claudecat::doctor::analysis_cron_line("/home/u/.local/bin/claude", "/home/u/claudecat");
+    let aline = claudecat::doctor::analysis_cron_line(
+        "/home/u/.local/bin/claude",
+        "/home/u/claudecat",
+        &[],
+    );
     assert!(aline.starts_with("29 9 * * * "), "與 09:17 錯開");
     assert!(aline.contains("--dangerously-skip-permissions"));
     assert!(aline.contains("$(cat /home/u/claudecat/cort-audit-analysis-prompt.md)"));
@@ -1192,10 +1195,16 @@ fn doctor_track_cron_line_detection_and_merge_idempotent() {
 /// 已是偏好 → 不動。使用者調回來 = 換 CLAUDECAT_ANALYSIS_BIN 重跑 --install。
 #[test]
 fn doctor_analysis_entry_swaps_runner_on_preference_change() {
-    let old_line =
-        claudecat::doctor::analysis_cron_line("/home/u/.local/bin/claude", "/home/u/claudecat");
-    let new_line =
-        claudecat::doctor::analysis_cron_line("/home/u/.local/bin/musecode", "/home/u/claudecat");
+    let old_line = claudecat::doctor::analysis_cron_line(
+        "/home/u/.local/bin/claude",
+        "/home/u/claudecat",
+        &[],
+    );
+    let new_line = claudecat::doctor::analysis_cron_line(
+        "/home/u/.local/bin/musecode",
+        "/home/u/claudecat",
+        &[],
+    );
     let track = claudecat::doctor::track_cron_line(
         "/home/u/claudecat",
         std::path::Path::new("/home/u/proj"),
@@ -1203,18 +1212,13 @@ fn doctor_analysis_entry_swaps_runner_on_preference_change() {
     let existing = format!("{track}\n{old_line}");
 
     // 偏好換成 musecode → 舊 claude 條目被替換，track 保留
-    let (out, changed) = claudecat::doctor::merge_analysis_entry(
-        &existing,
-        &new_line,
-        "/home/u/.local/bin/musecode",
-    );
+    let (out, changed) = claudecat::doctor::merge_analysis_entry(&existing, &new_line);
     assert!(changed);
     assert!(out.contains("musecode") && !out.contains("/home/u/.local/bin/claude -p"));
     assert!(out.contains("17 9 * * *"), "track 條目保留");
 
     // 已是偏好 → 不動（幂等）
-    let (same, changed2) =
-        claudecat::doctor::merge_analysis_entry(&out, &new_line, "/home/u/.local/bin/musecode");
+    let (same, changed2) = claudecat::doctor::merge_analysis_entry(&out, &new_line);
     assert!(!changed2);
     assert_eq!(same, out);
 }
@@ -1737,4 +1741,98 @@ fn cort_audit_names_unspecified_contamination_in_hit_rate() {
         "污染與扣除後的數字都要講出來，實際輸出：\n{report}"
     );
     drop(guard);
+}
+
+/// 09:29 分析腿每天失敗在 `cc_claude: cannot exec claude: No such file or directory`：
+/// 執行檔本身是絕對路徑，但**它 exec 的下一層仍靠 PATH**，而 cron 的 PATH 沒有 ~/.local/bin。
+/// 兩個回歸：①條目要把執行檔所在目錄放進 PATH ②模板改了就必須真的重新部署
+/// （舊比對只看「執行檔字串在不在」，會把壞條目判成最新，`--install` 安靜地什麼都不做）。
+#[test]
+fn doctor_analysis_line_carries_path_and_redeploys_on_template_change() {
+    let line = claudecat::doctor::analysis_cron_line(
+        "/home/u/.local/bin/musecode",
+        "/home/u/claudecat",
+        &["/home/u/.nvm/versions/node/v24/bin".to_string()],
+    );
+    assert!(
+        line.contains(r#"PATH="/home/u/.local/bin:/home/u/.nvm/versions/node/v24/bin:$PATH""#),
+        "執行檔目錄 + runtime 目錄（harness hook 會用名字 exec node）都要在，實際：{line}"
+    );
+    // 重複目錄不得堆疊
+    let dedup = claudecat::doctor::analysis_cron_line(
+        "/home/u/.local/bin/musecode",
+        "/home/u/claudecat",
+        &["/home/u/.local/bin".to_string()],
+    );
+    assert_eq!(
+        dedup.matches("/home/u/.local/bin:").count(),
+        1,
+        "同一個目錄只出現一次：{dedup}"
+    );
+    assert!(
+        line.starts_with("29 9 * * * PATH="),
+        "PATH 要在執行檔之前，實際：{line}"
+    );
+
+    // 舊條目＝同一顆執行檔但沒有 PATH 前綴（正是本機 crontab 的壞形狀）
+    let broken = "29 9 * * * /home/u/.local/bin/musecode -p --dangerously-skip-permissions \
+                  \"$(cat /home/u/claudecat/cort-audit-analysis-prompt.md)\" >> \
+                  /home/u/claudecat/cort-audit-analysis.log 2>&1";
+    let (out, changed) = claudecat::doctor::merge_analysis_entry(broken, &line);
+    assert!(
+        changed,
+        "模板修好了就必須重寫，不能因為執行檔沒換而視為最新"
+    );
+    assert!(out.contains("PATH="), "重寫後要帶上修正");
+    assert_eq!(out.lines().count(), 1, "不得重複堆疊條目");
+
+    // 已是正確的那行 → 幂等
+    let (again, changed2) = claudecat::doctor::merge_analysis_entry(&out, &line);
+    assert!(!changed2, "同一行不得反覆重寫");
+    assert_eq!(again, out);
+}
+
+/// 每日分析的發現要落在**文件**（CLAUDE.md 只留規則，最多一行指引），
+/// 且必須與長期指標表共存：整段取代只留最新一天，表格與使用者內容原樣不動。
+#[test]
+fn findings_replace_section_and_preserve_table_and_notes() {
+    let dir = temp_project();
+    let f = dir.join("CORT-AUDIT.md");
+    fs::write(
+        &f,
+        "## 長期指標 (claudecat cort-audit)\n\n| 日期 | 專案 |\n|---|---|\n| 2026-09-08 | `/x` |\n\n## 使用者筆記\n- 不要動我\n",
+    )
+    .unwrap();
+
+    let (changed, _) = claudecat::cort_audit::findings_update(&f, "- 第一天的發現").unwrap();
+    assert!(changed);
+    let after = fs::read_to_string(&f).unwrap();
+    assert!(after.contains("## 每日分析發現 (claudecat cort-audit)"));
+    assert!(after.contains("- 第一天的發現"));
+    assert!(
+        after.contains("| 2026-09-08 | `/x` |") && after.contains("- 不要動我"),
+        "表格與使用者筆記不得被吃掉：\n{after}"
+    );
+
+    // 第二天：整段取代，不疊成流水帳（歷史在 git）
+    let (changed2, _) = claudecat::cort_audit::findings_update(&f, "- 第二天的發現").unwrap();
+    assert!(changed2);
+    let after2 = fs::read_to_string(&f).unwrap();
+    assert!(after2.contains("- 第二天的發現"));
+    assert!(
+        !after2.contains("- 第一天的發現"),
+        "只留最新一天，實際：\n{after2}"
+    );
+    assert_eq!(
+        after2
+            .matches("## 每日分析發現 (claudecat cort-audit)")
+            .count(),
+        1,
+        "區塊不得長出第二份"
+    );
+    assert!(after2.contains("- 不要動我"), "使用者筆記仍在");
+
+    // 同內容再寫一次 → 無變更（不製造無意義的 git diff）
+    let (changed3, _) = claudecat::cort_audit::findings_update(&f, "- 第二天的發現").unwrap();
+    assert!(!changed3, "內容相同不得改檔");
 }

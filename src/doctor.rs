@@ -14,13 +14,46 @@ pub fn track_cron_line(manifest_dir: &str, root: &Path) -> String {
 }
 
 /// 每日分析的 cron 條目（09:29；headless agent，prompt 檔在 repo 裡可審查、可版本化）。
-/// 執行檔絕對路徑在安裝時解析（cron 的 PATH 很瘦）。
-pub fn analysis_cron_line(bin: &str, manifest_dir: &str) -> String {
+///
+/// 兩層 PATH 問題，只解決一層是不夠的：執行檔本身用安裝時解析的絕對路徑（cron 的 PATH 很瘦），
+/// 但**它 exec 的下一層仍然靠 PATH**——實測 2026-09-08 09:29 這條每天都失敗在
+/// `cc_claude: cannot exec claude: No such file or directory`：`musecode` 轉給 wrapper 去
+/// exec `claude`，而 cron 的 PATH 沒有 `~/.local/bin`（互動 shell 有，所以手動跑永遠是綠的）。
+/// 因此把執行檔所在目錄放進 PATH——這對任何「wrapper 再 exec 同目錄工具」的組合都成立。
+pub fn analysis_cron_line(bin: &str, manifest_dir: &str, extra_dirs: &[String]) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+    let mut push = |d: String| {
+        if !d.is_empty() && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    };
+    if let Some(d) = Path::new(bin).parent() {
+        push(d.display().to_string());
+    }
+    for d in extra_dirs {
+        push(d.clone());
+    }
+    let path_prefix = if dirs.is_empty() {
+        String::new()
+    } else {
+        format!("PATH=\"{}:$PATH\" ", dirs.join(":"))
+    };
     format!(
-        "29 9 * * * {bin} -p --dangerously-skip-permissions \
+        "29 9 * * * {path_prefix}{bin} -p --dangerously-skip-permissions \
          \"$(cat {manifest_dir}/cort-audit-analysis-prompt.md)\" >> \
          {manifest_dir}/cort-audit-analysis.log 2>&1"
     )
+}
+
+/// 條目 PATH 還要帶哪些目錄：harness 的 hook 會用名字 exec `node`
+/// （實測 cron 下 `SessionEnd hook ... node: not found`），而 node 常在 nvm 目錄裡。
+/// 只收「真的解析得到」的目錄——猜一個不存在的路徑只會讓條目更難讀。
+pub fn runtime_dirs() -> Vec<String> {
+    ["node"]
+        .iter()
+        .filter_map(|n| resolve_bin(n))
+        .filter_map(|p| Path::new(&p).parent().map(|d| d.display().to_string()))
+        .collect()
 }
 
 /// 判斷既有 crontab 是否已含追蹤條目（寬鬆比對：cort-audit + --track）
@@ -77,11 +110,16 @@ fn resolve_bin(name: &str) -> Option<String> {
     Path::new(&p).is_file().then_some(p)
 }
 
-/// 併入分析條目：既有條目用的若不是目前偏好的執行檔（`bin`）→ 移除重寫；
-/// 已是偏好執行檔 → 不動。回傳 (新內容, 是否有變更)。
-pub fn merge_analysis_entry(existing: &str, line: &str, bin: &str) -> (String, bool) {
+/// 併入分析條目：既有分析條目**與期望的整行不同就重寫**；完全相同才不動。
+/// 回傳 (新內容, 是否有變更)。
+///
+/// 原本只比對「執行檔字串在不在」，於是模板本身的修正永遠部署不出去：2026-09-09 加上
+/// `PATH=` 前綴修 `cannot exec claude` 時，舊條目因為仍含著同一個 musecode 路徑而被判成
+/// 「已是最新」，`--install` 會安靜地什麼都不做——一個宣稱幂等、實際是「永不升級」的比對。
+/// 整行比對同時涵蓋原本的用途（換執行檔＝換行內容）。
+pub fn merge_analysis_entry(existing: &str, line: &str) -> (String, bool) {
     let is_analysis = |l: &str| l.contains("cort-audit-analysis-prompt.md");
-    let stale = |l: &str| is_analysis(l) && !l.contains(bin);
+    let stale = |l: &str| is_analysis(l) && l.trim() != line.trim();
     let kept: Vec<&str> = existing.lines().filter(|l| !stale(l)).collect();
     let up_to_date = kept.iter().any(|l| is_analysis(l));
     if up_to_date {

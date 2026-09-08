@@ -205,9 +205,14 @@
 
 **上游同日又進 5 個 commit（`f61ecd00`→`606449c4`），兩個碰到 audit 的詞彙表：**
 
-- `ff66ee59`：`no_index` 提示改為**每 session 每目錄只發一次**，並新增 outcome
-  **`no_index_hinted`**。claudecat 的命中計數用 `hit*` 前綴，不受影響；但
-  **09-09 之後 `no_index` 列數下降是去重造成的，不是 adoption 改善**——看時間序列時別誤讀。
+- `ff66ee59`：unindexed 專案裡「每 session 每目錄的第一筆」shaped search 改記成新 outcome
+  **`no_index_hinted`**（並多送一次提示），其後仍照舊記 `no_index`。
+  **更正**：本節初稿寫成「去重造成 `no_index` 下降」是錯的——**總量不變，只是拆成兩格**，
+  而且只碰 `hook-suggest` 那條路徑。日表裡的大數字是 **`hook-refresh` 的 `no_index`**
+  （09-08 415 筆、09-04 1032 筆），與此 commit 無關；`hook-suggest` 的 `no_index`
+  本機每天不超過 15 筆。看圖時要用 (command, outcome) 兩個維度，只看 outcome 字串
+  會把 hook-refresh 的起伏算到 hook-suggest 的改動頭上。真正的領先指標是
+  `no_index_hinted`（提示實際被看到幾次），效果則應該落在 `index` 命令量與之後的 `hit`。
 - `606449c4`：上游把 adopt-mine 的 baseline 凍結成 **product-only 1 injection / 0 adoptions**
   （2026-09-01→09-08），並記下 `--exclude` 要用 transcript 目錄名
   （`-home-yanggf-a-cortexyoung`，短名匹配不到、`excluded_sessions: 0` 就是徵兆）。

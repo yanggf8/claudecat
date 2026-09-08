@@ -147,9 +147,11 @@ pub fn row_md(m: &ExploreMetrics) -> String {
     )
 }
 
-/// s 內第一個以 `#` 開頭之行的 byte offset（找不到 → None）。
+/// section 邊界：s 內第一個以 `#` 開頭之行的 byte offset（找不到 → None＝到 EOF）。
 /// 用 `split_inclusive` 逐行累加，offset 是位元組位置，對 UTF-8 安全。
-fn next_heading_offset(s: &str) -> Option<usize> {
+/// `pub(crate)` 是因為發現區塊（`cort_audit::findings_update`）要用同一套邊界規則——
+/// 第二份拷貝正是 2026-09-06 那個「從 section 掃到 EOF、吃掉使用者筆記」的 bug 的溫床。
+pub(crate) fn next_heading_offset(s: &str) -> Option<usize> {
     let mut off = 0usize;
     for line in s.split_inclusive('\n') {
         if line.starts_with('#') {
@@ -275,13 +277,19 @@ pub fn track_table(
     let new_content = format!("{prefix}{table}{suffix}");
     let changed = new_content != existing;
     if changed {
-        let tmp = path.with_extension("track.tmp");
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(new_content.as_bytes())?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)?;
+        atomic_write(path, &new_content)?;
     }
     Ok((changed, path.to_string_lossy().into_owned()))
+}
+
+/// 原子寫入（同目錄 temp + fsync + rename）。長期指標表與發現區塊共用，
+/// 兩份拷貝就會有一份忘了 fsync。
+pub(crate) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("track.tmp");
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all()?;
+    fs::rename(&tmp, path)
 }
 
 /// 把多個 explore 指標更新進文件的「長期指標」表格（走通用 track_table）

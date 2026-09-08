@@ -1,6 +1,9 @@
 # CLAUDE.md
 
 本檔案提供 Claude Code (claude.ai/code) 在本 repo 工作時的指引。
+
+- 每日 cort-audit 分析的**發現**寫在 [CORT-AUDIT.md](CORT-AUDIT.md) 的「每日分析發現」區，
+  長期指標表在同一份檔。本檔只留規則，文件放文件。
 `<!-- claudecat:auto:begin -->
 ## Project Map (auto-maintained by claudecat)
 - **Root**: `/home/yanggf/a/claudecat`

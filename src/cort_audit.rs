@@ -353,6 +353,51 @@ pub fn render(a: &CortAudit) -> String {
     s
 }
 
+/// 每日分析的發現區塊標題（與長期指標表同檔共存，各自 section）
+pub const FINDINGS_SECTION: &str = "## 每日分析發現 (claudecat cort-audit)";
+
+/// 把每日分析的發現寫進文件的發現 section（原子；section 外的內容原樣保留）。
+///
+/// 為什麼要有這個：排程分析原本只把結論印到 `cort-audit-analysis.log`，等於沒回報
+/// （2026-09-09 使用者指出）。發現屬於文件、不屬於 CLAUDE.md——CLAUDE.md 只留規則，
+/// 最多放一行指引。**整段取代、只留最新一天**：歷史在 git，文件裡疊成流水帳只會沒人看。
+pub fn findings_update(path: &Path, body: &str) -> std::io::Result<(bool, String)> {
+    let existing = if path.is_file() {
+        std::fs::read_to_string(path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let block = format!(
+        "{FINDINGS_SECTION}\n\n_{}_\n\n{}\n",
+        today_iso(),
+        body.trim()
+    );
+    // section 邊界與長期指標表同一套規則：標題到下一個 `#` 標題（或 EOF）
+    let new_content = match existing.find(FINDINGS_SECTION) {
+        Some(start) => {
+            let after_title = start + FINDINGS_SECTION.len();
+            let end = after_title
+                + crate::explore::next_heading_offset(&existing[after_title..])
+                    .unwrap_or(existing.len() - after_title);
+            format!("{}{}{}", &existing[..start], block, &existing[end..])
+        }
+        None => {
+            let mut out = existing.clone();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+            out.push_str(&block);
+            out
+        }
+    };
+    let changed = new_content != existing;
+    if changed {
+        crate::explore::atomic_write(path, &new_content)?;
+    }
+    Ok((changed, new_content))
+}
+
 /// cort-audit 長期指標列（單行）：長期趨勢（30d）+ 早期訊號（7d）+ deep 動詞
 pub fn row_md(a: &CortAudit) -> String {
     let idx = a.index.as_ref();

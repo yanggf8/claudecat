@@ -89,6 +89,14 @@ enum Commands {
         #[arg(long)]
         track: Option<PathBuf>,
     },
+    /// 把每日分析的發現寫進文件的發現區塊（原子；區塊外原樣保留）
+    Findings {
+        /// 發現內容（markdown）；用 `-` 從 stdin 讀
+        text: String,
+        /// 寫進哪個文件
+        #[arg(long, default_value = "CORT-AUDIT.md")]
+        file: PathBuf,
+    },
     /// 導航：從一句話找到目的地符號/檔案，並給出 cort 低成本路線
     Navigate {
         /// 要找什麼（例如 auth / user creation）
@@ -328,8 +336,9 @@ fn main() {
                 }
                 match doctor::analysis_bin() {
                     Ok(bin) => {
-                        let line = doctor::analysis_cron_line(&bin, manifest_dir);
-                        let (next, changed) = doctor::merge_analysis_entry(&updated, &line, &bin);
+                        let line =
+                            doctor::analysis_cron_line(&bin, manifest_dir, &doctor::runtime_dirs());
+                        let (next, changed) = doctor::merge_analysis_entry(&updated, &line);
                         updated = next;
                         let had = doctor::has_analysis_entry(&existing);
                         let runner = std::path::Path::new(&bin)
@@ -388,6 +397,38 @@ fn main() {
                         eprintln!("Failed to track cort audit into {}: {e}", f.display());
                         std::process::exit(1);
                     }
+                }
+            }
+        }
+        Commands::Findings { text, file } => {
+            let body = if text == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("讀 stdin 失敗：{e}");
+                    std::process::exit(1);
+                }
+                buf
+            } else {
+                text
+            };
+            if body.trim().is_empty() {
+                eprintln!("發現內容是空的——不寫入（空區塊比沒有更糟：看起來像跑過且沒發現）");
+                std::process::exit(1);
+            }
+            match cort_audit::findings_update(&file, &body) {
+                Ok((changed, _)) => println!(
+                    "Findings -> {}{}",
+                    file.display(),
+                    if changed {
+                        ""
+                    } else {
+                        "（內容相同，未變更）"
+                    }
+                ),
+                Err(e) => {
+                    eprintln!("寫入失敗：{e}");
+                    std::process::exit(1);
                 }
             }
         }
