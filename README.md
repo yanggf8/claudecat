@@ -84,7 +84,7 @@ claudecat **不重造索引**——直接唯讀 cort 的 SQLite
 ```bash
 claudecat cort-status --root <project>    # 索引新鮮度 / chunks / relationships
 claudecat navigate --cort "extractSymbolDefinitions"   # 優先查 cort 全量索引（tree-sitter 只掃 top-N）
-claudecat cort-audit --root <project>    # 驗證整合成效：健康 / 覆蓋缺口 / FTS / 用量；--track 寫長期指標
+claudecat cort-audit --root <project>    # 驗證整合成效：健康 / 覆蓋缺口 / FTS / 用量 / harness 切面；--track 寫長期指標
 ```
 
 - `cort-status fresh`：git HEAD 相符 + 索引 ≤7 天 + `graph_pending != 1`；STALE 時提示 `cort index`。
@@ -101,7 +101,9 @@ claudecat cort-audit --root <project>    # 驗證整合成效：健康 / 覆蓋�
   DB 不存在或未命中自動回退 tree-sitter。
 - `cort-audit`（收集數據驗證 → 據此改善）：唯讀彙整 ①索引健康（fresh/HEAD/age）
   ②覆蓋缺口（file_state 有、chunks 無的檔案＝completeness 缺口）③FTS 同步
-  ④用量（cort usage.db：命令分佈、hook-suggest/refresh 結果、errors、index_stale、saved_bytes），
+  ④用量（cort usage.db：命令分佈、hook-suggest/refresh 結果、errors、index_stale、saved_bytes）
+  ⑤**harness 切面**（`harness` 只在 hook payload 上，所以這張表講的是「router 面對誰」，
+  不是「誰用了 cort」；無 `harness` 欄的舊列另計，`harness_declared` 不符的列數也照實列出），
   並依規則給「解讀 & 行動」；`--track <file>` 把每天一列寫進長期指標表（同日更新），
   例如 `CORT-AUDIT.md`，讓「有沒有達成」變成可看的趨勢。
 

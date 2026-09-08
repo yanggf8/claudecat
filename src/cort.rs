@@ -409,6 +409,23 @@ pub struct CortAuditIndex {
     pub graph_pending: Option<bool>,
 }
 
+/// 單一 harness 的 router 切面（`harness` 只出現在 hook payload：
+/// hook-suggest / hook-refresh；`impact`/`context` 等動詞命令**沒有**這個欄位，
+/// 所以這個切面只能講「router 對誰開了口」，不能講「誰真的用了 cort」）
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct HarnessStat {
+    pub suggests: i64,
+    /// hit + hit_yielded + hit_stale（與命中率同一組口徑）
+    pub hits: i64,
+    pub no_shape: i64,
+    pub refreshes: i64,
+    /// 可行動的 decline 之最（排除 `not_a_search_tool` baseline，語意同 decline-top）
+    pub top_decline: Option<(String, i64)>,
+    /// `harness` 與 `harness_declared` 不符的列數——實測 grok 會宣告成 claude-code，
+    /// 任何信任 declared 值的歸因都會被它汙染，所以要看得見
+    pub declared_mismatch: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UsageWindow {
     pub window_days: u32,
@@ -419,6 +436,11 @@ pub struct UsageWindow {
     /// cortexyoung c290c383（2026-09-06）起的新列才帶 decline，舊列自然缺席
     pub declines: BTreeMap<String, i64>,
     pub refresh_outcomes: BTreeMap<String, i64>,
+    /// router 的 harness 切面（cortexyoung v3 payload 起才有 `harness`）
+    pub by_harness: BTreeMap<String, HarnessStat>,
+    /// 沒有 `harness` 欄的 hook 列（v3 之前的歷史列）——不計進任何 harness，
+    /// 否則各 harness 加總會悄悄對不上 hook 總數
+    pub harness_unknown: i64,
     pub errors: i64,
     pub index_stale_queries: i64,
     pub saved_bytes: i64,
@@ -625,7 +647,8 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
             }
         }
     }
-    // hook 結果分佈（args_summary 是 JSON）
+    // hook 結果分佈（args_summary 是 JSON）+ harness 切面（同一次掃描，不多開查詢）
+    let mut harness_declines: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for (cmd, target) in [
         ("hook-suggest", &mut u.suggest_outcomes),
         ("hook-refresh", &mut u.refresh_outcomes),
@@ -643,16 +666,60 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
                         .and_then(|v| v.get("hook").and_then(|h| h.as_str()).map(String::from))
                         .unwrap_or_else(|| "unparsed".to_string());
                     *target.entry(hook.clone()).or_insert(0) += 1;
-                    if cmd == "hook-suggest" {
-                        if let Some(d) = parsed
+                    let str_field = |k: &str| {
+                        parsed
                             .as_ref()
-                            .and_then(|v| v.get("decline").and_then(|d| d.as_str()))
-                        {
+                            .and_then(|v| v.get(k).and_then(|s| s.as_str()).map(String::from))
+                    };
+                    let decline = str_field("decline");
+                    let is_suggest = cmd == "hook-suggest";
+                    if is_suggest {
+                        if let Some(d) = &decline {
                             *u.declines.entry(format!("{hook}/{d}")).or_insert(0) += 1;
+                        }
+                    }
+                    // harness 切面：v3 payload 起才有；沒有這欄的歷史列另計，
+                    // 否則各 harness 加總會悄悄對不上 hook 總數
+                    match str_field("harness") {
+                        None => u.harness_unknown += 1,
+                        Some(h) => {
+                            let st = u.by_harness.entry(h.clone()).or_default();
+                            if is_suggest {
+                                st.suggests += 1;
+                                // hit / hit_yielded / hit_stale——與命中率同一組口徑
+                                if hook.starts_with("hit") {
+                                    st.hits += 1;
+                                }
+                                if hook == "no_shape" {
+                                    st.no_shape += 1;
+                                }
+                            } else {
+                                st.refreshes += 1;
+                            }
+                            if str_field("harness_declared").is_some_and(|d| d != h) {
+                                st.declared_mismatch += 1;
+                            }
+                            if is_suggest {
+                                if let Some(d) = decline
+                                    .filter(|d| d != "not_a_search_tool")
+                                    .filter(|_| hook == "no_shape")
+                                {
+                                    *harness_declines
+                                        .entry(h)
+                                        .or_default()
+                                        .entry(d)
+                                        .or_insert(0) += 1;
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+    for (h, tags) in harness_declines {
+        if let Some(st) = u.by_harness.get_mut(&h) {
+            st.top_decline = tags.into_iter().max_by_key(|(_, c)| *c);
         }
     }
     u.errors = conn

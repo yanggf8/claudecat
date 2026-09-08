@@ -141,6 +141,48 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
             ));
         }
     }
+    if !u.by_harness.is_empty() {
+        // `harness` 只在 hook payload 上（動詞命令沒有），所以這張表只能講
+        // 「router 對誰開了口」，不能講「誰真的用了 cort」——標題就說清楚。
+        s.push_str("\nharness 切面（僅 hook payload：router 面對誰；v3 payload 起）：\n");
+        s.push_str(
+            "\n| harness | hook-suggest | 命中 | 命中率 | no_shape | top decline（排除 baseline） | refresh |\n|---|---:|---:|---:|---:|---|---:|\n",
+        );
+        let mut rows: Vec<_> = u.by_harness.iter().collect();
+        rows.sort_by_key(|(_, st)| std::cmp::Reverse(st.suggests));
+        for (h, st) in rows {
+            s.push_str(&format!(
+                "| `{h}` | {} | {} | {} | {} | {} | {} |\n",
+                st.suggests,
+                st.hits,
+                if st.suggests > 0 {
+                    format!("{:.2}%", st.hits as f64 / st.suggests as f64 * 100.0)
+                } else {
+                    "-".to_string()
+                },
+                st.no_shape,
+                st.top_decline
+                    .as_ref()
+                    .map(|(t, c)| format!("{t}={c}"))
+                    .unwrap_or_else(|| "-".into()),
+                st.refreshes,
+            ));
+        }
+        if u.harness_unknown > 0 {
+            s.push_str(&format!(
+                "- 另有 {} 筆 hook 列沒有 `harness` 欄（v3 前的歷史列），不計入上表\n",
+                u.harness_unknown
+            ));
+        }
+        for (h, st) in &u.by_harness {
+            if st.declared_mismatch > 0 {
+                s.push_str(&format!(
+                    "- `{h}` 有 {} 筆 `harness_declared` 與實際不符——信任 declared 值的歸因會被汙染\n",
+                    st.declared_mismatch
+                ));
+            }
+        }
+    }
     if !u.refresh_outcomes.is_empty() {
         s.push_str("\nhook-refresh 結果：\n");
         for (k, v) in &u.refresh_outcomes {
@@ -265,6 +307,25 @@ pub fn render(a: &CortAudit) -> String {
                 hints.push(format!(
                     "hook-suggest 命中率 {suggests}/{suggest_total}（<1%）→ router 大多 no_shape，檢查 hook shape 規則"
                 ));
+            }
+            // harness 切面：有量卻 0 命中的 harness 是可指名的靶心（總命中率看不出來）
+            for (h, st) in &u.by_harness {
+                if st.suggests >= 100 && st.hits == 0 {
+                    hints.push(format!(
+                        "`{h}` {} 筆 hook-suggest、0 命中 → router 對這個 harness 從沒開過口（top decline: {}）",
+                        st.suggests,
+                        st.top_decline
+                            .as_ref()
+                            .map(|(t, c)| format!("{t}={c}"))
+                            .unwrap_or_else(|| "無".into())
+                    ));
+                }
+                if st.declared_mismatch > 0 {
+                    hints.push(format!(
+                        "`{h}` 有 {} 筆 `harness_declared` 不符 → 任何按宣告值分群的歸因都要改用實測值",
+                        st.declared_mismatch
+                    ));
+                }
             }
         }
     }

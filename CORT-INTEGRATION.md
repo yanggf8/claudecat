@@ -169,7 +169,13 @@
   （不是 pattern 本身）。這是目前唯一可能還藏著靶心的地方。
 - **沒人用過的維度**：payload 已是 v3，帶 `harness`——claude-code 1761／codex 217／kimi-code 11，
   **3 個命中全在 claude-code**；`pattern_not_symbol` 佔比 claude-code 14%、codex 11%（形狀問題看來與
-  harness 無關，命中卻不是）。claudecat 的 `cort-audit` 目前**不分 harness**，這是下一個可加的切面。
+  harness 無關，命中卻不是）。claudecat 的 `cort-audit` 已加上這個切面（每 harness：hook-suggest 數／命中／命中率／
+  no_shape／top decline／refresh），並把兩件會說謊的事做成明文：①沒有 `harness` 欄的
+  v3 前歷史列**另計**（不攤進任一 harness，否則加總悄悄對不上）②`harness_declared` 與實測
+  不符的列數要看得見（實測 grok 481 筆宣告成 claude-code——按宣告值分群的歸因會被汙染）。
+  30d 實測：claude-code 6604 筆 0.15%、codex 1435 筆 0.63%、grok 218 筆 0.92%、
+  **kimi-code 106 筆 3.77%**（差 25 倍）——總命中率 0.4% 看不出這件事。
+  切面只進報告、**不進日表**（加欄會斷掉跨日可比性）。
 
 三個 issue 的現況（同日一併複量，已回貼 issue）：#3 見上；
 **#4** 30d 17788 筆命令、`saved_bytes>0` 僅 1 筆 13 bytes（比 09-06 多量 6.3k 筆命令，結論不變，

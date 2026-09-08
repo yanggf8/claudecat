@@ -1543,3 +1543,121 @@ fn outline_says_which_key_files_have_no_local_ast() {
     let md2 = claudecat::outline::render_markdown(&claudecat_lib_scan(&rust_only));
     assert!(!md2.contains("無本地 AST"), "有 grammar 的專案不得出現這句");
 }
+
+/// harness 切面（cortexyoung v3 payload）：router 面對哪個 harness、對誰從沒開過口。
+/// 三個必須成立的語意：①沒有 `harness` 欄的歷史列另計，不得攤進任一 harness
+/// ②`not_a_search_tool` 是 baseline，不得佔走 top decline
+/// ③`harness_declared` 與實測不符要看得見（實測 grok 會宣告成 claude-code）
+#[test]
+fn cort_audit_usage_splits_by_harness() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, project_id TEXT,
+               command TEXT NOT NULL, args_summary TEXT NOT NULL,
+               status TEXT NOT NULL, error_code TEXT,
+               read_source TEXT, requested_content_mode TEXT, effective_content_mode TEXT,
+               receipt_hit INTEGER, index_stale INTEGER,
+               bytes_out INTEGER NOT NULL, saved_bytes INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        let add = |cmd: &str, args: &str| {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+                 VALUES (?1, ?2, ?3, 'ok', 0, 0, 0)",
+                rusqlite::params![now, cmd, args],
+            )
+            .unwrap();
+        };
+        add(
+            "hook-suggest",
+            r#"{"hook":"hit","harness":"claude-code","v":3}"#,
+        );
+        add(
+            "hook-suggest",
+            r#"{"hook":"no_shape","decline":"pattern_not_symbol","harness":"claude-code","v":3}"#,
+        );
+        // baseline 佔多數也不得成為 top decline
+        for _ in 0..3 {
+            add(
+                "hook-suggest",
+                r#"{"hook":"no_shape","decline":"not_a_search_tool","harness":"claude-code","v":3}"#,
+            );
+        }
+        add(
+            "hook-suggest",
+            r#"{"hook":"no_shape","decline":"unindexed_extension","harness":"codex","v":3}"#,
+        );
+        add(
+            "hook-refresh",
+            r#"{"hook":"reindexed","harness":"codex","v":3}"#,
+        );
+        // 宣告值與實測不符（grok 宣告成 claude-code）
+        add(
+            "hook-suggest",
+            r#"{"hook":"no_shape","decline":"not_a_search_tool","harness":"grok","harness_declared":"claude-code","v":3}"#,
+        );
+        // v3 之前的歷史列：沒有 harness 欄
+        add("hook-suggest", r#"{"hook":"no_shape"}"#);
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    let cc = u.by_harness.get("claude-code").expect("claude-code 應有列");
+    assert_eq!((cc.suggests, cc.hits, cc.no_shape), (5, 1, 4));
+    assert_eq!(
+        cc.top_decline,
+        Some(("pattern_not_symbol".to_string(), 1)),
+        "baseline 3 筆不得壓過可行動的 1 筆"
+    );
+    let cx = u.by_harness.get("codex").expect("codex 應有列");
+    assert_eq!(
+        (cx.suggests, cx.refreshes),
+        (1, 1),
+        "refresh 不算進 suggest"
+    );
+    let gk = u.by_harness.get("grok").expect("grok 應有列");
+    assert_eq!(gk.declared_mismatch, 1);
+    assert_eq!(cc.declared_mismatch, 0, "宣告值相符者不得誤記為不符");
+    assert_eq!(u.harness_unknown, 1, "沒有 harness 欄的歷史列必須另計");
+    assert_eq!(
+        u.by_harness.values().map(|s| s.suggests).sum::<i64>() + u.harness_unknown,
+        u.suggest_outcomes.values().sum::<i64>(),
+        "各 harness 的 suggests 加總 + unknown 必須對得上 hook-suggest 總數（refresh 走另一欄）"
+    );
+
+    // 報告與提示：切面要出現在報告裡，0 命中的 harness 要被指名
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    };
+    let report = claudecat::cort_audit::render(&a);
+    assert!(report.contains("harness 切面"), "報告應有 harness 表");
+    assert!(
+        report.contains("`harness_declared` 與實際不符"),
+        "宣告不符要在報告裡說出來"
+    );
+    drop(guard);
+}
