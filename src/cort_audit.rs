@@ -308,6 +308,20 @@ pub fn render(a: &CortAudit) -> String {
                     "hook-suggest 命中率 {suggests}/{suggest_total}（<1%）→ router 大多 no_shape，檢查 hook shape 規則"
                 ));
             }
+            // `unspecified`＝旗標與 transcript 都認不出來源（cort main.rs 的 fallback）。
+            // 本機三個接線的 harness 全都帶 `--harness`，所以 agent 流量落不進這格：
+            // 實測那些列是開發/安裝時手打的探針（2026-09-09 查證，見 CORT-INTEGRATION.md）。
+            // 分母不動（動了跨日不可比），但污染要講出來——30d 實測 40 命中裡有 9 筆是自測。
+            if let Some(st) = u.by_harness.get("unspecified") {
+                if st.hits > 0 {
+                    hints.push(format!(
+                        "命中數含 {} 筆 `unspecified`（非 agent 流量的手動探針）→ agent 實際命中 {}／{}；比率請用這組",
+                        st.hits,
+                        suggests - st.hits,
+                        suggest_total - st.suggests
+                    ));
+                }
+            }
             // harness 切面：有量卻 0 命中的 harness 是可指名的靶心（總命中率看不出來）
             for (h, st) in &u.by_harness {
                 if st.suggests >= 100 && st.hits == 0 {

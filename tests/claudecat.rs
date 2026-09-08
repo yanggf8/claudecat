@@ -1661,3 +1661,80 @@ fn cort_audit_usage_splits_by_harness() {
     );
     drop(guard);
 }
+
+/// `unspecified` 是「旗標與 transcript 都認不出來源」的 fallback——實測全是開發/安裝時
+/// 手打的探針（2026-09-09 查證），它的命中會墊高總命中率。分母不動（跨日可比），
+/// 但污染必須在報告裡講出來，且要給出扣掉之後的那組數字。
+#[test]
+fn cort_audit_names_unspecified_contamination_in_hit_rate() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-cache-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, project_id TEXT,
+               command TEXT NOT NULL, args_summary TEXT NOT NULL,
+               status TEXT NOT NULL, error_code TEXT,
+               read_source TEXT, requested_content_mode TEXT, effective_content_mode TEXT,
+               receipt_hit INTEGER, index_stale INTEGER,
+               bytes_out INTEGER NOT NULL, saved_bytes INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        let add = |args: &str| {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+                 VALUES (?1, 'hook-suggest', ?2, 'ok', 0, 0, 0)",
+                rusqlite::params![now, args],
+            )
+            .unwrap();
+        };
+        // agent 流量：400 筆 no_shape + 1 命中（命中率 <1% 才會觸發那條提示）
+        for _ in 0..400 {
+            add(
+                r#"{"hook":"no_shape","decline":"not_a_search_tool","harness":"claude-code","v":3}"#,
+            );
+        }
+        add(r#"{"hook":"hit","harness":"claude-code","v":3}"#);
+        // 手動探針：2 筆命中，會把總命中率從 1/401 墊高到 3/403
+        add(r#"{"hook":"hit","harness":"unspecified","v":3}"#);
+        add(r#"{"hook":"hit_stale","harness":"unspecified","v":3}"#);
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    assert_eq!(u.by_harness.get("unspecified").map(|s| s.hits), Some(2));
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    };
+    let report = claudecat::cort_audit::render(&a);
+    assert!(
+        report.contains("hook-suggest 命中率 3/403"),
+        "分母/分子不得偷偷改動（跨日可比），實際輸出：\n{report}"
+    );
+    assert!(
+        report.contains("命中數含 2 筆 `unspecified`") && report.contains("agent 實際命中 1／401"),
+        "污染與扣除後的數字都要講出來，實際輸出：\n{report}"
+    );
+    drop(guard);
+}

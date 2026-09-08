@@ -181,3 +181,38 @@
 **#4** 30d 17788 筆命令、`saved_bytes>0` 僅 1 筆 13 bytes（比 09-06 多量 6.3k 筆命令，結論不變，
 不是短窗抽樣）；**#2** 上游 `rust/src` 未見對應變動（`coverage.rs` 的 `unindexed`/`scan_skipped`
 是 recall 側另一張螢幕），claudecat 端仍是同樣 5 檔 `legacy/test-*.js`，5/5 是無宣告的 driver script。
+
+## `unspecified` 是誰、以及上游同日進版（2026-09-09，對照 cort `606449c4`）
+
+**查清 `unspecified`**（harness 切面上線當天就抓到的異常列：19 筆 hook-suggest、47% 命中）：
+
+- 語意：cort 解析 harness 的順序是 **transcript_path（實測）> `--harness` 旗標（宣告）**，
+  兩者都認不出來時 fallback 成 `unspecified`（`main.rs:846`/`1000`；`usage.rs:423-438` 把
+  「v2 沒帶旗標」與「v1 沒這欄」視為同一種主張：沒人記錄它從哪來）。本機三個接線的 harness
+  **全都帶 `--harness`**（`~/.claude/settings.json`／`~/.codex/config.toml`／
+  `~/.kimi-code/config.toml`），所以 **agent 流量落不進這一格**。
+- 實測 35 筆分兩叢，都是人工：①09-03→09-05 的探針節奏（`00:00:05` 與 `00:31:55` 各 6 筆、
+  每叢 3 `hit`+3 `no_evidence`，suggest 的 `project_id` 全為 NULL；同叢 hook-refresh 打在
+  project `e27912b0`＝cortexyoung 自己，時間正好是它提交 hook-refresh 修正的 09-05
+  10:52/10:55/10:58）②09-09 02:08–02:10，與 `hook-install`/`internal-shim`/`status` 同秒交錯
+  ——手動做安裝/升級驗證時打的。
+- **影響**：30d 全域 hook-suggest 8976 筆、命中 40 筆，其中 **9 筆是 `unspecified`（22%）**——
+  agent 實際命中只有 31 筆。處置：**分母不動**（動了跨日不可比），改在提示裡指名污染並
+  給出扣掉後的那組（`cort_audit.rs`，附回歸測試）。
+- 附帶解掉 `grok`／`declared=claude-code` 481 筆之謎：`~/.grok/hooks/` 是空的，grok 跑的是
+  `~/.claude/settings.json` 那條（旗標寫 claude-code），cort 用 transcript 正確認回 grok
+  ——**這是 cort 優先序規則在正常運作的證據，不是 bug**。
+
+**上游同日又進 5 個 commit（`f61ecd00`→`606449c4`），兩個碰到 audit 的詞彙表：**
+
+- `ff66ee59`：`no_index` 提示改為**每 session 每目錄只發一次**，並新增 outcome
+  **`no_index_hinted`**。claudecat 的命中計數用 `hit*` 前綴，不受影響；但
+  **09-09 之後 `no_index` 列數下降是去重造成的，不是 adoption 改善**——看時間序列時別誤讀。
+- `606449c4`：上游把 adopt-mine 的 baseline 凍結成 **product-only 1 injection / 0 adoptions**
+  （2026-09-01→09-08），並記下 `--exclude` 要用 transcript 目錄名
+  （`-home-yanggf-a-cortexyoung`，短名匹配不到、`excluded_sessions: 0` 就是徵兆）。
+  **與本節同一類問題**：自測污染指標——他們排除的是產品樹的 session，claudecat 排除不了
+  （usage.db 沒有 session 維度），所以走「指名污染、不動分母」這條。
+- `09b2be8e`（unknown 命令記下被拒的內容）、`6568965d`（upgrade 的 binary component）、
+  `ce6c53d6`（hook 文案改為動詞開頭）對 claudecat 無影響：前者只改 `unknown` 列的
+  `args_summary`（claudecat 只解析 hook 列），後兩者不碰 usage.db 或索引 schema。
