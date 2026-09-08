@@ -147,3 +147,31 @@
   只灌 `total_commands`，**不進** hook-suggest 命中率分母（那是
   `max(by_command["hook-suggest"], Σoutcomes)`），`core`/`deep` 時間序列照舊可比 →
   日表分母**不動**（改了 09-06～09-08 的列就不可比，本檔已經有過一次不可比）。
+
+## cortexyoung#3 複量（2026-09-09）：83% no_shape 不是一根槓桿
+
+09-06 把 `no_shape` 5857（83%）記成「最大槓桿」。歸因上線後重量，**這個結論翻轉**——
+資料源同前（唯讀 `~/.cache/cortex-ng/usage.db`，機器 `NUC11i5`，對照 cort `f61ecd00`）：
+
+- **歸因這一半上游已做完**：`c290c383` 之後，2026-09-07 00:00Z 起的 `no_shape`
+  **100% 帶 decline tag**（09-07 1130、09-08 839，untagged 0）；6447 筆沒 tag 的全部早於 09-07，
+  是歷史列不是缺口。**這也是 claudecat 日表 `decline-top` 欄能開始有值的原因。**
+- **全量標記窗口（09-07→09-09，hook-suggest 1989 筆／`no_shape` 1975）的拆解**：
+  `not_a_search_tool` 1650（84%）、`pattern_not_symbol` 277（14%）——兩者都是設計要的沉默
+  （`hook.rs` 的 `judge()` 只在「project source 裡的單一 bare symbol」開火）；
+  其餘 `concrete_file_read` 21 / `unindexed_extension` 14 / `non_source_target` 10 /
+  `target_not_source` 3 —— **可調表面 48 筆（2.4%）**，不是 83%。
+- **命中率沒動**：該窗口 3 命中；30d 39/9849＝0.40%。歸因給出的答案是
+  「流量本來就不是 symbol 形狀」，不是「規則太嚴」。
+- **誠實限制**：`args_summary` 只記 decline tag、**不記 pattern**，所以能證明「哪條規則擋的」，
+  不能證明那 277 筆 `pattern_not_symbol` 每筆都真的不是 symbol 查詢
+  （`\bfoo\b`、引號、單項 alternation 都會落進同一格）。要回答得記 pattern 的**形狀類別**
+  （不是 pattern 本身）。這是目前唯一可能還藏著靶心的地方。
+- **沒人用過的維度**：payload 已是 v3，帶 `harness`——claude-code 1761／codex 217／kimi-code 11，
+  **3 個命中全在 claude-code**；`pattern_not_symbol` 佔比 claude-code 14%、codex 11%（形狀問題看來與
+  harness 無關，命中卻不是）。claudecat 的 `cort-audit` 目前**不分 harness**，這是下一個可加的切面。
+
+三個 issue 的現況（同日一併複量，已回貼 issue）：#3 見上；
+**#4** 30d 17788 筆命令、`saved_bytes>0` 僅 1 筆 13 bytes（比 09-06 多量 6.3k 筆命令，結論不變，
+不是短窗抽樣）；**#2** 上游 `rust/src` 未見對應變動（`coverage.rs` 的 `unindexed`/`scan_skipped`
+是 recall 側另一張螢幕），claudecat 端仍是同樣 5 檔 `legacy/test-*.js`，5/5 是無宣告的 driver script。
