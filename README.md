@@ -77,8 +77,9 @@ claudecat navigate "auth" --json   # 機器可讀
 ### 結合 cortexyoung：直接吃 cort 的索引（2026-09-05）
 
 claudecat **不重造索引**——直接唯讀 cort 的 SQLite
-（`~/.cache/cortex-ng/<sha256>.db`，schema v4 相容）：`chunks`（全 project 符號）、
-`relationships`（calls/imports 邊）、`projects`（git_head / 索引時間）。
+（`~/.cache/cortex-ng/<sha256>.db`，schema v5 相容）：`chunks`（全 project 符號）、
+`relationships`（calls/references/imports 邊）、`projects`（git_head / 索引時間）、
+`_cortex_meta`（schema 版本 / `graph_pending`）。
 
 ```bash
 claudecat cort-status --root <project>    # 索引新鮮度 / chunks / relationships
@@ -86,7 +87,10 @@ claudecat navigate --cort "extractSymbolDefinitions"   # 優先查 cort 全量�
 claudecat cort-audit --root <project>    # 驗證整合成效：健康 / 覆蓋缺口 / FTS / 用量；--track 寫長期指標
 ```
 
-- `cort-status fresh`：git HEAD 相符 + 索引 ≤7 天；STALE 時提示 `cort index`。
+- `cort-status fresh`：git HEAD 相符 + 索引 ≤7 天 + `graph_pending != 1`；STALE 時提示 `cort index`。
+  `graph_pending=1`（schema 遷移後未重建、或增量中斷）代表 relationships 是舊邊——
+  **反向依賴先別信**，且此時 HEAD/時戳可能仍是新的，所以另行提示、不與 STALE 混講；
+  讀不到 `_cortex_meta`（舊版 DB）→ 顯示 `?`，不視為健康、也不據此判 STALE。
 - `navigate --cort`：命中 cort `chunks`（**比 tree-sitter top-N 更完整**——實測 legacy 檔的
   `extractSymbolDefinitions`：tree-sitter 0 命中、cort 全量索引 1 命中）。
   symbol_name 未命中時自動 fallback 到 **`chunks_fts` 全文**（content/file 命中；

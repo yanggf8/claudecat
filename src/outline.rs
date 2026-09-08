@@ -93,6 +93,20 @@ fn render_full(map: &ProjectMap) -> String {
                 syms
             ));
         }
+        // 沒有本地 grammar 的語言（cort 端有：Java 等）——空符號不是「沒結構」，要說清楚
+        let no_ast: std::collections::BTreeSet<&str> = map
+            .key_files
+            .iter()
+            .filter(|f| f.symbols.is_empty())
+            .filter_map(|f| f.language.as_deref())
+            .filter(|l| !crate::symbols::has_grammar(l))
+            .collect();
+        if !no_ast.is_empty() {
+            s.push_str(&format!(
+                "\n> {} 檔無本地 AST（claudecat 未內建該 grammar）——符號走 `claudecat navigate --cort` 或 `cort struct`。\n",
+                no_ast.into_iter().collect::<Vec<_>>().join(" / ")
+            ));
+        }
     }
 
     if !map.deps.is_empty() {

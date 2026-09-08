@@ -279,7 +279,26 @@ fn main() {
                 if let Some(t) = info.last_indexed_at {
                     println!("  last indexed: {}", t);
                 }
-                if !info.fresh {
+                // schema / 圖狀態與 HEAD+age 分開講：三種「不健康」混成一句就沒人知道要做什麼
+                println!(
+                    "  schema: {} graph_pending: {}",
+                    info.schema_version.as_deref().unwrap_or("?"),
+                    match info.graph_pending {
+                        Some(true) => "1",
+                        Some(false) => "0",
+                        None => "?",
+                    }
+                );
+                match info.graph_pending {
+                    Some(true) => eprintln!(
+                        "  hint: 圖是升級/中斷前的舊邊（graph_pending=1）——反向依賴不可信，執行 `cort index` 全量重建"
+                    ),
+                    None => eprintln!(
+                        "  hint: `_cortex_meta` 無法判讀——不保證圖已重建（不視為健康，也不據此判 STALE）"
+                    ),
+                    Some(false) => {}
+                }
+                if !info.fresh && info.graph_pending != Some(true) {
                     eprintln!("  hint: 執行 `cort index` 更新索引");
                 }
             }

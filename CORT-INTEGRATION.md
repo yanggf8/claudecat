@@ -7,13 +7,14 @@
 **能。** claudecat 直接唯讀 cort 的 SQLite 索引（不重造、不改寫），
 用 cort 做「精準定位層」、claudecat 做「地圖與路線層」。
 
-## cort 提供什麼（schema v4）
+## cort 提供什麼（schema v5）
 | 表 | 內容 | claudecat 用途 |
 |---|---|---|
 | `projects` | project_id / name / path / git_head / last_indexed_at / extractor_version | `cort-status` 新鮮度 |
 | `chunks` | file_path / symbol_name / chunk_type / start_line / end_line / content / language | `navigate --cort` 全量符號查詢 |
-| `relationships` | source→target 邊（imports/exports/calls）+ call_site_line + confidence | 反向依賴路線 |
+| `relationships` | source→target 邊（imports/exports/calls/**references**）+ call_site_line + call_form + confidence | 反向依賴路線（`dependents()` 不過濾 rel_type，references 邊自動吃得到） |
 | `chunks_fts` | FTS5 external-content（content/symbol/file，tokenize unicode61） | `navigate --cort` 全文 fallback（symbol 未命中時） |
+| `_cortex_meta` | key/value：`SCHEMA_VERSION` / `graph_pending` / `extractor_version` | `cort-status` / `cort-audit` 的圖重建狀態（見 2026-09-09 一節） |
 
 - DB 路徑：`$CORT_CACHE_DIR/<sha256>.db`，`project_id = sha256(real_path)`（0.40 rusqlite 唯讀開啟）
 - cort 的 `last_indexed_at` 是 **epoch 毫秒**（13 位數）；freshness 以毫秒比對
@@ -59,8 +60,9 @@
   `cort context` 給全量 content + call graph（icalls/ocalls/unresolved）——到達後的深挖層
 
 ## 再確認（2026-09-06，cortexyoung 又改版）
-- 新版索引仍為 v4 schema（`projects/chunks/relationships/chunks_fts` 欄位對 claudecat 零影響），
+- 當時的索引仍為 v4 schema（`projects/chunks/relationships/chunks_fts` 欄位對 claudecat 零影響），
   `extractor_version` 同前一版；新增 `usage.db`（command_log）與 claudecat 無關
+  （**後續**：cort 已於 2026-09-04 `ab1da4f4` 進到 v5，見 2026-09-09 一節）
 - `chunks_fts` 確認為 **external-content FTS5**（`content=chunks, content_rowid=rowid`），
   唯讀 MATCH + JOIN chunks 實測可用 → 實作 FTS fallback（見下）
 
@@ -113,3 +115,35 @@
   路線優先指向精確符號（`with_readonly` 優先於 `render_with_profile`）
 - STALE 提示 `cort index --incremental` — ✅ 已隨新版 cort 解決（`cort status` 提供
   `index_is_stale`；`hook-refresh` 編輯後自動增量，不需 claudecat 再提示）
+
+## 跟上 cortexyoung（2026-09-09；對照 cort `f61ecd00`）
+
+上游自 2026-09-04 起的四項改動，逐條實測後只有一項要動程式：
+
+- **schema v5**（`ab1da4f4`）：只是加寬 `relationships`/`raw_edges` 的 CHECK（新增
+  `references` 邊、Rust type 存成 `chunk:class`），claudecat 讀的欄位全在，
+  `cort-status` 實跑正常。文件與 `src/cort.rs` 的「v4」字樣一併更新。
+- **`graph_pending`（要動程式，P1）**：cort 的 schema 遷移在 `db.rs:322` 設
+  `graph_pending=1` 卻**不動** `git_head`/`last_indexed_at`；而增量索引雖然每個檔案都會先設 1，
+  卻是在 `incremental.rs` **與時戳更新同一個 transaction** 裡清 0。
+  所以外部讀到持續 `1` 只有兩種情況：①遷移後還沒跑過索引（時戳仍新 → claudecat 舊行為會
+  **誤報 fresh**，而 relationships 是升級前的舊邊）②增量中斷（時戳沒前進，本來就 STALE）。
+  修法（與 09-06 的毫秒事件同一原則：不假裝健康、也不假裝壞掉）：
+  `index_info` / `audit_index` 同一口徑讀 `_cortex_meta`，
+  `fresh = HEAD+age && graph_pending != Some(true)`；讀不到（舊版 DB／查詢失敗）→ `None`，
+  **不翻布林**，另給一條「無法判讀」提示。日表不加欄，改讓既有 `fresh` 格分成
+  `fresh` / `fresh?`（圖狀態未知）/ `STALE` / `STALE/graph`。三支回歸測試。
+  claudecat **不硬編碼**期望的 SCHEMA_VERSION——那是 cort 自己的常數，寫死必然像文件一樣爛掉。
+- **Java / AngularJS 1.x / HTML 索引**（`7227fd96`）：cort 端能力，claudecat 唯讀照吃
+  （`navigate --cort` 對 Java 專案反而更有價值）。claudecat 自己的 tree-sitter 不跟進加
+  `tree-sitter-java`：那是跟索引搶同一份工作。實際做的兩件小事：①`walk.rs` 第三欄語意
+  正名為 `is_code`（只進 LOC/樹/key_files，不代表本地有 grammar；把 java 改成 false 會讓
+  Java 專案整個從地圖消失，比「檔案在、符號空」更騙）②outline 對沒有本地 grammar 的
+  key file 補一句「無本地 AST → 走 `navigate --cort`」（`symbols::has_grammar`，附測試；
+  純 Rust 專案不出現這句）。`html/htm` 不進 `CODE_EXT`：只會灌 total_files/languages，
+  進不了 key_files，也拿不到符號。
+- **安裝／更新路徑改版**（`26fd3155`…`f61ecd00`，新 `cort-upgrade` 為正式更新路徑）：
+  對 claudecat 零影響。`usage.db` 因此多了 `internal-shim` / `internal-ast-grep`，
+  只灌 `total_commands`，**不進** hook-suggest 命中率分母（那是
+  `max(by_command["hook-suggest"], Σoutcomes)`），`core`/`deep` 時間序列照舊可比 →
+  日表分母**不動**（改了 09-06～09-08 的列就不可比，本檔已經有過一次不可比）。

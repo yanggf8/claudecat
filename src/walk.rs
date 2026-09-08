@@ -5,7 +5,12 @@ use ignore::WalkBuilder;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// (副檔名, 語言名, 是否為「可解析程式碼」)
+/// (副檔名, 語言名, is_code)
+///
+/// 第三欄只決定「算不算 code」（進 LOC / 目錄樹 / key files），**不代表本地有 grammar**：
+/// java/ruby/php/csharp/swift/kotlin/shell 都是 true，但 `symbols::lang_for` 沒有它們。
+/// 這兩件事本來就該分開——把 java 改成 false 會讓 Java 專案整個從地圖消失，
+/// 比「檔案在、符號空」更騙人；空符號改由 outline 明說（見 `symbols::has_grammar`）。
 pub const CODE_EXT: &[(&str, &str, bool)] = &[
     ("js", "javascript", true),
     ("jsx", "javascript", true),

@@ -1,5 +1,5 @@
 //! cortexyoung/cort 索引整合：唯讀存取 cort 的 SQLite（~/.cache/cortex-ng/<sha256>.db）
-//! 相容 cort schema v4（chunks / projects / relationships）。
+//! 相容 cort schema v5（chunks / projects / relationships / _cortex_meta）。
 //! 不做任何寫入；DB 不存在或 schema 不符時回退到 None。
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
@@ -42,6 +42,13 @@ pub struct CortIndexInfo {
     pub extractor_version: String,
     pub chunk_count: i64,
     pub relationships_count: i64,
+    /// cort 的 `_cortex_meta.SCHEMA_VERSION`（純呈現；claudecat 是消費者，
+    /// 不硬編碼「期望版本」——那個常數只有 cort 自己知道，寫死必然像文件一樣爛掉）
+    pub schema_version: Option<String>,
+    /// derived graph 是否落後 chunks（None = 無法判讀，見 [`read_meta`]）
+    pub graph_pending: Option<bool>,
+    /// HEAD 相符 + 索引 ≤7 天 **且** 圖不是已知落後（`graph_pending != Some(true)`）。
+    /// `None`（讀不到 `_cortex_meta`）不翻布林——沒讀到不等於壞掉。
     pub fresh: bool,
 }
 
@@ -78,6 +85,34 @@ pub fn sqlite_uri(path: &Path) -> String {
     }
     out.push_str("?immutable=1");
     out
+}
+
+/// cort 的 `_cortex_meta`（key/value）：升級與圖重建狀態的唯一權威。
+/// 回傳 `(schema_version, graph_pending)`，兩者的 `None` 一律是「無法判讀」。
+///
+/// `graph_pending` 是 cort 的 derived-graph 旗標（cort `db.rs` 判準為 `== Some("1")`，
+/// 在 `rebuild_reasons_of` 轉成 `graph_incomplete`）：
+/// - 每次 per-file 增量都會先設 1，但**與 `git_head`/`last_indexed_at` 在同一個
+///   transaction 裡清 0**（cort `incremental.rs`），所以外部讀到持續為 1 只有兩種情況：
+///   ①schema 遷移後還沒跑過任何索引（此時時戳與 HEAD 仍是「新的」——這正是會被誤報
+///   fresh 的洞）②增量跑到一半死掉（此時時戳沒前進，本來就會 STALE）。
+/// - 表讀得到但沒這個鍵 → `Some(false)`（對齊 cort 的判準；「沒這個鍵」是讀到的事實）
+/// - 表不存在／查詢失敗 → `None`；**絕不寫成 `Some(false)` 假裝圖是新的**
+fn read_meta(conn: &Connection) -> (Option<String>, Option<bool>) {
+    // 外層 Option：Err（表不存在／查詢失敗）→ None＝無法判讀
+    // 內層 Option：Ok(None)＝表在、鍵不存在
+    let get = |key: &str| -> Option<Option<String>> {
+        conn.query_row(
+            "SELECT value FROM _cortex_meta WHERE key = ?1",
+            [key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+    };
+    let schema_version = get("SCHEMA_VERSION").flatten();
+    let graph_pending = get("graph_pending").map(|v| v.as_deref() == Some("1"));
+    (schema_version, graph_pending)
 }
 
 /// cort 的 DB 檔案是否存在（區分「尚未索引」與「存在但讀取失敗」）
@@ -137,6 +172,9 @@ pub fn index_info(root: &Path) -> Option<CortIndexInfo> {
         .optional()
     })??;
 
+    let (schema_version, graph_pending) =
+        with_readonly(real_str, |conn| Ok(read_meta(conn))).unwrap_or((None, None));
+
     let (chunk_count, relationships_count) = with_readonly(real_str, |conn| {
         let chunks: i64 = conn.query_row(
             "SELECT COUNT(*) FROM chunks WHERE project_id = ?1",
@@ -153,8 +191,8 @@ pub fn index_info(root: &Path) -> Option<CortIndexInfo> {
     })
     .unwrap_or((0, 0));
 
-    // 新鮮度：git head 相符 + 索引在 7 天內
-    let fresh = freshness(real_str, row.2.as_deref(), row.3);
+    // 新鮮度：git head 相符 + 索引在 7 天內 + 圖不是已知落後
+    let fresh = freshness(real_str, row.2.as_deref(), row.3) && graph_pending != Some(true);
     Some(CortIndexInfo {
         project_id: pid,
         name: row.0,
@@ -164,6 +202,8 @@ pub fn index_info(root: &Path) -> Option<CortIndexInfo> {
         extractor_version: row.4,
         chunk_count,
         relationships_count,
+        schema_version,
+        graph_pending,
         fresh,
     })
 }
@@ -362,6 +402,11 @@ pub struct CortAuditIndex {
     /// FTS 與 chunks 的 rowid 雙向差異數（None = 無法判讀）。
     /// 0 才是同步——「數量相等」會在一多一少時偽稱 synced。
     pub fts_drift: Option<i64>,
+    /// cort 的 `_cortex_meta.SCHEMA_VERSION`（純呈現，見 [`CortIndexInfo::schema_version`]）
+    pub schema_version: Option<String>,
+    /// derived graph 是否落後 chunks（None = 無法判讀，見 [`read_meta`]）——
+    /// 與 `index_info` 同一口徑，兩邊的 `fresh` 不得分岔
+    pub graph_pending: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -519,7 +564,8 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             _ => true, // 非 git repo 時不追究
         };
         let age_days = last_indexed_at.map(|t| (now_ms() - t).max(0) / (24 * 3600 * 1000));
-        let fresh = is_fresh(git_head_matches, last_indexed_at);
+        let (schema_version, graph_pending) = read_meta(conn);
+        let fresh = is_fresh(git_head_matches, last_indexed_at) && graph_pending != Some(true);
 
         Ok(Some(CortAuditIndex {
             name,
@@ -536,6 +582,8 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             files_with_unparsed_chunks,
             fts_docs,
             fts_drift,
+            schema_version,
+            graph_pending,
         }))
     })?
 }

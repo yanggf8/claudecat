@@ -16,6 +16,13 @@ fn lang_for(lang: &str) -> Option<Language> {
     Some(l)
 }
 
+/// 本地是否有該語言的 tree-sitter grammar。沒有的語言（java/ruby/php/kotlin…）
+/// 檔案照樣進 LOC/樹/key files，只是**沒有符號**——地圖必須說出這件事，
+/// 否則「檔案在、符號空」看起來像「這檔沒結構」。有符號的那條路是 `navigate --cort`。
+pub fn has_grammar(lang: &str) -> bool {
+    lang_for(lang).is_some()
+}
+
 fn interesting_kinds(lang: &str) -> &'static [&'static str] {
     match lang {
         "javascript" => &[

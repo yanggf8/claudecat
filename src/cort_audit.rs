@@ -39,6 +39,15 @@ fn render_index(i: &CortAuditIndex, s: &mut String) {
         i.chunk_count, i.relationships_count, i.name, i.path
     ));
     s.push_str(&format!(
+        "- schema={} graph_pending={}\n",
+        i.schema_version.as_deref().unwrap_or("?"),
+        match i.graph_pending {
+            Some(true) => "1（圖落後 chunks）",
+            Some(false) => "0",
+            None => "?（無法判讀）",
+        }
+    ));
+    s.push_str(&format!(
         "- file_state={} files，chunked={} files，FTS docs={}（{}）\n",
         opt_i64(&i.file_state_files),
         opt_i64(&i.chunked_files),
@@ -185,7 +194,19 @@ pub fn render(a: &CortAudit) -> String {
     s.push_str("\n## 解讀 & 行動（規則式）\n");
     let mut hints: Vec<String> = Vec::new();
     if let Some(i) = &a.index {
-        if !i.fresh {
+        // 圖落後與 HEAD/age 落後是兩件事，行動也不同——不混成同一句
+        match i.graph_pending {
+            Some(true) => hints.push(
+                "graph_pending=1：relationships 是升級或中斷前的舊邊 → 反向依賴（`cort impact` / `navigate --cort` 路線）先別信，執行 `cort index` 全量重建"
+                    .to_string(),
+            ),
+            None => hints.push(
+                "`_cortex_meta` 無法判讀（表不存在或查詢失敗）→ 不視為圖已重建；舊版 cort DB 才會沒有這張表"
+                    .to_string(),
+            ),
+            Some(false) => {}
+        }
+        if !i.fresh && i.graph_pending != Some(true) {
             hints
                 .push("索引 STALE → 執行 `cort index`（或檢查 hook-refresh 是否在跑）".to_string());
         }
@@ -260,8 +281,15 @@ pub fn render(a: &CortAudit) -> String {
 /// cort-audit 長期指標列（單行）：長期趨勢（30d）+ 早期訊號（7d）+ deep 動詞
 pub fn row_md(a: &CortAudit) -> String {
     let idx = a.index.as_ref();
+    // 不加欄（09-06 那列少一格 host 已經證明加欄的代價），改讓既有 fresh 格說得更準：
+    // 圖落後寫 STALE/graph（跟 HEAD/age 的 STALE 分得開），讀不到 meta 寫 fresh?
     let fresh = idx
-        .map(|i| if i.fresh { "fresh" } else { "STALE" })
+        .map(|i| match (i.fresh, i.graph_pending) {
+            (_, Some(true)) => "STALE/graph",
+            (false, _) => "STALE",
+            (true, None) => "fresh?",
+            (true, Some(false)) => "fresh",
+        })
         .unwrap_or("no-index");
     let chunks = idx
         .map(|i| i.chunk_count.to_string())

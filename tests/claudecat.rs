@@ -1357,3 +1357,189 @@ fn cort_audit_usage_tracks_decline_distribution() {
     );
     drop(guard);
 }
+
+/// `_cortex_meta` 三態 fixture：建一個「時戳全新、HEAD 不追究」的 cort 風格 DB，
+/// `meta` 決定 `_cortex_meta` 的內容：None＝整張表不存在（舊版 cort DB）。
+fn cort_meta_fixture(meta: Option<&[(&str, &str)]>) -> (std::path::PathBuf, std::path::PathBuf) {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-meta-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let conn = rusqlite::Connection::open(cache.join(format!("{pid}.db"))).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE projects (
+           project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+           git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+         );
+         CREATE TABLE chunks (
+           chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL,
+           symbol_name TEXT, chunk_type TEXT, start_line INTEGER NOT NULL,
+           end_line INTEGER NOT NULL, content TEXT NOT NULL, language TEXT,
+           chunk_source TEXT DEFAULT 'ast'
+         );
+         CREATE TABLE file_state (
+           project_id TEXT NOT NULL, file_path TEXT NOT NULL, file_content_hash TEXT NOT NULL
+         );
+         CREATE TABLE relationships (
+           source_chunk_id TEXT NOT NULL, target_chunk_id TEXT NOT NULL,
+           rel_type TEXT NOT NULL, call_site_line INTEGER, confidence_score REAL NOT NULL
+         );
+         INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, {now_ms}, 'test');
+         INSERT INTO chunks VALUES ('c1', '{pid}', 'src/lib.rs', 'alpha', 'function', 1, 3, 'pub fn alpha()', 'Rust', 'ast');
+         INSERT INTO file_state VALUES ('{pid}', 'src/lib.rs', 'h1');"
+    ))
+    .unwrap();
+    if let Some(rows) = meta {
+        conn.execute_batch(
+            "CREATE TABLE _cortex_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (k, v) in rows {
+            conn.execute("INSERT INTO _cortex_meta VALUES (?1, ?2)", [k, v])
+                .unwrap();
+        }
+    }
+    drop(conn);
+    (proj, cache)
+}
+
+fn audit_row(a: claudecat::cort::CortAuditIndex) -> String {
+    claudecat::cort_audit::row_md(&claudecat::cort::CortAudit {
+        root: a.path.clone(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: Some(a),
+        db_exists: true,
+        usage: None,
+        usage_7d: None,
+    })
+}
+
+/// P1 回歸：cort 的 schema 遷移會設 `graph_pending=1` 而**不動** `last_indexed_at`/`git_head`
+/// （cort `db.rs:322` vs `incremental.rs` 的同一 transaction 清 0），
+/// 所以「時戳很新但圖是舊的」是真實狀態——claudecat 不得報 fresh。
+#[test]
+fn cort_graph_pending_is_not_fresh_in_both_readers() {
+    let (proj, cache) = cort_meta_fixture(Some(&[("SCHEMA_VERSION", "5"), ("graph_pending", "1")]));
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let info = claudecat::cort::index_info(&proj).expect("index_info 應有結果");
+    assert_eq!(info.graph_pending, Some(true));
+    assert_eq!(info.schema_version.as_deref(), Some("5"));
+    assert!(!info.fresh, "圖已知落後時不得報 fresh（時戳再新也一樣）");
+
+    let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    assert_eq!(a.graph_pending, Some(true));
+    assert_eq!(
+        a.fresh, info.fresh,
+        "cort-status 與 cort-audit 必須同一口徑（09-06 毫秒事件的教訓）"
+    );
+    assert!(
+        audit_row(a).contains("STALE/graph"),
+        "日表要分得出「圖落後」與 HEAD/age 落後，且不加欄"
+    );
+    drop(guard);
+}
+
+/// `graph_pending=0`（每次增量在同一 transaction 清 0）→ 行為與過去完全一致。
+#[test]
+fn cort_graph_pending_zero_keeps_fresh() {
+    let (proj, cache) = cort_meta_fixture(Some(&[("SCHEMA_VERSION", "5"), ("graph_pending", "0")]));
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let info = claudecat::cort::index_info(&proj).expect("index_info 應有結果");
+    assert_eq!(info.graph_pending, Some(false));
+    assert!(info.fresh, "圖已重建 + 時戳新 → 仍是 fresh");
+    let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    assert_eq!(a.fresh, info.fresh);
+    let row = audit_row(a);
+    assert!(row.contains("| fresh |"), "日表值不變（跨日可比）");
+    drop(guard);
+}
+
+/// 舊版 cort DB 沒有 `_cortex_meta`：讀不到 ≠ 壞掉，也 ≠ 健康。
+/// 兩欄 None、`fresh` 仍只由 HEAD+age 決定（絕不因為讀不到就打成 STALE——
+/// 那正是 cort 自己修掉的「沒讀到卻報 drifted」）。
+#[test]
+fn cort_missing_meta_table_is_unknown_not_unhealthy() {
+    let (proj, cache) = cort_meta_fixture(None);
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let info = claudecat::cort::index_info(&proj).expect("index_info 應有結果");
+    assert_eq!(
+        info.graph_pending, None,
+        "讀不到就是無法判讀，不得 Some(false)"
+    );
+    assert_eq!(info.schema_version, None);
+    assert!(info.fresh, "無法判讀不翻布林：HEAD+age 說 fresh 就是 fresh");
+    let a = claudecat::cort::audit_index(&proj).expect("audit_index 應有結果");
+    assert_eq!(a.graph_pending, None);
+    assert_eq!(a.fresh, info.fresh);
+    assert!(
+        audit_row(a).contains("fresh?"),
+        "日表要看得出「fresh 但圖狀態未知」"
+    );
+    drop(guard);
+}
+
+/// cort 端已有 Java 圖，claudecat 端沒有 grammar：地圖不得讓「空符號」看起來像「沒結構」。
+/// 純 Rust 專案不得出現這句（不製造噪音）。
+#[test]
+fn outline_says_which_key_files_have_no_local_ast() {
+    let dir = temp_project();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let mut java = String::from("package demo;\n\npublic class OrderService {\n");
+    for i in 0..60 {
+        java.push_str(&format!("  void run{i}() {{ }}\n"));
+    }
+    java.push_str("}\n");
+    fs::write(dir.join("src/OrderService.java"), &java).unwrap();
+    let map = claudecat_lib_scan(&dir);
+    let md = claudecat::outline::render_markdown(&map);
+    assert!(
+        md.contains("`src/OrderService.java`"),
+        "java 檔仍要進 key files（改成非 code 會讓 Java 專案整個消失）"
+    );
+    assert!(
+        md.contains("java 檔無本地 AST") && md.contains("navigate --cort"),
+        "空符號要明說原因與替代路徑，實際輸出：\n{md}"
+    );
+
+    let rust_only = temp_project();
+    fs::create_dir_all(rust_only.join("src")).unwrap();
+    fs::write(
+        rust_only.join("src/main.rs"),
+        "fn main() {}\npub fn alpha() {}\n",
+    )
+    .unwrap();
+    let md2 = claudecat::outline::render_markdown(&claudecat_lib_scan(&rust_only));
+    assert!(!md2.contains("無本地 AST"), "有 grammar 的專案不得出現這句");
+}
