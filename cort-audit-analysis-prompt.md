@@ -32,6 +32,15 @@
 5. 數據品質優先（使用者的政策：初期 bug 先修）：CORT-AUDIT.md 出現「無法判讀」/`?`、
    FTS drift>0、fresh 翻 STALE、decline 欄整批消失（hooks 可能跑回舊 binary →
    提醒 `cargo install --path /home/yanggf/a/cortexyoung/rust --force`）——先查根因再回報。
+5b. **未chunk檔要逐檔判形狀，不要只看數字**（2026-09-09 開出 cortexyoung#5 的那條路）：
+   對報告列出的每個未chunk檔**實際開檔看**——
+   - 沒有任何宣告（只 import 後呼叫的 driver script）→ 已知誤報形狀（cortexyoung#2），不必動作。
+   - **有宣告卻 0 chunks → 是 cortexyoung#5**：索引停在一個從未提交、後來被 git 還原的版本，
+     增量因 `git diff` 為空而永不重看（`cort index --incremental` 會回報 `files_examined: 0`）。
+     驗證：比對 `file_state.file_content_hash` 與磁碟檔的 sha256，不同即確認。
+     修復只能靠**全量** `cort index`；修完複查缺口數並在發現裡寫明「哪個檔、修好沒」。
+   同時回報 #5 的影響面：缺口數與昨日的差、修復後是否回落、以及是否有新檔踩進同一形狀
+   （這是 #5 在上游修好之前唯一的觀測手段）。
 6. `git -C /home/yanggf/a/cortexyoung fetch` 後看 `HEAD..origin/master` 有無新 commit。
 
 ## 環境
