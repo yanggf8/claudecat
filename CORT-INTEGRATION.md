@@ -221,3 +221,33 @@
 - `09b2be8e`（unknown 命令記下被拒的內容）、`6568965d`（upgrade 的 binary component）、
   `ce6c53d6`（hook 文案改為動詞開頭）對 claudecat 無影響：前者只改 `unknown` 列的
   `args_summary`（claudecat 只解析 hook 列），後兩者不碰 usage.db 或索引 schema。
+
+## cortexyoung#5：索引停在「從未提交、後來被還原」的版本（2026-09-09，循環自己抓到的）
+
+**怎麼發現的**：09-09 的每日列把「未chunk檔」從 5 推到 6，多出來的是 `src/claude_md.rs`
+——93 行、滿是宣告的 Rust 檔，不可能是「本來就沒宣告」那一類。這是覆蓋缺口這個指標
+第一次抓到真東西（前 5 檔一直都是 driver script 的誤報形狀）。
+
+**根因**：`file_state.file_content_hash` 記的是 `62710829…`（09-08 18:45），磁碟上是
+`310163b6…`。那個 hash 屬於一個被改壞、**從未提交**的中間版本——當時 hook-refresh 依設計
+就地索引了它（0 chunks）；之後用 `git checkout` 還原，而 `git checkout` 不是編輯工具，
+不會再觸發 hook。於是 `cort index --incremental` 回報 `files_examined: 0`：
+候選窄化只看 `git diff HEAD` 與 `git diff indexed_head..HEAD`，兩個都空。
+`cort status` 全程報 fresh（HEAD 相符、樹乾淨、`graph_pending=0`）。
+
+**確定性重現**（temp repo + `CORT_CACHE_DIR`，已附在 issue）：初次索引 2 chunks →
+把檔案寫成非 Rust 內容再增量 → 1 chunk（unparsed）→ `git checkout --` 還原 →
+增量 `files_examined: 0`、chunks **仍是 1**（應為 2）。觸發條件毫不特殊：
+改檔 → hook 索引 → `git checkout` / `stash` / `reset` 還原，agent 每天都在做。
+
+**處置**：
+- 本 repo：跑全量 `cort index` 補回（6 檔 → 5 檔，chunks 627）。增量修不了它。
+- 上游：開 [cortexyoung#5](https://github.com/yanggf8/cortexyoung/issues/5)，附重現與機制；
+  建議的偵測是「`file_state` 有列、檔案存在、chunks 為 0」——一次查詢、不必 hash 全掃，
+  也正是這次抓到它的那個訊號。
+- claudecat：覆蓋缺口的提示文案原本只講一種成因（「實測 5/5 是 driver 檔」），
+  現在**兩種成因並列**——第二種就是本節，解法是全量索引。指標本身不變。
+
+**這條的意義**：`cort-audit` 的覆蓋缺口欄第一次不是在報噪音。它抓到的不是 extractor 漏抽，
+而是**索引與磁碟長期不一致而所有健康訊號都說沒事**——正是這個 repo 一直在防的那種假健康，
+只是這次假在 cort 那邊。

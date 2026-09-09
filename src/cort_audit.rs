@@ -260,7 +260,7 @@ pub fn render(a: &CortAudit) -> String {
         }
         match i.not_chunked_total {
             Some(n) if n > 0 => hints.push(format!(
-                "coverage 缺口：{n} 檔在 file_state 但從未被 chunk → 先確認是否本來就沒有可 chunk 的宣告（如只 import 後呼叫的 driver 檔，實測 5/5 是這種；見 cortexyoung#2），再查 extractor 規則"
+                "coverage 缺口：{n} 檔在 file_state 但從未被 chunk → 兩種成因都要查：①本來就沒有可 chunk 的宣告（只 import 後呼叫的 driver 檔；本 repo 長期那 5 檔都是，見 cortexyoung#2）②索引停在一個從未提交、後來被 git 還原的版本——增量因 git diff 為空而永不重看（cortexyoung#5，實測 `src/claude_md.rs`；解法是全量 `cort index`）。都不是才查 extractor 規則"
             )),
             None => hints.push(
                 "覆蓋查詢失敗 → 不視為「無缺口」；檢查 cort schema 版本差異".to_string(),
