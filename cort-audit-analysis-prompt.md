@@ -34,7 +34,10 @@
    樣本 <10：誠實說還要等，不要硬開規則。
 5. 數據品質優先（使用者的政策：初期 bug 先修）：CORT-AUDIT.md 出現「無法判讀」/`?`、
    FTS drift>0、fresh 翻 STALE、decline 欄整批消失（hooks 可能跑回舊 binary →
-   提醒先跑 `cort_upgrade --check` 診斷，再 `cort_upgrade` 修；它不動才退回
+   提醒先跑 `cort_upgrade --check` 診斷，再 `cort_upgrade` 修——**必須用樹內 binary**
+   `/home/yanggf/a/cortexyoung/rust/target/release/cort_upgrade`：PATH 上 `~/.cargo/bin`
+   那份的 `repo_root()` 從 `current_exe()` 往上找樹（找 `src/pack`/`skills`），永遠走到
+   `/home` 就 fatal；且 target 可能比樹舊，先 `cargo build --release`。它不動才退回
    `cargo install --path /home/yanggf/a/cortexyoung/rust --force`）——先查根因再回報。
 5b. **未chunk檔用欄位判形狀，不要再開檔人工猜**（cortexyoung schema v7 起；09-09 那條人工走法
    已被一個欄位取代）：`file_state.chunk_count` 是三態，cort-audit 報告直接給分類——

@@ -306,3 +306,23 @@ step 5 的升級指引改成先 `cort_upgrade --check`（binary 名是 `cort_upg
 實跑 `cort-audit` 時 `indexed_uncommitted` 報 3 檔，就是這次還沒 commit 的
 `src/cort.rs` / `src/cort_audit.rs` / `tests/claudecat.rs`——新警示行上線第一次就指著自己，
 而且指得對：commit 前若 `git checkout` 掉其中任何一個，索引就會留在一個不存在的版本上。
+
+## 跟上 cortexyoung（2026-09-10；對照 cort `33a1fa43`）
+
+`d7c14bd1` 之後兩個 commit，都在 install/cli 側，**claudecat 讀的介面零變動**
+（usage.db schema、cort DB schema、hook payload 欄位全部沒碰），程式不用改：
+
+- **`d143c4c1` retire xgrep**：60 天本機語料 18 次 `xg`（0.03%）且全是開發期 probe——
+  路由利基是空的，skill、`--with-xgrep`、pinned digests 全撤。claudecat 內本來就沒有
+  xgrep 引用（`rg, ast-grep, cort` 三分法不含它），零對應。
+- **`33a1fa43` shim 不再攔截 `--version`**：裝好的 shim 攔下 `--version` 印死字串、
+  不 exec，所以 `install.sh --check` 唯一解析的那條命令永遠到不了 payload——
+  shim 對 current/stale/missing 三種 payload 回答完全一樣，檢查不可能紅（設計規格
+  §69/§267 早已標記此假設，這次修掉）。現在 binary 自己答 `--version`，
+  `--check` 終於看得到 stale payload。本機 shim 已是兩行新形狀、`--check` 全 current
+  ——修復部署已在這台機器跑過，不需重裝。
+- **附帶抓到的操作陷阱（已寫進 `cort-audit-analysis-prompt.md` step 5）**：
+  PATH 上 `~/.cargo/bin/cort_upgrade` 的 `repo_root()` 從 `current_exe()` 往上找樹，
+  在 `~/.cargo/bin` 下永遠走到 `/home` 就 fatal——診斷/修復必須用樹內
+  `rust/target/release/cort_upgrade`（且 target 可能比樹舊，先 `cargo build --release`）。
+  這不算上游 bug（工具設計上就得在樹裡跑），是 prompt 照檔案名裸叫會踩的坑。
