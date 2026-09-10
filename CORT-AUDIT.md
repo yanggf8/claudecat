@@ -11,8 +11,9 @@
 
 _2026-09-10_
 
-- deep 指標持平：deep/30d=3、deep/7d=2，自 09-06 基線連 5 天無變化；命令數 30d 漲、7d 跌是滾動窗口效應（近期單日量低於剛滾出 7d 窗口的高流量日），解讀看成分而非總數。
-- pattern_not_symbol 續為最大可調標籤，今日約增百筆、先前下降趨勢中斷；但按政策先採樣再決定，不直接開規則——shape 指向新版含 model+turn_id 的 Bash hook 事件為最大可行動沉默來源，列為 hook-probe 採樣第一順位（shape 覆蓋率僅約兩成，解讀保留）。
-- unparseable_command 連續 3 天零新增，確認是歷史包袱，移出候選，不為它開規則。
-- context_flag 未達開規則門檻且自 09-07 零新增，不開；concrete_file_read、unindexed_extension、non_source_target 量小且形狀明確，暫不開。
-- 數據品質乾淨：真缺口首次歸零（之前是問號）；未chunk 5 檔全是 legacy JS 的正確沉默；indexed_uncommitted 無漂移；origin/master 無新提交。今日結論：不開新規則。
+- 真缺口連續第 2 天 = 0；#5 的漂移（src/claude_md.rs）在 commit 後自癒，indexed_uncommitted 警示消失。這條指標現在是乾淨基線，出現非零再查。
+- **Grep shape 翻案**：24 筆 Grep 形狀的 pattern_not_symbol **全部來自 kimi-code**，不是 claude-code——而 kimi 是 30d 命中率最高（3.77%，約 claude-code 25 倍）的 harness，規則若開，收益落在最有反應的流量上。
+- pattern 本身無法採樣：args_summary 不記 pattern（09-09 已記明），補採 kimi transcript 需要使用者授權（敏感 session 記錄，權限分類器擋下）。
+- 儘管如此傾向**開保守放行規則**：不是「猜那 23 筆是不是 symbol」，而是「把可確定是 symbol 的形狀放行」——pattern 去掉 \b／引號／錨點後是 bare identifier 才開火，誤報風險由規則形狀本身壓住；樣本 23 過了 ≥10 門檻。
+- 驗收線掛 issue #3 的命中率 ≥5%：看 kimi 的 3.77% 開規則後是否上移；`context_flag` 樣本僅 7，繼續等。
+- deep30=3／deep7=2，與基線持平；FTS synced、graph_pending=0、schema=7，無數據品質訊號。
