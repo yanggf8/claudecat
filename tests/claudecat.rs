@@ -1836,3 +1836,446 @@ fn findings_replace_section_and_preserve_table_and_notes() {
     let (changed3, _) = claudecat::cort_audit::findings_update(&f, "- 第二天的發現").unwrap();
     assert!(!changed3, "內容相同不得改檔");
 }
+
+/// v6/v7 形狀的 `file_state` fixture：`v7_cols=false` 時連 `chunk_count` /
+/// `indexed_uncommitted` 兩欄都不存在（v5 之前的 DB），這是「讀不到就回 None」那條
+/// 鐵則唯一能被驗證的地方——claudecat 是消費者，靠欄位在不在判斷，不靠版本號。
+/// `files` = (file_path, chunk_count, indexed_uncommitted, 要不要在 chunks 裡有列)
+fn cort_chunk_count_fixture(
+    v7_cols: bool,
+    files: &[(&str, i64, i64, bool)],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let proj = temp_project();
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-v7-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let real_str = fs::canonicalize(&proj)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let pid = claudecat::cort::project_id(&real_str);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let file_state_cols = if v7_cols {
+        "project_id TEXT NOT NULL, file_path TEXT NOT NULL, file_content_hash TEXT NOT NULL, \
+         indexed_uncommitted INTEGER NOT NULL DEFAULT 0, chunk_count INTEGER NOT NULL DEFAULT -1"
+    } else {
+        "project_id TEXT NOT NULL, file_path TEXT NOT NULL, file_content_hash TEXT NOT NULL"
+    };
+    let conn = rusqlite::Connection::open(cache.join(format!("{pid}.db"))).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE projects (
+           project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+           git_head TEXT, last_indexed_at INTEGER, extractor_version TEXT NOT NULL
+         );
+         CREATE TABLE chunks (
+           chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, file_path TEXT NOT NULL,
+           symbol_name TEXT, chunk_type TEXT, start_line INTEGER NOT NULL,
+           end_line INTEGER NOT NULL, content TEXT NOT NULL, language TEXT,
+           chunk_source TEXT DEFAULT 'ast'
+         );
+         CREATE TABLE file_state ({file_state_cols});
+         CREATE TABLE relationships (
+           source_chunk_id TEXT NOT NULL, target_chunk_id TEXT NOT NULL,
+           rel_type TEXT NOT NULL, call_site_line INTEGER, confidence_score REAL NOT NULL
+         );
+         INSERT INTO projects VALUES ('{pid}', 'demo', '{real_str}', NULL, {now_ms}, 'test');"
+    ))
+    .unwrap();
+    for (i, (path, chunk_count, uncommitted, chunked)) in files.iter().enumerate() {
+        if v7_cols {
+            conn.execute(
+                "INSERT INTO file_state VALUES (?1, ?2, 'h', ?3, ?4)",
+                rusqlite::params![pid, path, uncommitted, chunk_count],
+            )
+            .unwrap();
+        } else {
+            conn.execute(
+                "INSERT INTO file_state VALUES (?1, ?2, 'h')",
+                rusqlite::params![pid, path],
+            )
+            .unwrap();
+        }
+        if *chunked {
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type, \
+                 start_line, end_line, content, language, chunk_source) \
+                 VALUES (?1, ?2, ?3, 'sym', 'function', 1, 2, 'body', 'Rust', 'ast')",
+                rusqlite::params![format!("c{i}"), pid, path],
+            )
+            .unwrap();
+        }
+    }
+    drop(conn);
+    (proj, cache)
+}
+
+/// 在 fixture cache 下跑一次 audit_index——env 改動只活在這個函式裡，
+/// 不讓 `CORT_CACHE_DIR` 漏到其他並行測試。
+fn audit_index_in(
+    proj: &std::path::Path,
+    cache: &std::path::Path,
+) -> claudecat::cort::CortAuditIndex {
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+    let a = claudecat::cort::audit_index(proj).expect("audit_index 應有結果");
+    drop(guard);
+    a
+}
+
+fn render_index_report(a: claudecat::cort::CortAuditIndex) -> String {
+    claudecat::cort_audit::render(&claudecat::cort::CortAudit {
+        root: a.path.clone(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: Some(a),
+        db_exists: true,
+        usage: None,
+        usage_7d: None,
+    })
+}
+
+/// cortexyoung#2 的正確沉默與 #5 的真缺口長得一樣（都是「file_state 有、chunks 沒有」），
+/// schema v7 的 `chunk_count` 是唯一能把兩者分開的事實來源：0＝掃過且沒宣告。
+/// 這之前 claudecat 只能印「兩種成因都要查」的猜測。
+#[test]
+fn cort_audit_chunk_count_splits_real_gap_from_correct_silence() {
+    let (proj, cache) = cort_chunk_count_fixture(
+        true,
+        &[
+            ("src/silent_a.rs", 0, 0, false),
+            ("src/silent_b.rs", 0, 0, false),
+            ("src/lost.rs", 5, 0, false),
+            ("src/ok.rs", 3, 0, true),
+        ],
+    );
+    let a = audit_index_in(&proj, &cache);
+    assert_eq!(a.not_chunked_total, Some(3));
+    assert_eq!(
+        a.not_chunked_scanned_empty,
+        Some(2),
+        "chunk_count=0 的正確沉默"
+    );
+    assert_eq!(a.not_chunked_unknown, Some(0), "v7 fixture 沒有 -1 的列");
+    assert_eq!(a.indexed_uncommitted_files, Some(0));
+    assert_eq!(
+        a.real_gap(),
+        Some(1),
+        "只有 chunk_count>0 卻沒 chunk 的那檔才是真缺口"
+    );
+
+    let report = render_index_report(a);
+    assert!(report.contains("cortexyoung#5"), "真缺口要指名上游 issue");
+    assert!(report.contains("src/lost.rs"), "真缺口要列出檔名");
+    assert!(report.contains("全量"), "修復只能靠全量 cort index");
+    assert!(report.contains("cort index"));
+}
+
+/// `chunk_count = -1` 是「v7 之前寫入、之後從未重寫」，不是掃描結果——
+/// 把它算進正確沉默等於拿舊資料當證據。
+#[test]
+fn cort_audit_pre_v7_chunk_count_is_unknown_not_a_scan_result() {
+    let (proj, cache) = cort_chunk_count_fixture(
+        true,
+        &[("src/old.rs", -1, 0, false), ("src/silent.rs", 0, 0, false)],
+    );
+    let a = audit_index_in(&proj, &cache);
+    assert_eq!(a.not_chunked_total, Some(2));
+    assert_eq!(a.not_chunked_scanned_empty, Some(1));
+    assert_eq!(
+        a.not_chunked_unknown,
+        Some(1),
+        "-1 要進 unknown，不進正確沉默"
+    );
+
+    let report = render_index_report(a);
+    assert!(
+        report.contains("不是掃描結果"),
+        "報告要明說 -1 不能當成掃過的結論"
+    );
+    assert!(report.contains("全量"), "要定論只能重新全量索引");
+}
+
+/// v5 形狀（`file_state` 連這兩欄都沒有）：三個新欄位皆 None、`real_gap()` None，
+/// 報告退回保守措辭——絕不能因為查不到就印「無真缺口」。
+#[test]
+fn cort_audit_v5_file_state_has_no_chunk_count_columns() {
+    let (proj, cache) = cort_chunk_count_fixture(
+        false,
+        &[("src/mystery.rs", 0, 0, false), ("src/ok.rs", 0, 0, true)],
+    );
+    let a = audit_index_in(&proj, &cache);
+    assert_eq!(a.not_chunked_total, Some(1), "舊欄位照舊可判讀");
+    assert_eq!(a.not_chunked_scanned_empty, None);
+    assert_eq!(a.not_chunked_unknown, None);
+    assert_eq!(a.indexed_uncommitted_files, None);
+    assert_eq!(a.real_gap(), None, "任一欄 None 就不准猜");
+
+    let report = render_index_report(a);
+    assert!(
+        report.contains("無法用欄位判讀"),
+        "舊 schema 要說自己判讀不了"
+    );
+    assert!(!report.contains("無真缺口"), "查不到不等於沒有缺口");
+}
+
+/// schema v6 的 `indexed_uncommitted`：索引建立在未提交內容上，git 還原後增量看不到
+/// 差異、永不重看（cortexyoung#5 的成因本身）——這件事必須在報告裡警示。
+#[test]
+fn cort_audit_flags_files_indexed_from_uncommitted_content() {
+    let (proj, cache) = cort_chunk_count_fixture(true, &[("src/wip.rs", 3, 1, true)]);
+    let a = audit_index_in(&proj, &cache);
+    assert_eq!(a.not_chunked_total, Some(0), "這檔有 chunk，不是覆蓋缺口");
+    assert_eq!(a.indexed_uncommitted_files, Some(1));
+
+    let report = render_index_report(a);
+    assert!(report.contains("未提交"), "要警示索引自未提交內容");
+    assert!(report.contains("cortexyoung#5"));
+}
+
+/// `shape` 欄（cortexyoung 09f55136）把 no_shape 從「router 沒開口」變成可指名的
+/// 工具 × top-level key 形狀。口徑必須與 top declines 一致：baseline 不混進排行，
+/// 否則 2000+ 筆「本來就不是搜尋」會把唯一的行動靶心擠掉。
+#[test]
+fn cort_audit_usage_tracks_no_shape_shapes() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-shape-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, project_id TEXT,
+               command TEXT NOT NULL, args_summary TEXT NOT NULL,
+               status TEXT NOT NULL, error_code TEXT, index_stale INTEGER,
+               bytes_out INTEGER NOT NULL, saved_bytes INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        let ins = |summary: &str| {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+                 VALUES (?1, 'hook-suggest', ?2, 'ok', 0, 0, 0)",
+                rusqlite::params![now, summary],
+            )
+            .unwrap();
+        };
+        // baseline：有 shape 也不得進排行
+        ins(r#"{"hook":"no_shape","decline":"not_a_search_tool","shape":"Bash|cwd+tool_name"}"#);
+        ins(r#"{"hook":"no_shape","decline":"not_a_search_tool","shape":"Bash|cwd+tool_name"}"#);
+        // actionable 兩種形狀
+        ins(
+            r#"{"hook":"no_shape","decline":"pattern_not_symbol","shape":"Grep|pattern+tool_name"}"#,
+        );
+        ins(
+            r#"{"hook":"no_shape","decline":"pattern_not_symbol","shape":"Grep|pattern+tool_name"}"#,
+        );
+        ins(r#"{"hook":"no_shape","decline":"context_flag","shape":"Read|file_path+tool_name"}"#);
+        // 09f55136 之前的舊列沒有 shape → 跳過，不得記成 "unparsed" 汙染排行
+        ins(r#"{"hook":"no_shape","decline":"context_flag"}"#);
+        // 命中列即使帶 shape 也與 no_shape 無關
+        ins(r#"{"hook":"hit","shape":"Grep|pattern+tool_name"}"#);
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    assert_eq!(u.no_shape_shapes.get("Grep|pattern+tool_name"), Some(&2));
+    assert_eq!(u.no_shape_shapes.get("Read|file_path+tool_name"), Some(&1));
+    assert_eq!(
+        u.no_shape_shapes.get("Bash|cwd+tool_name"),
+        None,
+        "baseline 不得進 shape 排行"
+    );
+    assert_eq!(
+        u.no_shape_shapes.len(),
+        2,
+        "無 shape 的舊列不得造出第三個鍵"
+    );
+    assert_eq!(u.no_shape_shapes.get("unparsed"), None);
+
+    let report = claudecat::cort_audit::render(&claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    });
+    assert!(report.contains("top no_shape shapes"), "報告要有 shape 段");
+    assert!(
+        report.contains("`Grep|pattern+tool_name`"),
+        "shape 字串長，要用反引號包住"
+    );
+    drop(guard);
+}
+
+/// `shape` 是 cortexyoung 09f55136（2026-09-09 11:05）才開始寫的欄位，30 天窗裡
+/// 絕大多數 actionable no_shape 列根本沒有它（實測 20/6904）。拿 actionable 當分母
+/// 會把 11 筆算成 0.2% → `{:.0}` 印成 **0%**，等於把唯一的行動靶心標成無關緊要。
+/// 分母必須與分子同一母體（實際帶 shape 的列），兩個母體的關係另行印出來。
+#[test]
+fn cort_audit_shape_percentage_uses_shape_carrying_rows_as_denominator() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-cort-shapepct-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, project_id TEXT,
+               command TEXT NOT NULL, args_summary TEXT NOT NULL,
+               status TEXT NOT NULL, error_code TEXT, index_stale INTEGER,
+               bytes_out INTEGER NOT NULL, saved_bytes INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        let ins = |summary: &str| {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, args_summary, status, index_stale, bytes_out, saved_bytes) \
+                 VALUES (?1, 'hook-suggest', ?2, 'ok', 0, 0, 0)",
+                rusqlite::params![now, summary],
+            )
+            .unwrap();
+        };
+        // 700 筆 actionable 但沒有 shape（09f55136 之前的舊列）——比例刻意做到
+        // 覆蓋率 <0.5%，好釘住「覆蓋率自己也不准被 {:.0} 四捨五入成 0%」
+        for _ in 0..700 {
+            ins(r#"{"hook":"no_shape","decline":"pattern_not_symbol"}"#);
+        }
+        // 只有 3 筆帶 shape——真實比例應以這 3 筆為母體
+        ins(
+            r#"{"hook":"no_shape","decline":"pattern_not_symbol","shape":"Grep|pattern+tool_name"}"#,
+        );
+        ins(
+            r#"{"hook":"no_shape","decline":"pattern_not_symbol","shape":"Grep|pattern+tool_name"}"#,
+        );
+        ins(r#"{"hook":"no_shape","decline":"context_flag","shape":"Read|file_path+tool_name"}"#);
+        // baseline 帶不帶 shape 都不進母體
+        for _ in 0..5 {
+            ins(
+                r#"{"hook":"no_shape","decline":"not_a_search_tool","shape":"Bash|cwd+tool_name"}"#,
+            );
+        }
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    drop(guard);
+
+    assert_eq!(
+        u.no_shape_shapes.values().sum::<i64>(),
+        3,
+        "母體是帶 shape 的列"
+    );
+
+    let report = claudecat::cort_audit::render(&claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    });
+    assert!(
+        report.contains("67%"),
+        "2/3 要印成 67%，不是 2/23 的 0%：\n{report}"
+    );
+    assert!(report.contains("33%"), "1/3 = 33%");
+    // 只看 shape 那幾行：既有的 declines 段用「佔 no_shape」當標籤，分母與標籤相符，
+    // 是另一回事（見回報的已知限制），不在這個測試的射程內。
+    for line in report.lines().filter(|l| l.contains("佔帶 shape")) {
+        assert!(!line.contains("0%）"), "shape 排行不得被壓成 0%: {line}");
+    }
+    // 覆蓋率那行要同時講出兩個母體，讓讀者知道 67% 是在多小的樣本上成立的
+    let line = report
+        .lines()
+        .find(|l| l.contains("母體"))
+        .expect("要有覆蓋率行");
+    assert!(line.contains('3'), "帶 shape 的列數: {line}");
+    assert!(line.contains("703"), "actionable no_shape 總數: {line}");
+    // 覆蓋率 3/703 = 0.4%——連這一行都不准被四捨五入成「覆蓋 0%」，
+    // 那正是這個測試在修的那個謊言的另一半
+    assert!(!line.contains("覆蓋 0%"), "覆蓋率不得四捨五入成 0%: {line}");
+    assert!(line.contains("0.4"), "覆蓋率要有小數位: {line}");
+}
+
+/// 欄數漂移不該靠人眼抓：2026-09-06 那列少一格 host 已經證明過代價。
+/// header / 對齊列 / 資料列三者的欄數必須永遠相等。
+#[test]
+fn cort_audit_track_table_column_counts_match() {
+    fn cells(line: &str) -> usize {
+        line.trim()
+            .trim_start_matches('|')
+            .trim_end_matches('|')
+            .split('|')
+            .count()
+    }
+    let (proj, cache) = cort_chunk_count_fixture(true, &[("src/ok.rs", 3, 0, true)]);
+    let idx = audit_index_in(&proj, &cache);
+    let a = claudecat::cort::CortAudit {
+        root: idx.path.clone(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: Some(idx),
+        db_exists: true,
+        usage: None,
+        usage_7d: None,
+    };
+    let target = std::env::temp_dir().join(format!(
+        "claudecat-track-cols-{}-{}.md",
+        std::process::id(),
+        rand_suffix()
+    ));
+    claudecat::cort_audit::track_update(&target, &[&a]).unwrap();
+    let content = fs::read_to_string(&target).unwrap();
+    let header = content
+        .lines()
+        .find(|l| l.starts_with("| 日期"))
+        .expect("要有 header");
+    let align = content
+        .lines()
+        .find(|l| l.starts_with("|---"))
+        .expect("要有對齊列");
+    let row = claudecat::cort_audit::row_md(&a);
+    assert_eq!(cells(header), cells(align), "header 與對齊列欄數必須一致");
+    assert_eq!(cells(header), cells(&row), "資料列欄數必須與 header 一致");
+    // 兩欄並存：未 chunk 總數（歷史連續）與真缺口（新語意），不是換名
+    assert!(header.contains("未chunk檔"), "既有欄名原樣保留");
+    assert!(header.contains("真缺口"), "真缺口是新增欄");
+    let _ = fs::remove_file(&target);
+}

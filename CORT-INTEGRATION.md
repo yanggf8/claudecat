@@ -7,7 +7,7 @@
 **能。** claudecat 直接唯讀 cort 的 SQLite 索引（不重造、不改寫），
 用 cort 做「精準定位層」、claudecat 做「地圖與路線層」。
 
-## cort 提供什麼（schema v5）
+## cort 提供什麼（schema v7）
 | 表 | 內容 | claudecat 用途 |
 |---|---|---|
 | `projects` | project_id / name / path / git_head / last_indexed_at / extractor_version | `cort-status` 新鮮度 |
@@ -15,6 +15,7 @@
 | `relationships` | source→target 邊（imports/exports/calls/**references**）+ call_site_line + call_form + confidence | 反向依賴路線（`dependents()` 不過濾 rel_type，references 邊自動吃得到） |
 | `chunks_fts` | FTS5 external-content（content/symbol/file，tokenize unicode61） | `navigate --cort` 全文 fallback（symbol 未命中時） |
 | `_cortex_meta` | key/value：`SCHEMA_VERSION` / `graph_pending` / `extractor_version` | `cort-status` / `cort-audit` 的圖重建狀態（見 2026-09-09 一節） |
+| `file_state` | file_path / file_content_hash / `indexed_uncommitted`(v6) / `chunk_count`(v7) | `cort-audit` 的覆蓋缺口三分與未提交漂移警示（見 2026-09-09 下午一節） |
 
 - DB 路徑：`$CORT_CACHE_DIR/<sha256>.db`，`project_id = sha256(real_path)`（0.40 rusqlite 唯讀開啟）
 - cort 的 `last_indexed_at` 是 **epoch 毫秒**（13 位數）；freshness 以毫秒比對
@@ -251,3 +252,57 @@
 **這條的意義**：`cort-audit` 的覆蓋缺口欄第一次不是在報噪音。它抓到的不是 extractor 漏抽，
 而是**索引與磁碟長期不一致而所有健康訊號都說沒事**——正是這個 repo 一直在防的那種假健康，
 只是這次假在 cort 那邊。
+
+## 跟上 cortexyoung（2026-09-09 下午；對照 cort `d7c14bd1`）
+
+上游當天四個 commit，兩個動到 claudecat 讀的 schema。全部逐條實測，不是看 commit 訊息推論。
+
+- **schema v6（`f86a4d78`）`file_state.indexed_uncommitted`**：上一節 #5 的上游修復。
+  hook-refresh 就地索引未提交內容時標記，增量會把它留在候選集裡直到內容與 git 一致。
+  claudecat 多讀一欄 → `indexed_uncommitted_files`，大於 0 就在覆蓋段印警示。
+- **schema v7（`09f55136`）`file_state.chunk_count`**：正是上一節「建議的偵測」，而上游給的版本更好——
+  三態而不是布林：`0`＝掃過且無可 chunk 宣告（#2 的正確沉默）、`>0`＝有存下宣告、
+  `-1`＝v7 前寫入且從未重寫（**未知，不是掃描結果**）。
+  claudecat 新增 `not_chunked_scanned_empty` / `not_chunked_unknown` 與 `real_gap()`
+  （三者任一 `None` 就回 `None`——少一個事實就不下結論）。
+  實測本 repo：5 檔未 chunk、`chunk_count` 全是 0 → **真缺口 0**；那 5 檔經獨立覆核都是
+  2–3 行、零宣告的 driver script，與上游欄位的判定一致。
+  三天來那條「5 檔缺口」的曲線，第一次被證明整條都是正確沉默。
+- **usage log `shape`（同 `09f55136`，issue #3）**：`no_shape` 列帶 `工具名|排序後的 top-level key 名`，
+  不含 payload 內容。claudecat 新增 `no_shape_shapes` 排行（baseline 不混進來，與 `declines` 同口徑）。
+- **`saved_bytes` 來源加寬（`3f1d3d96`，issue #4）**：**更正本檔 2026-09-07 那條**
+  「只在 `source=store && effective=receipt` 非零」——ranged `read` 省下的檔案位元組現在也計入。
+  我們報的數字因此不再等於「快取命中省下的量」；`src/cort.rs` 的 doc comment 已寫明。
+  （那條當天為真，保留原文不改；更正寫在這裡。）
+- **`d7c14bd1`** 純 README（upgrade note 補 v6/v7），對 claudecat 無影響。
+
+### 這次自己抓到的兩個假數字
+
+- **shape 排行的分母**：第一版用「30 天 actionable no_shape」當分母，但 `shape` 是當天 11:05
+  才開始寫的，窗內只有 21 筆帶 shape。`12/6905 = 0.17%` 被 `{:.0}` 印成 **`0%`**，
+  排行上每一條都是 0%——等於親手把唯一的行動靶心標成無關緊要。
+  改成以「實際帶 shape 的列數」為分母（12/21＝57%），另印一行覆蓋率把 21 ÷ 6905＝0.3% 講明。
+  樣本小是事實，該說出來，不是把比例稀釋掉。
+- **既有 declines 段同一個病**：`{:.0}` 把 30、30、18、11 筆四個不同量級全印成 0%，
+  那一欄不再提供排序資訊。改一位小數後是 3.9% / 0.3% / 0.3% / 0.2% / 0.1%。
+
+### 長期指標表：加一欄，不換欄名
+
+`未chunk檔` 原樣保留（它的 5/5/5/6 才是連續的），右邊新增 `真缺口`。
+換欄名會讓 09-06～09-09 四列舊值坐在新語意底下，看起來像「缺口從 6 掉到 0」——
+那正是這份文件一路在防的那種悄悄漂移。歷史四列的新欄補 `?`＝當時無法判讀
+（舊 schema 沒有 `chunk_count`），不是 0。另加測試釘住 header／對齊列／`row_md()` 三者欄數一致。
+
+### 每日分析腿
+
+`cort-audit-analysis-prompt.md` 的 step 5b（當天上午才加的「逐檔開檔判形狀、比對 sha256」）
+改成讀 `chunk_count` 三態。那條人工走法從開出 #5 到被上游一個欄位取代，相隔不到一天——
+這是這條循環目前最快的一次往返。step 2 加上 `shape` 當規則需求的排序依據；
+step 5 的升級指引改成先 `cort_upgrade --check`（binary 名是 `cort_upgrade`，底線）。
+
+### 環境
+
+`cargo install --path /home/yanggf/a/cortexyoung/rust --force` 一併裝上上游新的 `cort_upgrade`。
+實跑 `cort-audit` 時 `indexed_uncommitted` 報 3 檔，就是這次還沒 commit 的
+`src/cort.rs` / `src/cort_audit.rs` / `tests/claudecat.rs`——新警示行上線第一次就指著自己，
+而且指得對：commit 前若 `git checkout` 掉其中任何一個，索引就會留在一個不存在的版本上。

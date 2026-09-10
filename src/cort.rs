@@ -1,5 +1,8 @@
 //! cortexyoung/cort 索引整合：唯讀存取 cort 的 SQLite（~/.cache/cortex-ng/<sha256>.db）
-//! 相容 cort schema v5（chunks / projects / relationships / _cortex_meta）。
+//! 相容 cort schema v5–v7（chunks / projects / relationships / _cortex_meta / file_state；
+//! v6 的 `file_state.indexed_uncommitted`、v7 的 `file_state.chunk_count`）。
+//! 新欄位在舊 DB 上整句查詢會失敗 → 對應欄位回 `None`＝「無法判讀」，
+//! 而不是拿 0 假裝健康；claudecat 是消費者，靠欄位查不查得到判斷，不靠版本號。
 //! 不做任何寫入；DB 不存在或 schema 不符時回退到 None。
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
@@ -395,6 +398,18 @@ pub struct CortAuditIndex {
     /// 未 chunk 檔案的「總數」（清單只保留前 20 筆，避免輸出過長）
     pub not_chunked_total: Option<i64>,
     pub not_chunked_files: Vec<String>,
+    /// 未 chunk 檔裡 `chunk_count = 0` 的數量：extractor 掃過、檔內沒有可 chunk 的宣告
+    /// ——cortexyoung#2 定義的**正確沉默**，不是缺口。
+    /// `None` = 這個 DB 沒有 v7 的 `chunk_count` 欄（或查詢失敗）＝無法判讀。
+    pub not_chunked_scanned_empty: Option<i64>,
+    /// 未 chunk 檔裡 `chunk_count = -1` 的數量：v7 之前寫入、之後從未重寫的列。
+    /// **不是掃描結果**——把它算進正確沉默等於拿舊資料當證據。
+    /// `None` 同上，意思是「這個 DB 根本沒有這個欄位可讀」。
+    pub not_chunked_unknown: Option<i64>,
+    /// 整個 `file_state` 裡 `indexed_uncommitted <> 0` 的列數（v6）：索引建立在未提交
+    /// 內容上，git 還原後增量因 diff 為空而永不重看（cortexyoung#5 的成因本身）。
+    /// `None` = 沒有 v6 的這個欄位（或查詢失敗）＝無法判讀，不等於 0。
+    pub indexed_uncommitted_files: Option<i64>,
     /// 含至少一個 unparsed chunk 的檔案數（純資訊欄）
     pub files_with_unparsed_chunks: i64,
     /// chunks_fts 列數（表不存在 → None）
@@ -407,6 +422,22 @@ pub struct CortAuditIndex {
     /// derived graph 是否落後 chunks（None = 無法判讀，見 [`read_meta`]）——
     /// 與 `index_info` 同一口徑，兩邊的 `fresh` 不得分岔
     pub graph_pending: Option<bool>,
+}
+
+impl CortAuditIndex {
+    /// 扣掉「正確沉默」與「未知」之後剩下的缺口：`file_state` 說檔裡有宣告
+    /// （`chunk_count > 0`）、`chunks` 卻一列都沒有——這正是 cortexyoung#5 的形狀
+    /// （索引停在一個從未提交、後來被 git 還原的版本，增量因 diff 為空永不重看）。
+    ///
+    /// 三個數字任一 `None` 就回 `None`：少一個事實就不准下結論。負數夾回 0——
+    /// 兩邊 SQL 的 `NOT IN` 子查詢之間若有寫入進來，算術可能短暫倒掛，
+    /// 但「負的缺口」是沒有意義的斷言。
+    pub fn real_gap(&self) -> Option<i64> {
+        let total = self.not_chunked_total?;
+        let scanned_empty = self.not_chunked_scanned_empty?;
+        let unknown = self.not_chunked_unknown?;
+        Some((total - scanned_empty - unknown).max(0))
+    }
 }
 
 /// 單一 harness 的 router 切面（`harness` 只出現在 hook payload：
@@ -435,6 +466,11 @@ pub struct UsageWindow {
     /// hook-suggest 的 decline 歸因（鍵如 "no_shape/context_flag"）——
     /// cortexyoung c290c383（2026-09-06）起的新列才帶 decline，舊列自然缺席
     pub declines: BTreeMap<String, i64>,
+    /// 可行動 no_shape 的 `shape` 分佈（cortexyoung 09f55136 起）：`工具名|top-level key`，
+    /// 永不含 payload 內容。口徑與 `declines` 排序一致——`not_a_search_tool` baseline
+    /// 不混進來，否則本機兩千多筆「本來就不是搜尋」會把唯一的行動靶心擠掉。
+    /// 沒有 `shape` 欄的舊列直接跳過：記成 "unparsed" 只會汙染排行。
+    pub no_shape_shapes: BTreeMap<String, i64>,
     pub refresh_outcomes: BTreeMap<String, i64>,
     /// router 的 harness 切面（cortexyoung v3 payload 起才有 `harness`）
     pub by_harness: BTreeMap<String, HarnessStat>,
@@ -443,6 +479,8 @@ pub struct UsageWindow {
     pub harness_unknown: i64,
     pub errors: i64,
     pub index_stale_queries: i64,
+    /// 省下的位元組。自 cortexyoung 3f1d3d96 起來源變寬：除了 receipt cache 命中，
+    /// 還含 ranged `read` 少傳的檔案位元組——所以它不再等於「快取命中省下的量」。
     pub saved_bytes: i64,
 }
 
@@ -556,6 +594,35 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
                 }
             }
         }
+        // v7 的 `chunk_count` 把「正確沉默」與「真缺口」分開（在此之前 claudecat 只能
+        // 印「兩種成因都要查」的猜測）。一次查兩個 split：舊 DB 沒這欄時整句失敗 →
+        // 兩者皆 None＝無法判讀，這正是要的行為，絕不 unwrap_or(0) 假裝掃過了。
+        // SUM 在 0 列時回 NULL，但查詢本身成功＝「讀到 0 筆」是事實，所以攤成 Some(0)。
+        let (not_chunked_scanned_empty, not_chunked_unknown) = conn
+            .query_row(
+                "SELECT SUM(CASE WHEN chunk_count = 0 THEN 1 ELSE 0 END), \
+                        SUM(CASE WHEN chunk_count = -1 THEN 1 ELSE 0 END) \
+                 FROM file_state WHERE project_id = ? AND file_path NOT IN \
+                      (SELECT DISTINCT file_path FROM chunks WHERE project_id = ?)",
+                [&pid, &pid],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .map(|(empty, unknown)| (Some(empty), Some(unknown)))
+            .unwrap_or((None, None));
+        // v6：索引自未提交內容的檔（git 還原後增量永不重看——cortexyoung#5 的成因）
+        let indexed_uncommitted_files: Option<i64> = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_state \
+                 WHERE project_id = ?1 AND indexed_uncommitted <> 0",
+                [&pid],
+                |r| r.get(0),
+            )
+            .ok();
         let files_with_unparsed_chunks: i64 = conn
             .query_row(
                 "SELECT COUNT(DISTINCT file_path) FROM chunks \
@@ -601,6 +668,9 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             chunked_files,
             not_chunked_total,
             not_chunked_files: not_chunked,
+            not_chunked_scanned_empty,
+            not_chunked_unknown,
+            indexed_uncommitted_files,
             files_with_unparsed_chunks,
             fts_docs,
             fts_drift,
@@ -676,6 +746,14 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
                     if is_suggest {
                         if let Some(d) = &decline {
                             *u.declines.entry(format!("{hook}/{d}")).or_insert(0) += 1;
+                        }
+                        // shape 排行（09f55136 起）：只收可行動的 no_shape。baseline 與
+                        // 沒有 shape 欄的舊列都不進——前者會淹掉靶心，後者會造出一個
+                        // 假鍵（"unparsed"）讓排行看起來有資料。
+                        if hook == "no_shape" && decline.as_deref() != Some("not_a_search_tool") {
+                            if let Some(shape) = str_field("shape") {
+                                *u.no_shape_shapes.entry(shape).or_insert(0) += 1;
+                            }
                         }
                     }
                     // harness 切面：v3 payload 起才有；沒有這欄的歷史列另計，

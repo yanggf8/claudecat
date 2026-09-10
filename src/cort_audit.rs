@@ -79,12 +79,50 @@ fn render_coverage(i: &CortAuditIndex, s: &mut String) {
             }
         }
         Some(total) => {
+            // v7 的 chunk_count 之前，這裡只能印「兩種成因都要查」的猜測；
+            // 現在同一句話有沒有定論，取決於欄位查不查得到。
+            let real_gap = i.real_gap();
+            let unknown = i.not_chunked_unknown.unwrap_or(0);
+            match real_gap {
+                Some(0) => {
+                    s.push_str(&format!(
+                        "- {}：{total} 檔未 chunk，其中 {} 檔 `chunk_count = 0`——extractor 掃過、檔內沒有可 chunk 的宣告（cortexyoung#2 定義的正確沉默）\n",
+                        if unknown > 0 {
+                            "無已證實的真缺口"
+                        } else {
+                            "無真缺口"
+                        },
+                        opt_i64(&i.not_chunked_scanned_empty),
+                    ));
+                }
+                Some(n) => {
+                    s.push_str(&format!(
+                        "- 真缺口 {n} 檔（{total} 檔未 chunk 中，{} 檔是正確沉默）：file_state 說檔裡有宣告、chunks 卻沒有 → cortexyoung#5 的形狀，增量因 git diff 為空永不重看，只有全量 `cort index` 會修\n",
+                        opt_i64(&i.not_chunked_scanned_empty),
+                    ));
+                }
+                None => {
+                    s.push_str(&format!(
+                        "- {total} 檔在 file_state 但從未被 chunk，無法用欄位判讀成因（舊 schema 沒有 `chunk_count`，或查詢失敗）——不假裝沒有缺口\n"
+                    ));
+                }
+            }
             s.push_str(&format!(
-                "- {total} 檔在 file_state 但從未被 chunk（completeness 缺口；列出前 {} 檔）：\n",
-                i.not_chunked_files.len()
+                "- 未 chunk 檔清單（前 {} 檔{}）：\n",
+                i.not_chunked_files.len(),
+                if real_gap == Some(0) {
+                    "；皆為正確沉默"
+                } else {
+                    ""
+                }
             ));
             for f in &i.not_chunked_files {
                 s.push_str(&format!("  - `{f}`\n"));
+            }
+            if unknown > 0 {
+                s.push_str(&format!(
+                    "- 其中 {unknown} 檔 `chunk_count = -1`：v7 之前寫入、之後從未重寫的列，**不是掃描結果**——重新全量 `cort index` 後才會有定論\n"
+                ));
             }
         }
     }
@@ -92,6 +130,12 @@ fn render_coverage(i: &CortAuditIndex, s: &mut String) {
         "- 含 unparsed chunk 的檔案：{} 檔\n",
         i.files_with_unparsed_chunks
     ));
+    if i.indexed_uncommitted_files.is_some_and(|n| n > 0) {
+        s.push_str(&format!(
+            "- 警示：{} 檔的索引建立自未提交內容（`indexed_uncommitted`，cortexyoung#5/v6）——git 還原那些變更後，增量看不到 diff，索引就留在一個不存在的版本上\n",
+            opt_i64(&i.indexed_uncommitted_files)
+        ));
+    }
 }
 
 fn render_usage(u: &UsageWindow, s: &mut String) {
@@ -130,14 +174,54 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
         let mut ranked: Vec<_> = actionable.to_vec();
         ranked.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
         for (k, c) in ranked.iter().take(5) {
+            // 一位小數，理由與 shape 段同一條：實測 30/9126＝0.3%、18/9126＝0.2%，
+            // `{:.0}` 會把三個不同量級的標籤全印成 0%，那一欄就不再提供任何排序資訊。
             s.push_str(&format!(
-                "- {k}: {c}（佔 no_shape {:.0}%）\n",
+                "- {k}: {c}（佔 no_shape {:.1}%）\n",
                 **c as f64 / no_shape.max(1) as f64 * 100.0
             ));
         }
         if baseline > 0 {
             s.push_str(&format!(
                 "- （baseline not_a_search_tool: {baseline}，不列入排序）\n"
+            ));
+        }
+    }
+    if !u.no_shape_shapes.is_empty() {
+        // decline 只說「為什麼沒開口」，shape 說「是什麼形狀的呼叫沒開口」——
+        // 後者才是能直接對著改 router 規則的靶心。口徑與上面的排序一致（排除 baseline）。
+        s.push_str(
+            "\ntop no_shape shapes（工具名|top-level key，不含 payload 內容；cortexyoung 09f55136 起有數據）：\n",
+        );
+        let no_shape = u.suggest_outcomes.get("no_shape").copied().unwrap_or(0);
+        let baseline = u
+            .declines
+            .get("no_shape/not_a_search_tool")
+            .copied()
+            .unwrap_or(0);
+        let actionable = (no_shape - baseline).max(0);
+        // 分母是**實際帶 shape 的列數**，不是 actionable no_shape：shape 從 09f55136
+        // 才開始寫，窗內絕大多數 actionable 列根本沒這個欄位（實測 20/6904）。
+        // 拿 actionable 當分母會把 11 筆算成 0.2%、被 {:.0} 印成 0%，等於親手把唯一的
+        // 行動靶心標成「無關緊要」——這正是這個 repo 一路在防的那種假數字。
+        // 樣本小是事實，但要用「覆蓋率另印一行」講出來，不是把比例稀釋掉。
+        let with_shape: i64 = u.no_shape_shapes.values().sum();
+        s.push_str(&format!(
+            "- （母體：{with_shape} 筆帶 shape ÷ {actionable} 筆 actionable no_shape{}；shape 自 cortexyoung 09f55136 起才寫入，舊列沒有——下列百分比的分母是前者，不是後者）\n",
+            if actionable > 0 {
+                // 覆蓋率本身也不准被四捨五入成 0%——那是同一個謊言的另一半：
+                // 實測 20/6904＝0.29%，`{:.0}` 會印成「覆蓋 0%」，讀起來像完全沒資料。
+                format!("＝覆蓋 {:.1}%", with_shape as f64 / actionable as f64 * 100.0)
+            } else {
+                String::new()
+            }
+        ));
+        let mut ranked: Vec<_> = u.no_shape_shapes.iter().collect();
+        ranked.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+        for (shape, c) in ranked.iter().take(5) {
+            s.push_str(&format!(
+                "- `{shape}`: {c}（佔帶 shape 的 {with_shape} 筆 {:.0}%）\n",
+                **c as f64 / with_shape.max(1) as f64 * 100.0
             ));
         }
     }
@@ -259,9 +343,24 @@ pub fn render(a: &CortAudit) -> String {
             );
         }
         match i.not_chunked_total {
-            Some(n) if n > 0 => hints.push(format!(
-                "coverage 缺口：{n} 檔在 file_state 但從未被 chunk → 兩種成因都要查：①本來就沒有可 chunk 的宣告（只 import 後呼叫的 driver 檔；本 repo 長期那 5 檔都是，見 cortexyoung#2）②索引停在一個從未提交、後來被 git 還原的版本——增量因 git diff 為空而永不重看（cortexyoung#5，實測 `src/claude_md.rs`；解法是全量 `cort index`）。都不是才查 extractor 規則"
-            )),
+            // v7 的 chunk_count 讓這裡能給定論：正確沉默不是行動項，真缺口才是。
+            // 只有欄位讀不到（real_gap=None）才退回舊的「兩種成因都要查」。
+            Some(n) if n > 0 => match i.real_gap() {
+                Some(0) => {
+                    if i.not_chunked_unknown.is_some_and(|u| u > 0) {
+                        hints.push(format!(
+                            "未 chunk 的 {n} 檔裡有 {} 檔 `chunk_count = -1`（v7 前寫入、未重寫）→ 那不是掃描結果，要定論就跑一次全量 `cort index`",
+                            opt_i64(&i.not_chunked_unknown)
+                        ));
+                    }
+                }
+                Some(g) => hints.push(format!(
+                    "coverage 真缺口 {g} 檔（共 {n} 檔未 chunk，其餘是 cortexyoung#2 的正確沉默）→ file_state 說有宣告、chunks 沒有，就是 cortexyoung#5：增量的 git diff 永遠是空的，只有全量 `cort index` 會修"
+                )),
+                None => hints.push(format!(
+                    "coverage 缺口：{n} 檔在 file_state 但從未被 chunk，且這個 DB 沒有 v7 的 `chunk_count` 可判讀 → 兩種成因都要查：①本來就沒有可 chunk 的宣告（只 import 後呼叫的 driver 檔，見 cortexyoung#2）②索引停在一個從未提交、後來被 git 還原的版本——增量因 git diff 為空而永不重看（cortexyoung#5；解法是全量 `cort index`）。都不是才查 extractor 規則"
+                )),
+            },
             None => hints.push(
                 "覆蓋查詢失敗 → 不視為「無缺口」；檢查 cort schema 版本差異".to_string(),
             ),
@@ -417,8 +516,14 @@ pub fn row_md(a: &CortAudit) -> String {
     let rels = idx
         .map(|i| i.relationships_count.to_string())
         .unwrap_or_else(|| "-".into());
+    // 未 chunk 總數原樣保留（它的歷史值才連續），真缺口另開一欄：後者扣掉 cortexyoung#2
+    // 的正確沉默，才是會對應到行動的那條曲線。換欄名會讓舊列坐在新語意底下——
+    // 兩欄並存是唯一不說謊的作法。舊 schema 讀不到時照既有慣例寫 `?`，不拿 0 假裝沒缺口。
     let not_chunked = idx
         .map(|i| opt_i64(&i.not_chunked_total))
+        .unwrap_or_else(|| "-".into());
+    let real_gap = idx
+        .map(|i| opt_i64(&i.real_gap()))
         .unwrap_or_else(|| "-".into());
     let fts = idx
         .map(|i| match i.fts_drift {
@@ -456,7 +561,7 @@ pub fn row_md(a: &CortAudit) -> String {
         .map(|(tag, c)| format!("{tag}={c}"))
         .unwrap_or_else(|| "-".into());
     format!(
-        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         today_iso(),
         a.root,
         a.host,
@@ -464,6 +569,7 @@ pub fn row_md(a: &CortAudit) -> String {
         chunks,
         rels,
         not_chunked,
+        real_gap,
         fts,
         cmds,
         core,
@@ -478,7 +584,7 @@ pub fn row_md(a: &CortAudit) -> String {
 pub fn track_update(path: &Path, audits: &[&CortAudit]) -> std::io::Result<(bool, String)> {
     let window = audits.first().map(|a| a.window_days).unwrap_or(30);
     let header = format!(
-        "{}\n\n| 日期 | 專案 | host | fresh | chunks | relationships | 未chunk檔 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d | decline-top |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
+        "{}\n\n| 日期 | 專案 | host | fresh | chunks | relationships | 未chunk檔 | 真缺口 | FTS drift | 命令數/{window}d | core/{window}d | deep/{window}d | 命令數/7d | deep/7d | decline-top |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
         TRACK_SECTION
     );
     let rows: Vec<String> = audits.iter().map(|a| row_md(a)).collect();
