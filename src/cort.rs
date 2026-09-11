@@ -422,6 +422,12 @@ pub struct CortAuditIndex {
     /// derived graph 是否落後 chunks（None = 無法判讀，見 [`read_meta`]）——
     /// 與 `index_info` 同一口徑，兩邊的 `fresh` 不得分岔
     pub graph_pending: Option<bool>,
+    /// cortexyoung f4ad4c7d 的 repair 三態（`none`/`refreshable`/`rebuild_required`），
+    /// 問 PATH 上的 `cort status`（見 [`query_repair`]）。本地 `fresh` 看不見
+    /// extractor/schema 變更——34e33a1d 換身分識別後所有舊索引都會讀成
+    /// `extractor_changed`，本地仍說 fresh；只有 binary 看得見 rebuild_required。
+    /// `None` = binary 不在 PATH 或判讀失敗，報 `?`。
+    pub repair: Option<String>,
 }
 
 impl CortAuditIndex {
@@ -472,6 +478,11 @@ pub struct UsageWindow {
     /// 沒有 `shape` 欄的舊列直接跳過：記成 "unparsed" 只會汙染排行。
     pub no_shape_shapes: BTreeMap<String, i64>,
     pub refresh_outcomes: BTreeMap<String, i64>,
+    /// hook fire 的窮盡分割（cortexyoung 6623113d 口徑，見 [`census_bucket`]）：
+    /// command → bucket → count，`_total` 桶記 fire 總數、其餘每列恰落一桶，
+    /// 加總恆等 `_total`——「分割閉合」一眼可查，不用再做對帳 session。
+    /// claudecat 自算（不呼叫 binary）；詞彙靠上面的複製品常數同步。
+    pub census: BTreeMap<String, BTreeMap<String, i64>>,
     /// router 的 harness 切面（cortexyoung v3 payload 起才有 `harness`）
     pub by_harness: BTreeMap<String, HarnessStat>,
     /// 沒有 `harness` 欄的 hook 列（v3 之前的歷史列）——不計進任何 harness，
@@ -676,6 +687,7 @@ pub fn audit_index(root: &Path) -> Option<CortAuditIndex> {
             fts_drift,
             schema_version,
             graph_pending,
+            repair: None,
         }))
     })?
 }
@@ -694,6 +706,107 @@ fn open_usage_readonly() -> Option<Connection> {
             )
         })
         .ok()
+}
+
+/// cortexyoung hook.rs 的 SUGGEST_OUTCOMES 複製品（6623113d 引入）。
+/// **會漂**：上游動了詞彙，這裡要跟——census 的 `unknown/<hook>` 桶就是為了
+/// 在跟丟時發出訊號，而不是把新值靜默混進既有桶。
+pub const SUGGEST_OUTCOMES: [&str; 9] = [
+    "no_payload",
+    "no_shape",
+    "upgrade_stood_down",
+    "no_index",
+    "no_index_hinted",
+    "no_evidence",
+    "hit",
+    "hit_stale",
+    "hit_yielded",
+];
+
+/// cortexyoung hook.rs 的 REFRESH_OUTCOMES 複製品（4b895589 補齊）。
+pub const REFRESH_OUTCOMES: [&str; 8] = [
+    "upgrade_stood_down",
+    "no_index",
+    "db_unavailable",
+    "no_ast_grep",
+    "refreshed",
+    "already_current",
+    "rebuild_required",
+    "busy_or_failed",
+];
+
+/// 一列 hook command_log 落進哪個 census 桶。口徑照 cortexyoung usage.rs 的
+/// `hook_census_at`（6623113d）：status 非 ok → `status_error`；args_summary 不是
+/// 合法 JSON → `unparseable_summary`；JSON 沒有 hook 欄 → `legacy_unsplit`；
+/// hook-suggest 的 `no_shape` 展開 decline（欄位缺席 = `decline_absent`）；
+/// 其餘 hook 在該命令的詞彙內照名落桶，詞彙外 → `unknown/<hook>`。
+/// 分割互斥且窮盡：每列恰落一桶，buckets 加總 == fires。
+fn census_bucket(command: &str, status: &str, raw: &str) -> String {
+    if status != "ok" {
+        return "status_error".to_string();
+    }
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return "unparseable_summary".to_string();
+    };
+    let (known, splits_decline): (&[&str], bool) = if command == "hook-refresh" {
+        (&REFRESH_OUTCOMES, false)
+    } else {
+        (&SUGGEST_OUTCOMES, true)
+    };
+    match parsed.get("hook").and_then(|h| h.as_str()) {
+        None => "legacy_unsplit".to_string(),
+        Some("no_shape") if splits_decline => format!(
+            "no_shape/{}",
+            parsed
+                .get("decline")
+                .and_then(|d| d.as_str())
+                .unwrap_or("decline_absent")
+        ),
+        Some(h) if known.contains(&h) => h.to_string(),
+        Some(h) => format!("unknown/{h}"),
+    }
+}
+
+/// cortexyoung f4ad4c7d 的 repair 判定，從 `cort status` 的 JSON 鏡射 impact.rs
+/// 的推導（`incremental::forbid_refuses`）：`!index_is_stale` → `none`；
+/// hook 會拒絕增量（`rebuild_required` 理由非空，或 `candidates_narrowed` 失守）
+/// → `rebuild_required`（只有前景全量 `cort index` 會修）；其餘 → `refreshable`。
+/// 關鍵欄位缺席或未索引 → `None`＝無法判讀——這個判定的輸入（pack hash 比對）
+/// 不在 claudecat 讀得到的 DB 裡，自算必然是假的。
+pub fn repair_from_status_json(v: &serde_json::Value) -> Option<String> {
+    let indexed = v.get("indexed").and_then(|b| b.as_bool())?;
+    let stale = v.get("index_is_stale").and_then(|b| b.as_bool())?;
+    if !indexed {
+        return None;
+    }
+    let repair = if !stale {
+        "none"
+    } else {
+        let rebuild_required = v.get("rebuild_required").and_then(|r| r.as_array());
+        let narrowed = v.get("candidates_narrowed").and_then(|b| b.as_bool())?;
+        let hook_refuses = rebuild_required.is_some_and(|r| !r.is_empty()) || !narrowed;
+        if hook_refuses {
+            "rebuild_required"
+        } else {
+            "refreshable"
+        }
+    };
+    Some(repair.to_string())
+}
+
+/// 問 PATH 上的 `cort status <root>` 拿 repair 判定；binary 不在、非零退出、
+/// 輸出不是 JSON，一律 `None`（報告顯示 `?`）。唯讀動詞，不會動索引。
+fn query_repair(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("cort")
+        .arg("status")
+        .arg(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    repair_from_status_json(&v)
 }
 
 /// 用量統計（cort 自己的 usage.db command_log，唯讀）：window 天內
@@ -717,19 +830,28 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
             }
         }
     }
-    // hook 結果分佈（args_summary 是 JSON）+ harness 切面（同一次掃描，不多開查詢）
+    // hook 結果分佈（args_summary 是 JSON）+ census（同一次掃描，多讀一個 status 欄）
+    // + harness 切面（不多開查詢）
     let mut harness_declines: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for (cmd, target) in [
         ("hook-suggest", &mut u.suggest_outcomes),
         ("hook-refresh", &mut u.refresh_outcomes),
     ] {
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT args_summary FROM command_log WHERE command = ?1 AND ts >= ?2")
+        if let Ok(mut stmt) = conn
+            .prepare("SELECT status, args_summary FROM command_log WHERE command = ?1 AND ts >= ?2")
         {
-            if let Ok(rows) =
-                stmt.query_map(rusqlite::params![cmd, since], |r| r.get::<_, String>(0))
-            {
-                for r in rows.flatten() {
+            if let Ok(rows) = stmt.query_map(rusqlite::params![cmd, since], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            }) {
+                for (status, raw) in rows.flatten() {
+                    // census（6623113d 口徑）：每列恰落一桶，`_total` 之外加總恆等 fires。
+                    // args_summary 為 NULL 時上游會整個 census 中止；這裡照「不是合法 JSON」
+                    // 落 unparseable_summary——分割窮盡是這個數字存在的全部意義。
+                    let bucket = census_bucket(cmd, &status, raw.as_deref().unwrap_or(""));
+                    let cb = u.census.entry(cmd.to_string()).or_default();
+                    *cb.entry("_total".to_string()).or_insert(0) += 1;
+                    *cb.entry(bucket).or_insert(0) += 1;
+                    let r = raw.unwrap_or_default();
                     let parsed = serde_json::from_str::<serde_json::Value>(&r).ok();
                     let hook = parsed
                         .as_ref()
@@ -833,11 +955,17 @@ pub fn audit(root: &Path, window_days: u32) -> CortAudit {
     } else {
         audit_usage(7)
     };
+    // repair 只有 binary 判得出來（見 query_repair），DB 讀得到才問——
+    // 沒索引的專案沒有 repair 可講
+    let mut index = audit_index(&real);
+    if let Some(i) = index.as_mut() {
+        i.repair = query_repair(&real);
+    }
     CortAudit {
         root: real.to_string_lossy().into_owned(),
         host: host_name(),
         window_days,
-        index: audit_index(&real),
+        index,
         db_exists: db_exists(&real),
         usage,
         usage_7d,

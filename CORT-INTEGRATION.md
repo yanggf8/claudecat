@@ -326,3 +326,40 @@ step 5 的升級指引改成先 `cort_upgrade --check`（binary 名是 `cort_upg
   在 `~/.cargo/bin` 下永遠走到 `/home` 就 fatal——診斷/修復必須用樹內
   `rust/target/release/cort_upgrade`（且 target 可能比樹舊，先 `cargo build --release`）。
   這不算上游 bug（工具設計上就得在樹裡跑），是 prompt 照檔案名裸叫會踩的坑。
+
+## 跟上 cortexyoung（2026-09-11；對照 cort `f8d3d3f4`，8 個 commit）
+
+`33a1fa43` 之後 8 個 commit。部署側已就位：`~/.local/share/cortexyoung/cort/cort` 與樹內
+release 同 hash，含到 `4b895589`；且 **`34e33a1d` 身分識別變更（CHUNKER_IDENTITY →
+chunker-position/3）造成的全量重建已經發生**——本機所有索引的 extractor_version 都與
+binary 一致、`cort projects --verdict` 回 compatible，chunker/coverage 三修正
+（`1d54400b`/`34e33a1d`/`28a8ff2d`）已落到索引上。CORT-AUDIT 的 chunks/relationships
+在重建後跳動（639→645/395→401）是塌縮修復的預期結果，不是數據品質事件。
+
+claudecat 這次的對應（都有測試，67 全綠）：
+
+- **census 窮盡分割（追 `6623113d`+`4b895589` `hook_census`）**：`audit_usage` 原本自己手工
+  數 decline，口徑對不上——census 顯示 30 天有 `no_shape/decline_absent=6447` 與
+  `unparseable_summary=1032`（2026-09-01 一天的 writer bug，args_summary 是字面 `'hook'`，
+  任何 JSON 分析都看不到），手工法這兩塊都不入帳，declines 加總永遠 < no_shape 總數。
+  現在 claudecat 自算同一套分割（`status_error` / `unparseable_summary` / `legacy_unsplit` /
+  `no_shape/<decline|decline_absent>` / 詞彙內 outcome / `unknown/<hook>`），詞彙常數是
+  上游 SUGGEST_OUTCOMES/REFRESH_OUTCOMES 的複製品——會漂，`unknown/` 桶就是跟丟時的訊號。
+  報告的閉合檢查跨兩條獨立路徑（GROUP BY vs 逐列掃描）。與上游一個刻意的差異：
+  args_summary 為 NULL 時上游整個 census 中止，claudecat 落 `unparseable_summary`——
+  分割窮盡優先。舊的 suggest/refresh outcome 清單被 census 取代（`"unparsed"` 假鍵退休）；
+  declines / no_shape_shapes / harness 切面不動（那是 claudecat 自己的切面）。
+- **repair 三態（追 `f4ad4c7d`）**：從 `cort status` 的 `index_is_stale`/`rebuild_required`/
+  `candidates_narrowed` 推導 none/refreshable/rebuild_required（鏡射上游 impact.rs 的
+  `forbid_refuses`，純函式有測試）。claudecat 不自算——判定的輸入是 pack hash 比對，
+  不在 DB 裡，自算必然是假的；binary 不在 PATH 或輸出不可判讀 → `?`。track 表不加欄
+  （09-06 已證明加欄的代價），fresh 格覆寫在前：`STALE/rebuild`、`STALE/refresh`——
+  本地 fresh 看不見 extractor/schema 變更，`34e33a1d` 正是那一種（當天索引已重建所以
+  沒踩到，但下一個身分識別變更會踩到）。
+- **probe declines + `--decline TAG`（追 `f8d3d3f4`）**：09-10 findings 的採樣死結解除——
+  evals 的 hook-probe 現在自帶 parsed pattern 與全母體 declines census，不碰 transcript。
+  且上游已裁決完 pattern_not_symbol：52,046 搜尋 / 4,418 筆 decline（80.6% 真文字搜尋、
+  12.6% 宣告衣服、6.8% 批次 alternation、**0% 偽裝的單 symbol 查詢**），`9e725c76` 的剝皮
+  規則把可確定是 symbol 的形狀收回了，剩下的沉默都是故意的。
+- **`9e725c76` 本身**：claudecat 09-10 開的保守放行規則被上游收進 hook 本體——
+  驗收線（issue #3 命中率 ≥5%）現在真的進入觀察期，kimi 的 3.77% 是第一個觀察點。

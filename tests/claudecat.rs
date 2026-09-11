@@ -2279,3 +2279,144 @@ fn cort_audit_track_table_column_counts_match() {
     assert!(header.contains("真缺口"), "真缺口是新增欄");
     let _ = fs::remove_file(&target);
 }
+
+/// hook census（cortexyoung 6623113d 口徑）：每列 hook command_log 恰落一桶，
+/// buckets 加總 == fires。合成 usage.db 實測 audit_usage 的分割。
+#[test]
+fn usage_census_partitions_every_fire() {
+    use claudecat::cort::audit_usage;
+
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-census-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE command_log (
+           ts INTEGER, command TEXT, status TEXT, args_summary TEXT,
+           index_stale INTEGER DEFAULT 0, saved_bytes INTEGER DEFAULT 0
+         );",
+    )
+    .unwrap();
+    let now: i64 = 17_890_000_000_000;
+    let ins = |cmd: &str, status: &str, summary: &str| {
+        conn.execute(
+            "INSERT INTO command_log (ts, command, status, args_summary) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![now, cmd, status, summary],
+        )
+        .unwrap();
+    };
+    // hook-suggest 八桶
+    ins("hook-suggest", "ok", r#"{"hook":"hit"}"#);
+    ins(
+        "hook-suggest",
+        "ok",
+        r#"{"hook":"no_shape","decline":"pattern_not_symbol"}"#,
+    );
+    ins("hook-suggest", "ok", r#"{"hook":"no_shape"}"#); // 缺 decline 欄
+    ins("hook-suggest", "error", r#"{"hook":"hit"}"#);
+    ins("hook-suggest", "ok", "not json at all");
+    ins("hook-suggest", "ok", r#"{"foo":1}"#); // JSON 但沒有 hook 欄
+    ins(
+        "hook-suggest",
+        "ok",
+        r#"{"hook":"no_shape","decline":"not_a_search_tool"}"#,
+    );
+    ins("hook-suggest", "ok", r#"{"hook":"no_evidence"}"#);
+    // hook-refresh 四列：refresh 詞彙內、no_shape 不展開（→unknown/no_shape）、詞彙外
+    ins("hook-refresh", "ok", r#"{"hook":"refreshed"}"#);
+    ins("hook-refresh", "ok", r#"{"hook":"no_shape"}"#);
+    ins("hook-refresh", "ok", r#"{"hook":"rebuild_required"}"#);
+    ins("hook-refresh", "error", "garbage");
+    // 非 hook 命令不進 census
+    ins("context", "ok", "whatever");
+    drop(conn);
+
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = audit_usage(30).expect("合成 usage.db 應可讀");
+    drop(guard);
+
+    let sug = u.census.get("hook-suggest").expect("suggest 應有 census");
+    assert_eq!(sug.get("_total"), Some(&8));
+    let bucket = |k: &str| sug.get(k).copied().unwrap_or(0);
+    assert_eq!(bucket("hit"), 1);
+    assert_eq!(bucket("no_shape/pattern_not_symbol"), 1);
+    assert_eq!(bucket("no_shape/decline_absent"), 1, "缺 decline 欄要現形");
+    assert_eq!(bucket("no_shape/not_a_search_tool"), 1);
+    assert_eq!(bucket("no_evidence"), 1);
+    assert_eq!(bucket("status_error"), 1);
+    assert_eq!(bucket("unparseable_summary"), 1);
+    assert_eq!(bucket("legacy_unsplit"), 1);
+    let sug_sum: i64 = sug
+        .iter()
+        .filter(|(k, _)| *k != "_total")
+        .map(|(_, v)| v)
+        .sum();
+    assert_eq!(sug_sum, 8, "suggest buckets 加總必須等於 fires");
+
+    let refr = u.census.get("hook-refresh").expect("refresh 應有 census");
+    assert_eq!(refr.get("_total"), Some(&4));
+    assert_eq!(refr.get("refreshed"), Some(&1));
+    assert_eq!(refr.get("rebuild_required"), Some(&1));
+    assert_eq!(
+        refr.get("unknown/no_shape"),
+        Some(&1),
+        "refresh 列的 no_shape 不展開 decline，落 unknown/"
+    );
+    assert_eq!(refr.get("status_error"), Some(&1));
+    let ref_sum: i64 = refr
+        .iter()
+        .filter(|(k, _)| *k != "_total")
+        .map(|(_, v)| v)
+        .sum();
+    assert_eq!(ref_sum, 4, "refresh buckets 加總必須等於 fires");
+
+    assert!(!u.census.contains_key("context"), "非 hook 命令不進 census");
+    // 既有切面不受影響：not json 與沒 hook 欄的列在舊 suggest_outcomes 口徑都叫
+    // "unparsed"（census 把兩者分開成 unparseable_summary / legacy_unsplit）
+    assert_eq!(u.suggest_outcomes.get("unparsed"), Some(&2));
+}
+
+/// repair token（cortexyoung f4ad4c7d）從 `cort status` JSON 的推導，
+/// 鏡射 impact.rs：!stale→none；forbid 會拒絕（rebuild_required 非空或
+/// candidates_narrowed=false）→ rebuild_required；其餘 → refreshable。
+#[test]
+fn repair_token_mirrors_upstream_forbid_refuses() {
+    let f = claudecat::cort::repair_from_status_json;
+    let none = serde_json::json!({"indexed": true, "index_is_stale": false});
+    assert_eq!(f(&none).as_deref(), Some("none"));
+    let refreshable = serde_json::json!({
+        "indexed": true, "index_is_stale": true,
+        "rebuild_required": [], "candidates_narrowed": true
+    });
+    assert_eq!(f(&refreshable).as_deref(), Some("refreshable"));
+    let rebuild = serde_json::json!({
+        "indexed": true, "index_is_stale": true,
+        "rebuild_required": ["extractor_changed"], "candidates_narrowed": true
+    });
+    assert_eq!(f(&rebuild).as_deref(), Some("rebuild_required"));
+    let narrowed = serde_json::json!({
+        "indexed": true, "index_is_stale": true,
+        "rebuild_required": [], "candidates_narrowed": false
+    });
+    assert_eq!(
+        f(&narrowed).as_deref(),
+        Some("rebuild_required"),
+        "narrowing 失守時 hook 一樣拒絕，只有全量會修"
+    );
+    let unindexed = serde_json::json!({
+        "indexed": false, "index_is_stale": true,
+        "rebuild_required": [], "candidates_narrowed": true
+    });
+    assert_eq!(f(&unindexed), None, "沒有索引就沒有 repair 可講");
+    let unreadable = serde_json::json!({"indexed": true});
+    assert_eq!(f(&unreadable), None, "關鍵欄位缺席＝無法判讀，不是 none");
+}

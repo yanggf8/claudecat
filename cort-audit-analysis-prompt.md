@@ -9,13 +9,17 @@
 
 1. 確認 `/home/yanggf/a/claudecat/CORT-AUDIT.md` 最新列是今天的；缺則：
    `cd /home/yanggf/a/claudecat && /home/yanggf/.cargo/bin/cargo run -q -- cort-audit --root . --track CORT-AUDIT.md`
-2. python3 唯讀查詢（immutable）`~/.cache/cortex-ng/usage.db`：
-   `SELECT args_summary FROM command_log WHERE command='hook-suggest' AND args_summary LIKE '%"decline"%'`
-   解析 JSON、統計 `.decline` 分佈。**排除 `not_a_search_tool`（baseline 噪音）後排序**——
-   那是「本來就不是搜尋」的正確沉默，不是 tuning 目標。
-   同一批列（cortexyoung 09f55136 起）還帶 `.shape`＝`工具名|排序後的 top-level key 名`，
-   那是 issue #3 給的需求排序依據：步驟 4 要開哪條規則，看哪個 shape 最常被沉默掉，
-   不要只看 decline 標籤。`shape` 只含欄位名，沒有 payload 內容，可以直接貼進報告。
+2. decline/shape 的需求排序看 `cort-audit` 報告本身（步驟 1 的 stdout 就有，或
+   `cargo run -q -- cort-audit --root .`），不用再開手工 SQL——報告的「hook census」區
+   （claudecat 已自算 cortexyoung 6623113d 口徑）每列恰落一桶、加總＝fires；
+   「top declines」已排除 `not_a_search_tool` baseline（那是「本來就不是搜尋」的正確沉默）；
+   「top no_shape shapes」＝`工具名|排序後的 top-level key 名`，是 issue #3 的需求排序依據：
+   要開哪條規則看哪個 shape 最常被沉默掉，不要只看 decline 標籤（shape 只含欄位名，
+   沒有 payload 內容，可以直接貼進報告）。
+   已知不需動作的桶：`unparseable_summary`（2026-09-01 writer bug 的歷史列，
+   args_summary 是字面 `'hook'`）、`no_shape/decline_absent`（v3 前舊列）。
+   census 出現 `unknown/<hook>`＝上游動了詞彙、claudecat 的常數跟丟，要回報並同步；
+   任一 census 行加總 ≠ fires＝數據品質問題，按步驟 5 先查根因。
 3. 台灣中文輸出（stdout 進 log 檔）：
    - deep/30d、deep/7d 趨勢（2026-09-06 基線 deep30=3、deep7=2；注意 30 天滾動窗口效應）
    - decline 排序與樣本數
@@ -29,8 +33,14 @@
    - **不自行 commit / push**——把 `git diff` 與說明寫進輸出，使用者會 gate
    - 脈絡：yanggf8/cortexyoung issue #3，驗收線 = hook-suggest 命中率 ≥5%；
      頭號候選 `context_flag`＝把上下文搜尋導向 `cort context` 而非沉默
-     （2026-09-01 的 probe 只證明了不該導向 `impact`，沒證明該沉默）；
-     `pattern_not_symbol` 則先採樣看它吃掉哪些 pattern 再決定
+     （2026-09-01 的 probe 只證明了不該導向 `impact`，沒證明該沉默）。
+   - 標籤採樣用 evals 的 hook-probe（自帶 parsed pattern 與全母體 declines，
+     **不需**讀 transcript、不需授權）：
+     `/home/yanggf/.cargo/bin/cargo run --quiet --manifest-path /home/yanggf/a/cortexyoung/evals/Cargo.toml -- hook-probe --decline <TAG>`
+     （`declines` 恆含全母體 census；`--examples N` 只縮 specimen 清單；跑不動先在 evals/ `cargo build`）。
+     **別重開 `pattern_not_symbol`**：2026-09-11 上游已裁決（52,046 搜尋 / 4,418 筆：
+     80.6% 真文字、0% 偽裝單 symbol 查詢），regex 剝皮規則 `9e725c76` 已收進 hook，
+     驗收線進入觀察期——看 kimi 命中率（3.77%）是否上移即可。
    樣本 <10：誠實說還要等，不要硬開規則。
 5. 數據品質優先（使用者的政策：初期 bug 先修）：CORT-AUDIT.md 出現「無法判讀」/`?`、
    FTS drift>0、fresh 翻 STALE、decline 欄整批消失（hooks 可能跑回舊 binary →
@@ -47,9 +57,15 @@
      `cort index`；修完複查缺口數並在發現裡寫明「哪個檔、修好沒」。
    - `-1`＝v7 之前寫入且從未重寫，**不是掃描結果**；要全量索引一次才有定論，不可當成缺口或無缺口。
    另有 v6 的 `file_state.indexed_uncommitted`：>0 表示有檔案索引自未提交內容（#5 的漂移來源），
-   看到就報。報告若說「無法用欄位判讀」＝DB 還是舊 schema 或查詢失敗，先按步驟 5 查根因。
+   看到就報（工作樹有未提交編輯時是預期現象，commit 後自癒）。報告若說「無法用欄位判讀」＝
+   DB 還是舊 schema 或查詢失敗，先按步驟 5 查根因。
+   全量重索引若報 `chunk_id_collision`（cortexyoung 34e33a1d 新增的拒絕，兩列同名）＝
+   兩條規則把同一個名字描述成同一位置，extractor 拒絕而非挑一個——大聲回報，不要沉默略過。
+   chunks/relationships 在 2026-09-11 之後的跳動是 1d54400b/34e33a1d 塌縮修復的預期結果
+   （chain/minified 註冊不再擠成同一列），不是數據品質事件。
    **只有真缺口 >0 時**才回報 #5 的影響面（與昨日的差、修復後是否回落、是否有新檔踩進同一形狀）。
 6. `git -C /home/yanggf/a/cortexyoung fetch` 後看 `HEAD..origin/master` 有無新 commit。
+   （上次追到 `f8d3d3f4`，2026-09-11；對應關係見 CORT-INTEGRATION.md 同日節。）
 
 ## 環境
 

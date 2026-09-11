@@ -48,6 +48,10 @@ fn render_index(i: &CortAuditIndex, s: &mut String) {
         }
     ));
     s.push_str(&format!(
+        "- repair={}（cort status 的三態，cortexyoung f4ad4c7d：none=不欠、refreshable=增量可修、rebuild_required=只有全量會修；? = PATH 上沒有 cort 或判讀失敗）\n",
+        i.repair.as_deref().unwrap_or("?")
+    ));
+    s.push_str(&format!(
         "- file_state={} files，chunked={} files，FTS docs={}（{}）\n",
         opt_i64(&i.file_state_files),
         opt_i64(&i.chunked_files),
@@ -150,10 +154,30 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
     for (k, v) in &u.by_command {
         s.push_str(&format!("| `{k}` | {v} |\n"));
     }
-    if !u.suggest_outcomes.is_empty() {
-        s.push_str("\nhook-suggest 結果：\n");
-        for (k, v) in &u.suggest_outcomes {
-            s.push_str(&format!("- {k}: {v}\n"));
+    if !u.census.is_empty() {
+        // census（cortexyoung 6623113d 口徑）取代舊的 suggest/refresh outcome 清單：
+        // 每列恰落一桶、加總＝fires，對帳一眼可查；舊清單把 status_error、
+        // 非 JSON、沒 hook 欄三種情況全擠在一個 "unparsed" 假鍵裡，看不見殘留。
+        // 閉合檢查跨兩條獨立路徑：by_command 走 GROUP BY、_total 走逐列掃描，
+        // 兩者不符＝有列在掃描路上被丟掉，先查數據品質再談其他數字。
+        s.push_str(
+            "\nhook census（每列恰落一桶，加總＝fires；口徑 cortexyoung 6623113d/4b895589）：\n",
+        );
+        for (cmd, buckets) in &u.census {
+            let total = buckets.get("_total").copied().unwrap_or(0);
+            let fires = u.by_command.get(cmd).copied().unwrap_or(0);
+            if total != fires {
+                s.push_str(&format!(
+                    "- `{cmd}`：**分割不閉合**（census 數到 {total}，command_log 有 {fires} 列）——有列在掃描路上消失，先查數據品質\n"
+                ));
+            }
+            let mut ranked: Vec<_> = buckets.iter().filter(|(k, _)| *k != "_total").collect();
+            ranked.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+            let parts: Vec<String> = ranked.iter().map(|(k, c)| format!("{k}={c}")).collect();
+            s.push_str(&format!(
+                "- `{cmd}`（{total} fires）：{}\n",
+                parts.join("、")
+            ));
         }
     }
     if !u.declines.is_empty() {
@@ -265,12 +289,6 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
                     st.declared_mismatch
                 ));
             }
-        }
-    }
-    if !u.refresh_outcomes.is_empty() {
-        s.push_str("\nhook-refresh 結果：\n");
-        for (k, v) in &u.refresh_outcomes {
-            s.push_str(&format!("- {k}: {v}\n"));
         }
     }
     s.push_str(&format!(
@@ -502,12 +520,18 @@ pub fn row_md(a: &CortAudit) -> String {
     let idx = a.index.as_ref();
     // 不加欄（09-06 那列少一格 host 已經證明加欄的代價），改讓既有 fresh 格說得更準：
     // 圖落後寫 STALE/graph（跟 HEAD/age 的 STALE 分得開），讀不到 meta 寫 fresh?
+    // repair（f4ad4c7d，問 PATH 上的 cort）比本地 fresh 誠實——extractor/schema 變了
+    // 本地仍說 fresh，rebuild_required 只有 binary 看得見，覆寫在前。
     let fresh = idx
-        .map(|i| match (i.fresh, i.graph_pending) {
-            (_, Some(true)) => "STALE/graph",
-            (false, _) => "STALE",
-            (true, None) => "fresh?",
-            (true, Some(false)) => "fresh",
+        .map(|i| match i.repair.as_deref() {
+            Some("rebuild_required") => "STALE/rebuild",
+            Some("refreshable") => "STALE/refresh",
+            _ => match (i.fresh, i.graph_pending) {
+                (_, Some(true)) => "STALE/graph",
+                (false, _) => "STALE",
+                (true, None) => "fresh?",
+                (true, Some(false)) => "fresh",
+            },
         })
         .unwrap_or("no-index");
     let chunks = idx

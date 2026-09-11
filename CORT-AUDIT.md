@@ -7,13 +7,14 @@
 | 2026-09-08 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 609 | 345 | 5 | ? | synced | 16152 | 473 | 3 | 16128 | 2 | pattern_not_symbol=213 |
 | 2026-09-09 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 625 | 369 | 6 | ? | synced | 18298 | 474 | 3 | 17283 | 2 | pattern_not_symbol=324 |
 | 2026-09-10 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 639 | 395 | 5 | 0 | synced | 19939 | 474 | 3 | 16301 | 2 | pattern_not_symbol=430 |
+| 2026-09-11 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 645 | 401 | 5 | 0 | synced | 24101 | 545 | 12 | 17250 | 11 | pattern_not_symbol=614 |
 ## 每日分析發現 (claudecat cort-audit)
 
-_2026-09-10_
+_2026-09-11_
 
-- 真缺口連續第 2 天 = 0；#5 的漂移（src/claude_md.rs）在 commit 後自癒，indexed_uncommitted 警示消失。這條指標現在是乾淨基線，出現非零再查。
-- **Grep shape 翻案**：24 筆 Grep 形狀的 pattern_not_symbol **全部來自 kimi-code**，不是 claude-code——而 kimi 是 30d 命中率最高（3.77%，約 claude-code 25 倍）的 harness，規則若開，收益落在最有反應的流量上。
-- pattern 本身無法採樣：args_summary 不記 pattern（09-09 已記明），補採 kimi transcript 需要使用者授權（敏感 session 記錄，權限分類器擋下）。
-- 儘管如此傾向**開保守放行規則**：不是「猜那 23 筆是不是 symbol」，而是「把可確定是 symbol 的形狀放行」——pattern 去掉 \b／引號／錨點後是 bare identifier 才開火，誤報風險由規則形狀本身壓住；樣本 23 過了 ≥10 門檻。
-- 驗收線掛 issue #3 的命中率 ≥5%：看 kimi 的 3.77% 開規則後是否上移；`context_flag` 樣本僅 7，繼續等。
-- deep30=3／deep7=2，與基線持平；FTS synced、graph_pending=0、schema=7，無數據品質訊號。
+- deep30=12／deep7=11，與昨日持平（基線 3／2；09-11 的跳變後維持，深水區使用是真實增加，不是 30 天窗口效應）。
+- decline 排序：pattern_not_symbol=619（日增僅 +5）仍最大但已裁決、進觀察期；次大 concrete_file_read=43 經 hook-probe＋hook.rs 註解確認是刻意留的精確度閘門（命名具體單檔＝reading 而非 caller-set），不可動作。
+- 可動作標籤今日從缺：context_flag 仍 7（<10 繼續等）；不開新規則，誠實等樣本。
+- 驗收線觀察：kimi 命中率 3.03%（4/132），較昨日 3.77% 下移但仍居冠（grok 0.92%、codex 0.50%、claude-code 0.12%）；9e725c76 已在本地 HEAD——剝皮規則生效中，觀察期繼續，單日小分母波動不下結論。
+- 數據品質全綠：兩表加總＝fires、無 unknown 桶、FTS synced、真缺口連續第 3 天 0；unparseable 近 10 天僅 09-06 殘留 30 筆、之後零新增，歷史列假設成立。
+- indexed_uncommitted=3 檔是工作樹未提交編輯的預期現象（6 檔 M），commit 後自癒；上游 fetch 後無新 commit（HEAD=f8d3d3f4）。
