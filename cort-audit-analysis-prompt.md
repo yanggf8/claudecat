@@ -41,13 +41,18 @@
      **別重開 `pattern_not_symbol`**：2026-09-11 上游已裁決（52,046 搜尋 / 4,418 筆：
      80.6% 真文字、0% 偽裝單 symbol 查詢），regex 剝皮規則 `9e725c76` 已收進 hook，
      驗收線進入觀察期——看 kimi 命中率（3.77%）是否上移即可。
+   - hook_row v4（`9820d9f5`）起，probe-paid 列（hit/hit_stale/no_index/no_index_hinted/
+     no_evidence）帶 `symbol`，`no_evidence` 另帶 `why`（`leaf_in_index`＝搜尋換了名字、
+     `absent`＝任何形狀都沒有），且帶 `project_id`（`613b1ec7`）——refusals 現在可對著
+     檔案／其他專案追問；v3 舊列沒有這些鍵，採樣先看 `v`。
    樣本 <10：誠實說還要等，不要硬開規則。
 5. 數據品質優先（使用者的政策：初期 bug 先修）：CORT-AUDIT.md 出現「無法判讀」/`?`、
    FTS drift>0、fresh 翻 STALE、decline 欄整批消失（hooks 可能跑回舊 binary →
    提醒先跑 `cort_upgrade --check` 診斷，再 `cort_upgrade` 修——**必須用樹內 binary**
    `/home/yanggf/a/cortexyoung/rust/target/release/cort_upgrade`：PATH 上 `~/.cargo/bin`
    那份的 `repo_root()` 從 `current_exe()` 往上找樹（找 `src/pack`/`skills`），永遠走到
-   `/home` 就 fatal；且 target 可能比樹舊，先 `cargo build --release`。它不動才退回
+   `/home` 就 fatal；且 target 可能比樹舊，先 `cargo build --release`（`15487664` 起
+   `--check` 自己會把 target 比樹舊判成 Drifted，修法仍是先 build）。它不動才退回
    `cargo install --path /home/yanggf/a/cortexyoung/rust --force`）——先查根因再回報。
 5b. **未chunk檔用欄位判形狀，不要再開檔人工猜**（cortexyoung schema v7 起；09-09 那條人工走法
    已被一個欄位取代）：`file_state.chunk_count` 是三態，cort-audit 報告直接給分類——
@@ -65,7 +70,7 @@
    （chain/minified 註冊不再擠成同一列），不是數據品質事件。
    **只有真缺口 >0 時**才回報 #5 的影響面（與昨日的差、修復後是否回落、是否有新檔踩進同一形狀）。
 6. `git -C /home/yanggf/a/cortexyoung fetch` 後看 `HEAD..origin/master` 有無新 commit。
-   （上次追到 `f8d3d3f4`，2026-09-11；對應關係見 CORT-INTEGRATION.md 同日節。）
+   （上次追到 `9820d9f5`，2026-09-13；對應關係見 CORT-INTEGRATION.md 同日節。）
 
 ## 環境
 

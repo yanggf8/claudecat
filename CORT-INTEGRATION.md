@@ -363,3 +363,36 @@ claudecat 這次的對應（都有測試，67 全綠）：
   規則把可確定是 symbol 的形狀收回了，剩下的沉默都是故意的。
 - **`9e725c76` 本身**：claudecat 09-10 開的保守放行規則被上游收進 hook 本體——
   驗收線（issue #3 命中率 ≥5%）現在真的進入觀察期，kimi 的 3.77% 是第一個觀察點。
+
+## 跟上 cortexyoung（2026-09-13；對照 cort `9820d9f5`，3 個 commit）
+
+`f8d3d3f4` 之後 3 個 commit（09-12～09-13），全在 hook 寫入側與 upgrade 診斷，
+**claudecat 讀的介面零變動**：usage.rs（census 口徑）沒動、command_log 沒有 schema 變更
+（`project_id` 是既有欄位的賦值，不是新欄），程式不用改。詞彙常數已逐字核對：
+SUGGEST_OUTCOMES(9)/REFRESH_OUTCOMES(8) 與 claudecat 的複製品一致，census 無 `unknown/` 漂移訊號。
+
+- **`613b1ec7` probe-paid 列帶 project**：hook-suggest 的
+  hit/hit_stale/no_evidence/no_index/no_index_hinted 一律在 verdict 前蓋 `usage.project_id`；
+  no_shape 出口刻意不歸因——那些列沒付 probe 的錢，歸因要在 ~95% 的 fires 上多付一次
+  canonicalize。evals 的 `adopt-mine` 報告也蓋 machine 章，跨機對帳不再靠記憶。
+  對 audit 的意義：「hinted 的專案後來索引了沒」這條 funnel 追問現在 join 得動。
+- **`15487664` target 比樹舊＝Drifted**：09-12 現場踩到的坑收進工具——樹前進而 target
+  沒重 build 時，stale binary 的 hash 與同版安裝完全一致，`--check` 會把整台機器誤判成
+  current。現在 binary 元件先比 build 與 rust/src/**（含 Cargo manifests）的先後：
+  樹較新 → Drifted 並附 rebuild 命令；樹讀不到 → 不出訊號；內容比對只在 build 較新時才跑。
+  分析 prompt step 5 的「先 `cargo build --release`」指引與此對齊。
+- **`9820d9f5` refusal 帶名字與進度**：hook_row v3→v4，probe-paid outcomes 多蓋 `symbol`，
+  `no_evidence` 另蓋 `why`（`leaf_in_index`＝bare leaf 其實在 chunks 裡、只是搜尋換了名字；
+  `absent`＝任何形狀都沒有：extractor 缺口或本來就不是定義）。09-12 adoption recheck 找到
+  3 天 10 筆無法追問的 no_evidence，之後每一筆都能對著檔案、其他專案的 chunks、
+  receiver-gate 拒絕去比對。args_summary 的新鍵全是加法——claudecat 的 census 只讀
+  hook/decline/shape/harness/harness_declared，v3 舊列沒有這些鍵、照樣落原桶，閉合不變。
+  等本機 v4 列累積，no_evidence 的 why 分佈是下一個值得看的切面（目前樣本極小，先等）。
+
+部署側：`rust/target/release/cort_upgrade --check` 全 current（23 個項目，含 `15487664`
+新判準的自檢：target 與樹同步）。
+
+日期口徑附記：track 表的日期是 `today_iso()` 的 **UTC** 日（dates.rs 寫明）。09:17 的
+cron 在 +0800＝UTC 01:17，UTC 日與本地日一致，歷史列都沒問題；本地 00:00–07:59 之間
+手動跑，列會掛前一天（2026-09-13 00:34 補跑的那列因此落在 09-12）。09-12 當天
+09:17/09:29 兩個排程都沒有痕跡（機器當時沒開），該列即此補測。
