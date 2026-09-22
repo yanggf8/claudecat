@@ -17,6 +17,7 @@
 | 2026-09-17 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 647 | 405 | 5 | 0 | synced | 39070 | 552 | 12 | 19354 | 9 | pattern_not_symbol=1198 |
 | 2026-09-18 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 647 | 405 | 5 | 0 | synced | 41091 | 552 | 12 | 16990 | 0 | pattern_not_symbol=1248 |
 | 2026-09-18 | `/home/yanggf/a/claudecat` | Thinkpade15 | fresh | 663 | 422 | 5 | 0 | synced | 6947 | 14 | 0 | 5112 | 0 | pattern_not_symbol=189 |
+| 2026-09-18 | `/Users/guofang.mis/a/claudecat` | MacBook-Pro.local | fresh | 686 | 451 | 5 | 0 | synced | 3503 | 8 | 1 | 2563 | 0 | pattern_not_symbol=249 |
 | 2026-09-19 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 44458 | 552 | 12 | 19698 | 0 | pattern_not_symbol=1425 |
 | 2026-09-20 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 48677 | 552 | 12 | 20792 | 0 | pattern_not_symbol=1631 |
 | 2026-09-21 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 50950 | 552 | 12 | 22543 | 0 | pattern_not_symbol=1741 |
@@ -31,3 +32,10 @@ _2026-09-22_
 - top no_shape shapes 覆蓋約兩成，全是 Bash／Grep 的 envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
 - 數據品質全綠：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced 且 fresh，repair=none 是自養預期不是無 staleness；真缺口為零（未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 採樣仍零樣本，legacy 屬舊列預期、不是零自癒。
 - 上游 origin/master 超前本地十個 commit（upgrade／install／deps 與 gate-audit／codegraph 文檔），無 hook 規則變動、口徑不變，下次方便時 pull 即可。
+
+_2026-09-18 — MacBook-Pro.local_
+
+- 本機（Mac，第四台）首次入表：fresh、686 chunks / 451 relationships、真缺口 0、FTS synced；30d 命令 3503、deep 1——深挖歸零與 Thinkpade15 首列同構，adoption 缺口在 Mac 上同樣鮮明。
+- audit 列的 host 探測（cort.rs `host_name`）是 doctor 那個 `/etc/hostname` bug 的第二份拷貝：本機第一跑寫出 `unknown | no-index` 列。已修——刪拷貝、改呼叫 `doctor::resolve_host` 單一家（2026-09-18 修 doctor 時沒對 `resolve_host` 跑 impact，漏了這個呼叫點；「還有誰在用」正是該跑 caller-set 的場景）。
+- 同步跟上 d3f9ac9（+643：markdown sidecar、usage 指標、v2 skill 進 repo）：重裝 binary 後 `usage` 子命令才出現——版號凍在 2.1.0 不動，判斷新舊要比對子命令面而非版號；skill symlink 補上 `~/.claude/skills/claudecat`。
+- codex 558 筆 harness_declared 不符、claude-code 命中率 0.11%（1/916）——與 NUC11i5／Thinkpade15 同構；本機 fires 樣本尚小（1,585），只記不裁決。本機 `findings_update` 的「整段取代、只留最新一天」契約會蓋掉他機同日區塊，故本列採手動附加、保留他機內容。
