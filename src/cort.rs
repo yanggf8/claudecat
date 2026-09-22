@@ -519,7 +519,7 @@ pub struct UsageWindow {
 #[derive(Debug, Clone, Serialize)]
 pub struct CortAudit {
     pub root: String,
-    /// 主機名（/etc/hostname）——usage.db 是每台機器各自的，多機的列靠 host 区分
+    /// 主機名（doctor::resolve_host，單一家）——usage.db 是每台機器各自的，多機的列靠 host 区分
     pub host: String,
     pub window_days: u32,
     pub index: Option<CortAuditIndex>,
@@ -528,15 +528,6 @@ pub struct CortAudit {
     pub usage: Option<UsageWindow>,
     /// 固定 7 天窗口（早期訊號；與 `--window` 的長期趨勢互補）
     pub usage_7d: Option<UsageWindow>,
-}
-
-/// 主機名：讀 /etc/hostname（WSL/Linux），讀不到則 "unknown"
-fn host_name() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn now_ms() -> i64 {
@@ -1077,7 +1068,10 @@ pub fn audit(root: &Path, window_days: u32) -> CortAudit {
     }
     CortAudit {
         root: real.to_string_lossy().into_owned(),
-        host: host_name(),
+        // host 探測只有一個家（doctor::resolve_host）：cort.rs 這份舊拷貝只讀
+        // /etc/hostname，macOS 上永遠 unknown——審計表靠 host 分機，等於把
+        // Mac 永遠記成 unknown 那一列（2026-09-18 本機首次入表時發現）。
+        host: crate::doctor::resolve_host().unwrap_or_else(|| "unknown".to_string()),
         window_days,
         index,
         db_exists: db_exists(&real),
