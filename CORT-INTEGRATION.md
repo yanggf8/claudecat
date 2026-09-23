@@ -438,3 +438,29 @@ index 養新（新 `rust/src/heal.rs` 的 `ensure_fresh`）。「index 是快取
   `heal_unparseable`（NULL／非法 JSON，照 hook census 對 unparseable 的態度入自己
   的桶）。報告在用量節新增「self-heal 採樣」兩行，零樣本也印。heal 當天 17:44
   才上線，首日實測 scanned=495 全 legacy、0 次自癒——零樣本屬預期。
+
+## 修 cortexyoung：BUSY 重試整條鏈沒接上，獨佔鎖下讀者直接報「占用」（2026-09-22→23；上游 `d3e91636`）
+
+- **症狀**：agent session 回報「cort impact 因本機 Cortex 索引資料庫被占用而無法
+  使用」。本機重現：對專案 DB 持 `PRAGMA locking_mode=EXCLUSIVE` +
+  `BEGIN EXCLUSIVE`——注意**單純 `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE` 擋不住 WAL
+  讀者**（實測 impact 照樣 0.15s 過），要 locking_mode 才真的獨佔。舊 binary
+  5.4s（一個 busy timeout）後噴 `storage_busy: database is locked`。
+- **根因三層，重試機制形同裝飾**：① `classify_sqlite` 把 sqlite 原因碼折掉、
+  `CortWrap::sqlite_code()` 無條件回 `None`，read/recall 名義上的
+  `with_busy_retry` 對已分類錯誤第一輪就放棄——迴圈只看得到無碼錯誤；②
+  `cmd_impact` 根本沒包；③ 實測炸點在 open 路徑（`open_db` 的 WAL pragma、
+  `ensure_schema` 第一個寫交易），在任何被包的查詢之前。
+- **修復四處**（都在 `rust/`）：`classify_sqlite` 的 `storage_busy` 帶
+  `sqlite_code`；`CortWrap` 讀回；impact 查詢與 `--coverage` 包重試；
+  `open_project_tracked` 的 open+schema 包重試。hook 路徑
+  （`open_project_unmigrated`）刻意不動——hook 等鎖等於拖住 agent 的下一個
+  工具呼叫，快速失敗安靜退場是契約。BUSY 後重跑 `ensure_schema` 安全：batch
+  冪等、輸掉 race 的遷移已 rollback。
+- **驗證**：12s 獨佔鎖，舊 binary 5.4s 失敗、新 binary 11.2s 重試撐到鎖釋放正確
+  輸出。回歸測試 `impact_waits_out_an_exclusive_db_lock…`（7s 鎖——越過一個
+  timeout、落在重試預算內）。全套 575 綠（rebase 過 NUC 的 `b4ce3721` deps
+  刷新後重跑）。
+- **部署**：Mac 的 `~/.local/share/cortexyoung/cort/cort` 已換（舊檔備份
+  `cort.bak-pre-d3e91636`），部署後 impact/doctor 全綠。上游已推
+  origin；NUC/Thinkpad 下次走升級流程即取得。
