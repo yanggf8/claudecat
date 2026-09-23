@@ -19,8 +19,10 @@
 | 2026-09-18 | `/home/yanggf/a/claudecat` | Thinkpade15 | fresh | 663 | 422 | 5 | 0 | synced | 6947 | 14 | 0 | 5112 | 0 | pattern_not_symbol=189 |
 | 2026-09-18 | `/Users/guofang.mis/a/claudecat` | MacBook-Pro.local | fresh | 686 | 451 | 5 | 0 | synced | 3503 | 8 | 1 | 2563 | 0 | pattern_not_symbol=249 |
 | 2026-09-19 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 44458 | 552 | 12 | 19698 | 0 | pattern_not_symbol=1425 |
+| 2026-09-19 | `/home/yanggf/a/claudecat` | i51149R3050 | fresh | 687 | 451 | 5 | 0 | synced | 3703 | 16 | 2 | 2287 | 0 | pattern_not_symbol=231 |
 | 2026-09-20 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 48677 | 552 | 12 | 20792 | 0 | pattern_not_symbol=1631 |
 | 2026-09-21 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 50950 | 552 | 12 | 22543 | 0 | pattern_not_symbol=1741 |
+| 2026-09-21 | `/home/yanggf/a/claudecat` | i51149R3050 | fresh | 687 | 451 | 5 | 0 | synced | 5064 | 17 | 2 | 3198 | 0 | pattern_not_symbol=300 |
 | 2026-09-22 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 53651 | 552 | 12 | 22901 | 0 | pattern_not_symbol=1848 |
 ## 每日分析發現 (claudecat cort-audit)
 
@@ -32,6 +34,14 @@ _2026-09-22_
 - top no_shape shapes 覆蓋約兩成，全是 Bash／Grep 的 envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
 - 數據品質全綠：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced 且 fresh，repair=none 是自養預期不是無 staleness；真缺口為零（未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 採樣仍零樣本，legacy 屬舊列預期、不是零自癒。
 - 上游 origin/master 超前本地十個 commit（upgrade／install／deps 與 gate-audit／codegraph 文檔），無 hook 規則變動、口徑不變，下次方便時 pull 即可。
+
+_2026-09-21 — i51149R3050_
+
+- deep/30d=2 持平、deep7 連續歸零：過去 7 天零 context／recall 深水區使用，30 天內的 2 次深挖全落在 7 天窗口外；adoption 缺口延續，該做是維持 navigate 當 front door，下週再看 deep7 是否回升（各機 DB 獨立，不可拿 NUC11i5 的 12 來比；30 天滾動窗口會自然吞掉舊深挖）。
+- 不開新規則：pattern_not_symbol=300 已裁決、剝皮規則觀察期中（不重開）；unparseable_command=39 是 parser 產品問題、concrete_file_read=20 開火只會是精確度噪音（probe 樣本多為 concrete file+bare symbol 伴隨查詢）、unindexed_extension／non_source_target 各 8 屬正確沉默；context_flag=2（<10），誠實等樣本。
+- hook-suggest 命中 5/2567（<1%）；top no_shape shapes 覆蓋 32.9% 但仍全是 Bash／Grep envelope 鍵形狀、無語義形狀訊號——issue #3 的需求排序暫無新依據；grok 17 筆、codex 3 筆 harness_declared 與實測不符，歸因改用實測值。
+- 數據品質全綠：兩 hook census 加總＝fires、無 unknown/ 桶、FTS synced、fresh、repair=none（查詢自癒常態下 repair=none 更常見，不得誤讀為無 staleness）、真缺口 0（5 未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 仍零真實樣本（scanned=14 全是 legacy 舊列，屬預期）。
+- 上游已同步到 e4e97bc6（HEAD..origin/master 無落後，自 09-19 起無新 commit）；跨機列不可互比（本機 hostname 即 i51149R3050）。
 
 _2026-09-18 — MacBook-Pro.local_
 
