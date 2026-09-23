@@ -464,3 +464,20 @@ index 養新（新 `rust/src/heal.rs` 的 `ensure_fresh`）。「index 是快取
 - **部署**：Mac 的 `~/.local/share/cortexyoung/cort/cort` 已換（舊檔備份
   `cort.bak-pre-d3e91636`），部署後 impact/doctor 全綠。上游已推
   origin；NUC/Thinkpad 下次走升級流程即取得。
+
+## 分 repo：cortexyoung 那份 claudecat 副本已退回（2026-09-23；上游 `3cda23ea` → 退回）
+
+- **發生什麼**：另一台機器把 claudecat main（`401cc949`）整包 merge 進
+  cortexyoung（`3cda23ea`，外加 CI job `fffa9bc6`、`legacy/node_modules` ignore
+  `c5b7d135`）。Mac pull 下來時，本 repo 在 `401cc949` 之後已多 4 個 commit
+  （`2224c8b`、`b286e94`、`a4263ae`、`e3fed23`）——同一個工具兩份，第一天就分岔。
+- **決定**：各自放自己的 repo。claudecat（程式、skill、`CORT-AUDIT.md` 每日列與
+  發現）只在本 repo；cortexyoung 只出 `cort`。cortexyoung 那邊把 merge 帶進來的
+  檔案全刪、`.github`/`.gitignore`/`AGENTS.md`/`README.md` 還原成 merge 前
+  （`1f0da008`），`rust/` 保留 `d3e91636`/`f334c22c` 兩個 cort 修正；
+  cortexyoung 的 AGENTS.md 加一條「claudecat 住自己的 repo，不要 merge 進來」。
+- **沒有東西遺失**：副本停在 `401cc949`，本 repo 全有；cort 的 `rust/`、
+  `install.sh`、`evals/` 不依賴任何 claudecat 檔案。
+- **其他機器**：做過 merge 的那台（與 NUC/Thinkpad）下次在 cortexyoung pull 就會
+  拿到退回；每日分析腿與 `~/.claude/skills/claudecat` symlink 要指向
+  `~/a/claudecat`，不是 cortexyoung。
