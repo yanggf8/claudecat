@@ -22,7 +22,21 @@
 | 2026-09-20 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 48677 | 552 | 12 | 20792 | 0 | pattern_not_symbol=1631 |
 | 2026-09-21 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 50950 | 552 | 12 | 22543 | 0 | pattern_not_symbol=1741 |
 | 2026-09-22 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 685 | 450 | 5 | 0 | synced | 53651 | 552 | 12 | 22901 | 0 | pattern_not_symbol=1848 |
+| 2026-09-23 | `/home/yanggf/a/claudecat` | NUC11i5 | STALE/refresh | 687 | 451 | 5 | 0 | synced | 57326 | 552 | 12 | 22423 | 0 | pattern_not_symbol=2108 |
+| 2026-09-24 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 61124 | 552 | 12 | 22054 | 0 | pattern_not_symbol=2255 |
+| 2026-09-25 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 63316 | 552 | 12 | 22225 | 0 | pattern_not_symbol=2375 |
+| 2026-09-26 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 64411 | 552 | 12 | 19958 | 0 | pattern_not_symbol=2401 |
+| 2026-09-27 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 65040 | 552 | 12 | 16363 | 0 | pattern_not_symbol=2404 |
 ## 每日分析發現 (claudecat cort-audit)
+
+_2026-09-26_
+
+- deep/30d 持平在 12，但 deep/7d 連九天掛零（09-18 起）；30 天窗口內的新用量是零，舊量全落在窗口外半部，再無 deep 使用的話 30d 指標隨滾動掉只是時間問題，adoption 繼續盯。
+- 可動作標籤今日仍從缺，不開新規則：pattern_not_symbol 已裁決、剝皮規則觀察中不重開；concrete_file_read 是精確度閘門、unindexed_extension 是正確沉默；唯一候選 context_flag 仍 7 筆（<10，誠實等樣本）。
+- kimi 命中率停在約 0.98%（與昨日相同、無上移），剝皮規則觀察期繼續、不下結論；其餘 harness 皆低於 1%（unspecified 高命中是手動探針，不計）；grok 宣告值與實測不符仍在千筆量級，歸因繼續用實測值。
+- top no_shape shapes 覆蓋約兩成六，全是 Bash／Grep 的 envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
+- 數據品質全綠：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced、fresh；真缺口為零（未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 採樣仍零樣本、legacy 屬舊列預期。
+- 上游 origin/master 仍超前同一個 commit（425f5a5d：空索引 heal 邊界具名化），今日無新提交、無 decline／shape 口徑變動，下次方便時 pull 即可。
 
 _2026-09-22_
 
