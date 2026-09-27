@@ -1,5 +1,7 @@
 ## 長期指標 (claudecat cort-audit)
 
+> **口徑註記（2026-09-27 起，by design）**：上游 cort 的 hook 已靜默化為純記錄器（cortexyoung `428e3398`）——fires／outcome census／decline 分佈照常且更乾淨（無注入干擾），但注入與採納類指標自此恆零；同日 parser 放行 `cd && grep`／`; grep` 人口（`eab18be9`），searches 口徑變大、`not_a_search_tool` 的 decline 份額明顯下降，跨 09-27 前後的絕對數不可直接比。
+
 | 日期 | 專案 | host | fresh | chunks | relationships | 未chunk檔 | 真缺口 | FTS drift | 命令數/30d | core/30d | deep/30d | 命令數/7d | deep/7d | decline-top |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 2026-09-06 | `/home/yanggf/a/claudecat` | fresh | 586 | 310 | 5 | ? | synced | 12051 | 473 | 3 | 12035 | 2 |
