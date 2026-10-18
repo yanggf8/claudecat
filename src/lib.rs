@@ -8,6 +8,7 @@ pub mod explore;
 pub mod guardrails;
 pub mod manifest;
 pub mod markdown;
+pub mod memory;
 pub mod model;
 pub mod navigate;
 pub mod outline;

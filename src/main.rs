@@ -7,6 +7,7 @@ use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
 use claudecat::markdown;
+use claudecat::memory;
 use claudecat::model::{self, MapProfile};
 use claudecat::navigate;
 use claudecat::outline;
@@ -126,6 +127,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// 查詢或記錄有來源的專案記憶；資料留在該 repo 的 .claudecat/memory.json
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
         /// 目標 markdown 檔（例如 SESSION-EVIDENCE.md）
@@ -157,6 +163,33 @@ enum Commands {
         /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
         #[arg(long, value_enum, default_value = "auto")]
         map: MapArg,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// 記錄一項待人工審查的主張，來源必須是 repo 內現有檔案與行號
+    Record {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        claim: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        line: usize,
+        #[arg(long)]
+        supersedes: Option<String>,
+    },
+    /// 讀取目前版本，並標示來源是否與記錄時相同；不把指紋相同當成語義驗證
+    Recall {
+        query: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -508,6 +541,58 @@ fn main() {
                 eprintln!("無法讀取本機導航統計");
                 std::process::exit(1);
             }
+        },
+        Commands::Memory { action } => match action {
+            MemoryAction::Record {
+                root,
+                key,
+                claim,
+                source,
+                line,
+                supersedes,
+            } => match memory::record(&root, &key, &claim, &source, line, supersedes.as_deref()) {
+                Ok(entry) => {
+                    println!("recorded {}", entry.id);
+                    println!(
+                        "review and commit {} before sharing",
+                        memory::ledger_path(&root).display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("memory record: {e}");
+                    std::process::exit(1);
+                }
+            },
+            MemoryAction::Recall { query, root, json } => match memory::recall(&root, &query) {
+                Ok(result) if json => match serde_json::to_string_pretty(&result) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("memory JSON: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok(result) => {
+                    if result.ledger_status == "absent" {
+                        println!("memory ledger absent");
+                    } else if result.hits.is_empty() {
+                        println!("no project memory match in present ledger");
+                    }
+                    for hit in result.hits {
+                        println!(
+                            "{} [{}] {}",
+                            hit.entry.key, hit.evidence_status, hit.entry.claim
+                        );
+                        println!(
+                            "  id={} source={}:{}",
+                            hit.entry.id, hit.entry.source, hit.entry.source_line
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("memory recall: {e}");
+                    std::process::exit(1);
+                }
+            },
         },
         Commands::Track {
             file,

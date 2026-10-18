@@ -1,6 +1,6 @@
 ---
 name: claudecat
-description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, quantify exploration cost, integrate with cortexyoung/cort, and run the daily cort-audit. Use when the user asks to scan/map a project, find where a symbol lives, check cort index health, run the daily audit and write findings/metrics into CORT-AUDIT.md, update the claudecat auto blocks, or invokes /claudecat.
+description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, query explicitly recorded project memory with source freshness, quantify exploration cost, integrate with cortexyoung/cort, and run the daily cort-audit. Use when the user asks about a past project decision, a project map, a symbol location, cort index health, the daily audit, or invokes /claudecat.
 ---
 
 # ClaudeCat — Project Map & cort Integration
@@ -14,6 +14,7 @@ claudecat scan                  # 掃描專案，輸出導航地圖（--format t
 claudecat explore --json        # 量化探索成本：無地圖 vs 地圖的 token 粗估
 claudecat navigate "auth"       # 從一句話找目的地符號/檔案；--cort 優先用 cort 全量索引（需先 cort index）
 claudecat usage --json           # 查看本機導航命中統計（不含原始查詢）
+claudecat memory recall "<過去決策>" --json # 讀取有來源的專案記憶
 claudecat update --dry-run      # 更新 claudecat 自動區塊；--dry-run 只顯示差異
 claudecat cort-status           # cort 索引狀態：新鮮度、chunk、relationships
 claudecat doctor                # 體檢追蹤循環；--install 一鍵部署 crontab（冪等）
@@ -22,6 +23,18 @@ claudecat findings - <<'EOF'    # 把每日分析發現寫進文件發現區塊�
 ...markdown findings...
 EOF
 ```
+
+## Project memory trial
+
+For a past project decision, use `claudecat memory recall "<query>" --json` from the target repo.
+The file `.claudecat/memory.json` is explicitly curated and Git tracked, not automatically
+extracted from conversations. Treat `source_unchanged` as a byte-fingerprint check only; open the
+cited `source:source_line` before relying on the claim. Treat `source_changed`, `source_missing`,
+and `conflict` as unresolved. `ledger_status: absent` means no shared ledger exists here; an empty
+`hits` array in a present ledger means only that this query found no match. A new claim requires
+`claudecat memory record --key K --claim C --source RELATIVE_FILE --line N`; replacing one
+requires `--supersedes OLD_ID`. Review the diff
+before committing. Do not copy an unverified pasted agent report into memory.
 
 ## Where output goes
 
@@ -36,7 +49,7 @@ EOF
 
 ## Gone in v2 (do not use)
 
-- No `sync` / `login` / Turso cloud — cross-machine state is per-machine, DBs are independent (kimi denominators differ across hosts by design).
+- No `sync` / `login` / Turso cloud — local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Reviewed project memory can move through normal Git commits.
 - No MCP server — never re-register one; the CLI is the only interface.
 - No `npm install -g claudecat` — install with `cargo install --path <repo>` from the Rust checkout; `~/.local/bin/claudecat` typically symlinks to the repo's `target/release/claudecat`.
 

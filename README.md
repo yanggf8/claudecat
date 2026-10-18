@@ -10,7 +10,7 @@ cort 回答「查詢時的問題」，ClaudeCat 回答「啟動時的導航」�
 - ❌ **不做**：「猜測式」auth/response/error pattern 偵測 + 假信心
 - ❌ **不做**：transit 壓縮——不改寫 agent 與 LLM 之間的任何位元組，
   地圖每行（`file:symbol:line`）必須逐字可查；與壓縮層（headroom 等）互補不重疊
-- ✅ **只做**：從 manifest + AST 產出**可驗證的事實地圖**
+- ✅ **核心**：從 manifest + AST 產出**可驗證的事實地圖**；另有明示記錄的專案記憶試驗
 - 對齊 Anthropic 官方大型 codebase 策略（agentic search > RAG）：
   給 Claude 精簡地圖（≤150 行），讓它自己做有目標的探索
 
@@ -36,11 +36,34 @@ claudecat track SESSION-EVIDENCE.md  # 把指標寫入長期指標表（原子�
 claudecat navigate "<要找什麼>"      # 從一句話給出目的地符號/檔案 + cort 路線
 claudecat navigate --cort "<要找什麼>"  # 優先吃 cort 全量索引（含反向依賴）
 claudecat usage --json             # 顯示本機導航統計（不含原始查詢）
+claudecat memory recall "deployment" --json  # 查有來源的專案記憶及來源新鮮度
 claudecat cort-status --root <proj>   # cort 索引新鮮度 / chunks / relationships
 claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
 claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
 claudecat scan --root /path/to/project
 ```
+
+## 可審核的專案記憶（Rust 試驗版）
+
+`memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
+每個 repo 的資料在 `.claudecat/memory.json`；檢查 diff 後把它提交到該 repo，Claude Code
+與 Codex 及其他機器才會透過 Git 讀到同一份。`--root` 可指定目標 repo。
+
+```bash
+claudecat memory record --key "deployment option" --claim "Option B is current" \
+  --source docs/decision.md --line 2
+claudecat memory recall "deployment option" --json
+claudecat memory record --key "deployment option" --claim "Option C is current" \
+  --source docs/decision.md --line 2 --supersedes <舊紀錄的 id>
+```
+
+記錄保留來源路徑、行號與整檔 SHA-256。`recall` 的 `source_unchanged` 只表示來源位元組
+與記錄時相同，**不證明主張確實由該行支持**；`source_changed`、`source_missing`、
+`conflict` 都不得當成現行事實。同 key 的更正必須明確指出舊 id，舊紀錄保留作審計。
+格式損毀時查詢報錯，不回傳看似完整的空集合。這是來源與更新契約的第一輪，還沒有
+語義驗證、跨 repo 個人偏好、或自動載入到代理上下文的 hook。
+JSON 輸出包含 `ledger_status`（`absent` / `present`）及 `hits`；缺少記憶檔不等於確認
+沒有相關決策。Git 只同步經審查、提交的記憶檔；各機器的導航地圖及統計資料仍是本機資料。
 
 **迷你地圖（auto）**：專案 <300 LOC 時，讀全部比導航地圖便宜，`auto` 會自動改用
 15 行內的迷你地圖（About/Entry/Run/Build/Structure/Deps/Guardrails），避免負效益。
