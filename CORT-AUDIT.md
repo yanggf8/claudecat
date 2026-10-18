@@ -32,7 +32,37 @@
 | 2026-09-26 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 64411 | 552 | 12 | 19958 | 0 | pattern_not_symbol=2401 |
 | 2026-09-27 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 65040 | 552 | 12 | 16363 | 0 | pattern_not_symbol=2404 |
 | 2026-09-28 | `/home/yanggf/a/claudecat` | i51149R3050 | STALE | 686 | 451 | 5 | 0 | synced | 10092 | 23 | 2 | 5025 | 0 | pattern_not_symbol=679 |
+| 2026-09-28 | `/home/yanggf/a/claudecat` | NUC11i5 | STALE | 686 | 451 | 5 | 0 | synced | 69004 | 552 | 11 | 18064 | 0 | pattern_not_symbol=2647 |
+| 2026-09-29 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 76605 | 552 | 11 | 22970 | 0 | pattern_not_symbol=3662 |
+| 2026-09-30 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 81133 | 552 | 11 | 23919 | 0 | pattern_not_symbol=4365 |
+| 2026-10-01 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 86782 | 551 | 11 | 25616 | 0 | pattern_not_symbol=5010 |
+| 2026-10-02 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 91863 | 493 | 11 | 29562 | 0 | pattern_not_symbol=5804 |
+| 2026-10-03 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 94917 | 482 | 11 | 34038 | 0 | pattern_not_symbol=6566 |
+| 2026-10-04 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 94122 | 475 | 11 | 35933 | 0 | pattern_not_symbol=7032 |
+| 2026-10-05 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 92402 | 87 | 11 | 33364 | 0 | pattern_not_symbol=7276 |
+| 2026-10-06 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 92918 | 87 | 11 | 26820 | 0 | pattern_not_symbol=7480 |
+| 2026-10-07 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 93732 | 84 | 9 | 25996 | 0 | pattern_not_symbol=8214 |
+| 2026-10-08 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 95335 | 84 | 9 | 24781 | 0 | pattern_not_symbol=8982 |
+| 2026-10-09 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 98389 | 84 | 9 | 23809 | 0 | pattern_not_symbol=9723 |
+| 2026-10-10 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 101937 | 84 | 9 | 23204 | 0 | pattern_not_symbol=10440 |
+| 2026-10-11 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 100790 | 13 | 0 | 23918 | 0 | pattern_not_symbol=10843 |
+| 2026-10-12 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 101738 | 13 | 0 | 24120 | 0 | pattern_not_symbol=11080 |
+| 2026-10-13 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 103777 | 12 | 0 | 28172 | 0 | pattern_not_symbol=11928 |
+| 2026-10-14 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 112294 | 12 | 0 | 33556 | 0 | pattern_not_symbol=13263 |
+| 2026-10-15 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 114794 | 6 | 0 | 34057 | 0 | pattern_not_symbol=13662 |
+| 2026-10-16 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 117611 | 6 | 0 | 35820 | 0 | pattern_not_symbol=14458 |
+| 2026-10-17 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 118872 | 6 | 0 | 36289 | 0 | pattern_not_symbol=15150 |
+| 2026-10-18 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 119278 | 6 | 0 | 35478 | 0 | pattern_not_symbol=15468 |
 ## 每日分析發現 (claudecat cort-audit)
+
+_2026-10-18_
+
+- deep 歸零進入第八天、不是新壞掉：deep/30d 連八天為零、deep/7d 自 09-18 連續為零，core/30d 持平六；該做：續當 adoption 指標追，不當品質事件辦。
+- pattern_not_symbol 續創新高但仍歸口徑效應、不推翻 09-11 裁決；該做：繼續觀察，不重開規則。
+- 可動作標籤仍從缺，不開新規則：context_flag 在全母體 census 仍零樣本；其餘 concrete_file_read 是精確度閘門、extension／target 三類是正確沉默、unparseable_command 是 parser 產品問題。
+- 剝皮規則觀察期繼續、不下結論：agent 實際命中維持二十筆、仍遠低於 5% 驗收線，codex／kimi 依然零命中；grok 假宣告七百餘筆，歸因一律用實測值。
+- no_shape shapes 覆蓋百分之百，但前五仍全是 Bash／Grep 的 envelope 鍵形狀、無語義形狀訊號——issue #3 的需求排序暫無新依據。
+- 數據品質全綠、上游無新事：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced、fresh、repair=none、真缺口為零（未 chunk 檔全是正確沉默）；errors／index_stale 為窗口計數；self-heal 有效樣本仍小不下定論；遠端無新 commit、本地與遠端同位 abe719cc；任務追蹤點 5f6d5267 已大幅落後本地，下次宜更新。
 
 _2026-09-28_
 
