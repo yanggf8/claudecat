@@ -33,3 +33,14 @@ but no complete paired run has yet been produced. Raw Claude Code and Codex tran
 prompts, tool results, and full source files are outside this structured uploader. Cost
 backfill sees only transcripts that still exist locally; a zero on an old day can mean the
 raw sessions expired. The local index DBs are derived caches and are not uploaded.
+
+2026-10-19, machine `44a8a38f0b05b9a8`: first end-to-end verification of this path.
+`claudecat telemetry sync` scanned 13,851 events (13,756 `cort_command`, 90 `cost_daily`,
+4 `claudecat_memory_recall`, 1 `claudecat_navigation`) and inserted 246; 13,605 were already
+present from uploads earlier the same night. A rerun inserted only the 9 events recorded in
+between, so dedup held for every one of the 13,851 previously scanned rows. Remote counts per
+source matched the local scan exactly. 13,716 of the 13,756 `cort` rows are schema-v1
+(`legacy_unknown`); 40 carry per-row stamps. 28 rows had no project alias, reported as
+`unmatched_project_rows` rather than silently dropped. Both user timers
+(`cort-cost-collect` 01:30 UTC, `claudecat-telemetry-sync` 01:45 UTC) are enabled on this
+machine.
