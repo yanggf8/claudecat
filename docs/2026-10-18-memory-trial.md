@@ -23,6 +23,21 @@ The local usage DB and paired eval report remain separate. A TursoDB organizatio
 new engine; an existing libSQL database is not a substitute. No cross-machine outcome measurement
 has yet been claimed from the storage change.
 
+The `yanggf8` organization enabled the Turso engine later on 2026-10-18. A `harnessuse` database
+was created with `--tursodb` and `turso db show` reported `Type: Turso`. The first live sync
+exposed a bootstrap bug: it created `project_memory` locally after the push, so the remote still
+had only Turso's internal tables. The sync command now creates the table before its push. This
+observation prompted the independent-replica check below.
+After the fix, a fresh `memory sync` returned success and `turso db shell harnessuse` listed
+`project_memory` on the remote. A reviewed claim (`README.md:51`, key `memory database`) was
+recorded. After a README correction, a second entry explicitly superseded the first, retaining
+both in the remote table. A fresh local data directory, configured with the same token, pulled
+only the active entry in recall and reported `sync_status: synced` and
+`evidence_status: source_unchanged`. This verifies the cloud path and supersession across
+independent local replicas on one machine; it does not yet measure behavior on a second physical
+machine or agent uptake.
+The remote also accepted `BEGIN CONCURRENT; SELECT COUNT(*) FROM project_memory; COMMIT;`.
+
 ## Trial contract
 
 - One project ledger lives at `.claudecat/memory.json`. Agents on either harness read the same

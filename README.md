@@ -48,11 +48,11 @@ claudecat scan --root /path/to/project
 
 `memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
 記憶現在存於 TursoDB，同一資料庫與 Git origin 的專案識別供 Claude Code、Codex 和其他機器共用。
-先建立 **TursoDB**（`turso db create claudecat-memory --tursodb`），取得 URL 與 token，於每台機器設定：
-CLI 回傳的 `libsql://` URL 只是連線格式；請確認資料庫類型是 TursoDB。
+先建立 **TursoDB**（本次使用 `turso db create --tursodb harnessuse`），取得 URL 與 token，於每台機器設定：
+`turso://` 或 `libsql://` 是連線 URL 前綴；資料庫類型以 `turso db show` 的 Type 判定。
 
 ```sh
-turso db tokens create claudecat-memory | claudecat memory configure --url "$(turso db show claudecat-memory --url)" --token-stdin
+turso db tokens create harnessuse | claudecat memory configure --url "$(turso db show harnessuse --url)" --token-stdin
 claudecat memory sync
 ```
 

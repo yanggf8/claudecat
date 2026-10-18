@@ -148,9 +148,7 @@ async fn open(config: &Config) -> Result<turso::sync::Database, String> {
 }
 
 async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLedger, String> {
-    conn.execute(CREATE_TABLE, ())
-        .await
-        .map_err(|e| e.to_string())?;
+    ensure_schema(conn).await?;
     let mut rows = conn
         .query(
             "SELECT body FROM project_memory WHERE project = ?",
@@ -185,6 +183,13 @@ async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLe
     }
     memory::validate(&ledger)?;
     Ok(ledger)
+}
+
+async fn ensure_schema(conn: &turso::Connection) -> Result<(), String> {
+    conn.execute(CREATE_TABLE, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn insert(
@@ -248,9 +253,10 @@ pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
         |config, project| {
             runtime()?.block_on(async {
                 let db = open(&config).await?;
+                let conn = db.connect().await.map_err(|e| e.to_string())?;
+                ensure_schema(&conn).await?;
                 let pushed = db.push().await.is_ok();
                 let pulled = db.pull().await.is_ok();
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
                 let ledger = read_ledger(&conn, &project).await?;
                 let present = !ledger.entries.is_empty();
                 let status = if pushed && pulled {
@@ -336,9 +342,10 @@ pub fn sync(root: &Path) -> Result<String, String> {
         |config, project| {
             runtime()?.block_on(async {
                 let db = open(&config).await?;
+                let conn = db.connect().await.map_err(|e| e.to_string())?;
+                ensure_schema(&conn).await?;
                 db.push().await.map_err(|e| e.to_string())?;
                 db.pull().await.map_err(|e| e.to_string())?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
                 let ledger = read_ledger(&conn, &project).await?;
                 Ok(format!(
                     "synced {} project memory entries",
