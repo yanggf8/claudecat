@@ -37,6 +37,7 @@ claudecat navigate "<要找什麼>"      # 從一句話給出目的地符號/檔
 claudecat navigate --cort "<要找什麼>"  # 優先吃 cort 全量索引（含反向依賴）
 claudecat usage --json             # 顯示本機導航統計（不含原始查詢）
 claudecat memory recall "deployment" --json  # 查有來源的專案記憶及來源新鮮度
+claudecat memory usage --json           # 本機記憶查詢狀態；非正確率
 claudecat cort-status --root <proj>   # cort 索引新鮮度 / chunks / relationships
 claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
 claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
@@ -64,6 +65,10 @@ claudecat memory record --key "deployment option" --claim "Option C is current" 
 語義驗證、跨 repo 個人偏好、或自動載入到代理上下文的 hook。
 JSON 輸出包含 `ledger_status`（`absent` / `present`）及 `hits`；缺少記憶檔不等於確認
 沒有相關決策。Git 只同步經審查、提交的記憶檔；各機器的導航地圖及統計資料仍是本機資料。
+`memory recall` 可加 `--harness claude-code|codex` 記自報來源；`memory usage --json` 只統計
+本機查詢、命中與來源狀態，不存查詢原文、主張或來源路徑。這些數字不能判定答案正確；
+`memory eval-report <eval.json> --json` 對有凍結答案依據與原始輸出雜湊的成對試驗計分，
+格式及評分限制見 [試驗紀錄](docs/2026-10-18-memory-trial.md)。沒有 Turso/libSQL 雲端同步。
 
 **迷你地圖（auto）**：專案 <300 LOC 時，讀全部比導航地圖便宜，`auto` 會自動改用
 15 行內的迷你地圖（About/Entry/Run/Build/Structure/Deps/Guardrails），避免負效益。

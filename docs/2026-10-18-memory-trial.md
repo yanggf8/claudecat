@@ -45,21 +45,49 @@ agents in each of two prompted states, not a recall-rate estimate or proof that 
 the ledger without an instruction. Codex's rollout showed the recall and source-read commands;
 Claude Code's returned answer named both the status and source content.
 
-## Can current collection validate the benefit?
+## Collection and its limits
 
-No. `claudecat usage.db` records navigation shape and hits, not `memory record`, `memory recall`,
-whether an agent read the cited line, or whether its answer was correct. On this machine,
-`claudecat usage --json` reported one navigation event in the last 30 days at the time of this
-note; that event is unrelated to memory. `cort` usage counts code-intelligence commands, so it
-cannot supply the missing memory denominator or grade answers. The paired probe above establishes
-that the workflow can work when explicitly requested; it cannot show spontaneous adoption or a
-benefit over reading the source directly.
+The original `claudecat usage.db` recorded only navigation shape and hits. On this machine,
+`claudecat usage --json` reported one navigation event in the last 30 days when the trial began;
+that event is unrelated to memory. The new `claudecat memory recall` logs one local row per CLI
+invocation: project ID, machine stamp and its source, declared harness, success/error, ledger
+state, hit counts by evidence state, and elapsed milliseconds. On Linux the machine stamp is a
+SHA-256 of `/etc/machine-id`; elsewhere it falls back to a hashed hostname, or `unknown` if
+neither exists. The stamp belongs to each row, so a copied database does not relabel old events;
+older unstamped rows remain `legacy_unknown`. `claudecat memory usage --json` reports these rows. No query,
+claim, source path or conversation text enters this table. `CLAUDECAT_NO_USAGE=1` disables it.
+The harness label is supplied by the caller and is not independently verified. An error in
+writing telemetry is visible on stderr while recall still answers. Existing sessions before this
+change cannot be reconstructed from the new table.
+
+These rows show exposure and source freshness. They do not count questions that should have used
+memory but never called it, prove that an agent read the source, or grade its answer. `cort` usage
+counts code-intelligence commands and cannot fill those gaps. There is no Turso/libSQL service;
+project memory moves between machines through reviewed Git commits, while usage data stays local.
+
+`claudecat memory eval-report <eval.json> --json` adds a second, explicit evidence path. It reads
+schema 1 JSON with a `rubric_id`, frozen `cases`, and one `memory_on` and one `memory_off` trial per
+`pair_id`. Every case points to a retained answer-key artifact and SHA-256; every trial points to
+its agent-output artifact and SHA-256. The report refuses changed artifacts, duplicate arms,
+missing cases, duplicate sessions, or a pair whose task, scenario, machine, harness, model,
+prompt fingerprint, source snapshot or tool policy differs. It lists
+incomplete pairs and excludes them from outcome totals. Scores remain reviewer judgments; the
+hashes make the evidence inspectable, not the judgment automatically correct.
+
+Each case has `task_id`, `scenario`, `answer_key_artifact`, and `answer_key_sha256`. Each trial has
+`pair_id`, `task_id`, `scenario`, `harness`, `model`, `machine_id`, `machine_source`, `session_id`,
+`prompt_sha256`, `source_snapshot` (excluding the ledger), `tool_policy_id`, `condition`,
+`artifact`, `artifact_sha256`, five Boolean review fields (`lookup_observed`,
+`source_read_observed`, `answer_correct`, `citation_correct`, `uncertainty_correct`), and optional
+`input_tokens`, `output_tokens`, `elapsed_ms`. Artifact paths are relative to the eval JSON file.
+Keep raw transcripts in a private local dataset unless they have been reviewed for publication.
 
 The next evidence gate is a frozen, reviewed task set with past decisions, corrected decisions,
-stale sources, and a false pasted agent report. Run each task with and without the shared ledger
-in fresh Claude Code and Codex sessions using the same prompt, repo state, model settings, and
-tool permissions. Grade (1) whether a memory lookup happened, (2) whether the cited source was
-read, (3) answer correctness, and (4) whether uncertainty was disclosed when evidence was stale
-or absent. Record harness, model, machine, task ID, token use and elapsed time separately. Report
-the eligible-task denominator and paired differences; a count of successful recalls alone would
-only measure availability, not improvement.
+stale sources, and a false pasted agent report. Freeze the answer key and rubric before running
+either arm. For each task, use the same prompt, source snapshot, model settings and tool
+permissions in fresh Claude Code and Codex sessions; vary only whether the shared ledger is
+available. Preserve full outputs, then score both arms against the same answer key. Report the
+eligible-task denominator, complete pairs, improvements, regressions, source checks, and token
+cost separately by machine, harness, model and scenario. Record whether other agent memory was
+present, since it could contaminate the no-ledger arm. A successful recall count alone is not
+evidence of improved correctness, and the two prompted states above are not a controlled trial.

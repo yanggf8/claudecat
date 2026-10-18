@@ -27,6 +27,10 @@ EOF
 ## Project memory trial
 
 For a past project decision, use `claudecat memory recall "<query>" --json` from the target repo.
+Pass `--harness claude-code` or `--harness codex` when known; this is a declared label, not
+verified harness identity. `claudecat memory usage --json` counts local recall states only, not
+eligible questions or correct answers. A paired, reviewer-scored report uses
+`claudecat memory eval-report <eval.json> --json`.
 The file `.claudecat/memory.json` is explicitly curated and Git tracked, not automatically
 extracted from conversations. Treat `source_unchanged` as a byte-fingerprint check only; open the
 cited `source:source_line` before relying on the claim. Treat `source_changed`, `source_missing`,

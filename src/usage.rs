@@ -1,8 +1,9 @@
-//! Local-only navigation telemetry.
-//! Raw queries are deliberately never stored; the data exists to improve routing and ranking.
+//! Local-only navigation and memory recall telemetry.
+//! Raw queries are deliberately never stored; recall counts are exposure, not correctness.
 use crate::data_dir;
+use crate::memory::MemoryRecall;
 use crate::navigate::NavigateResult;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -18,6 +19,26 @@ pub struct UsageReport {
     pub document_hit_events: i64,
     pub no_hit_events: i64,
     pub top_documents: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MemoryUsageReport {
+    pub window_days: u32,
+    pub recall_calls: i64,
+    pub errors: i64,
+    pub absent_ledgers: i64,
+    pub no_match_calls: i64,
+    pub unchanged_hits: i64,
+    pub changed_hits: i64,
+    pub missing_hits: i64,
+    pub conflict_hits: i64,
+    pub total_recall_elapsed_ms: i64,
+    pub max_recall_elapsed_ms: i64,
+    /// The caller supplies this label. It is not independently verified from a harness payload.
+    pub by_harness_declared: BTreeMap<String, i64>,
+    /// Machine labels are stored per event, so copying a database cannot silently relabel rows.
+    pub by_machine: BTreeMap<String, i64>,
+    pub by_project_id: BTreeMap<String, i64>,
 }
 
 fn now_ms() -> i64 {
@@ -54,9 +75,205 @@ fn open() -> rusqlite::Result<Connection> {
             primary_heading TEXT
         );
         CREATE INDEX IF NOT EXISTS navigation_log_ts ON navigation_log(ts);
-        CREATE INDEX IF NOT EXISTS navigation_log_document ON navigation_log(primary_document);",
+        CREATE INDEX IF NOT EXISTS navigation_log_document ON navigation_log(primary_document);
+        CREATE TABLE IF NOT EXISTS memory_recall_log (
+            ts INTEGER NOT NULL,
+            project_id TEXT NOT NULL,
+            machine_id TEXT NOT NULL,
+            machine_source TEXT NOT NULL,
+            harness_declared TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            ledger_status TEXT NOT NULL,
+            hit_count INTEGER NOT NULL,
+            unchanged_hits INTEGER NOT NULL,
+            changed_hits INTEGER NOT NULL,
+            missing_hits INTEGER NOT NULL,
+            conflict_hits INTEGER NOT NULL,
+            elapsed_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS memory_recall_log_ts ON memory_recall_log(ts);",
     )?;
     Ok(conn)
+}
+
+fn machine_stamp() -> (String, &'static str) {
+    if let Ok(raw) = std::fs::read_to_string("/etc/machine-id") {
+        let id = raw.trim();
+        if !id.is_empty() {
+            return (query_hash(id), "etc-machine-id-sha256");
+        }
+    }
+    if let Some(host) = crate::doctor::resolve_host() {
+        return (query_hash(&host), "hostname-sha256");
+    }
+    ("unknown".into(), "unavailable")
+}
+
+fn ensure_memory_machine_columns(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (column, ddl) in [
+        (
+            "machine_id",
+            "ALTER TABLE memory_recall_log ADD COLUMN machine_id TEXT NOT NULL DEFAULT 'legacy_unknown'",
+        ),
+        (
+            "machine_source",
+            "ALTER TABLE memory_recall_log ADD COLUMN machine_source TEXT NOT NULL DEFAULT 'legacy_no_stamp'",
+        ),
+    ] {
+        let present = tx
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('memory_recall_log') WHERE name = ?1 LIMIT 1",
+                [column],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !present {
+            tx.execute(ddl, [])?;
+        }
+    }
+    tx.commit()
+}
+
+/// Record the shape of one CLI recall. No query, claim, source, or session text is stored.
+/// This is an exposure count, never a correctness grade or an eligible-question denominator.
+pub fn record_memory_recall(
+    root: &Path,
+    harness_declared: &str,
+    result: Option<&MemoryRecall>,
+    elapsed_ms: u64,
+) -> Result<(), String> {
+    if std::env::var_os("CLAUDECAT_NO_USAGE").is_some() {
+        return Ok(());
+    }
+    let mut conn = open().map_err(|e| e.to_string())?;
+    ensure_memory_machine_columns(&mut conn).map_err(|e| e.to_string())?;
+    let mut counts = [0_i64; 4];
+    if let Some(result) = result {
+        for hit in &result.hits {
+            match hit.evidence_status.as_str() {
+                "source_unchanged" => counts[0] += 1,
+                "source_changed" => counts[1] += 1,
+                "source_missing" => counts[2] += 1,
+                "conflict" => counts[3] += 1,
+                _ => return Err("unknown memory evidence status".into()),
+            }
+        }
+    }
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let (machine_id, machine_source) = machine_stamp();
+    conn.execute(
+        "INSERT INTO memory_recall_log
+         (ts, project_id, machine_id, machine_source, harness_declared, outcome, ledger_status, hit_count,
+          unchanged_hits, changed_hits, missing_hits, conflict_hits, elapsed_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            now_ms(),
+            crate::cort::project_id(&real_root.to_string_lossy()),
+            machine_id,
+            machine_source,
+            harness_declared,
+            if result.is_some() { "ok" } else { "error" },
+            result.map_or("unknown", |r| r.ledger_status.as_str()),
+            result.map_or(0, |r| r.hits.len() as i64),
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            elapsed_ms.min(i64::MAX as u64) as i64,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn memory_report(days: u32) -> Result<MemoryUsageReport, String> {
+    let mut conn = open().map_err(|e| e.to_string())?;
+    ensure_memory_machine_columns(&mut conn).map_err(|e| e.to_string())?;
+    let since = now_ms().saturating_sub(days as i64 * 24 * 60 * 60 * 1000);
+    let mut out = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(outcome = 'error'), 0),
+                    COALESCE(SUM(ledger_status = 'absent'), 0),
+                    COALESCE(SUM(ledger_status = 'present' AND hit_count = 0), 0),
+                    COALESCE(SUM(unchanged_hits), 0),
+                    COALESCE(SUM(changed_hits), 0),
+                    COALESCE(SUM(missing_hits), 0),
+                    COALESCE(SUM(conflict_hits), 0),
+                    COALESCE(SUM(elapsed_ms), 0),
+                    COALESCE(MAX(elapsed_ms), 0)
+             FROM memory_recall_log WHERE ts >= ?1",
+            [since],
+            |row| {
+                Ok(MemoryUsageReport {
+                    window_days: days,
+                    recall_calls: row.get(0)?,
+                    errors: row.get(1)?,
+                    absent_ledgers: row.get(2)?,
+                    no_match_calls: row.get(3)?,
+                    unchanged_hits: row.get(4)?,
+                    changed_hits: row.get(5)?,
+                    missing_hits: row.get(6)?,
+                    conflict_hits: row.get(7)?,
+                    total_recall_elapsed_ms: row.get(8)?,
+                    max_recall_elapsed_ms: row.get(9)?,
+                    ..Default::default()
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT harness_declared, COUNT(*) FROM memory_recall_log WHERE ts >= ?1
+             GROUP BY harness_declared ORDER BY harness_declared",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([since], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (harness, count) = row.map_err(|e| e.to_string())?;
+        out.by_harness_declared.insert(harness, count);
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT machine_source, machine_id, COUNT(*) FROM memory_recall_log WHERE ts >= ?1
+             GROUP BY machine_source, machine_id ORDER BY machine_source, machine_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([since], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (source, id, count) = row.map_err(|e| e.to_string())?;
+        out.by_machine.insert(format!("{source}:{id}"), count);
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_id, COUNT(*) FROM memory_recall_log WHERE ts >= ?1
+             GROUP BY project_id ORDER BY project_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([since], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (project, count) = row.map_err(|e| e.to_string())?;
+        out.by_project_id.insert(project, count);
+    }
+    Ok(out)
 }
 
 fn query_shape(query: &str) -> &'static str {

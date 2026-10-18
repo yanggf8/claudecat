@@ -8,6 +8,7 @@ use claudecat::guardrails;
 use claudecat::manifest;
 use claudecat::markdown;
 use claudecat::memory;
+use claudecat::memory_eval;
 use claudecat::model::{self, MapProfile};
 use claudecat::navigate;
 use claudecat::outline;
@@ -18,7 +19,7 @@ use claudecat::walk;
 use clap::{Parser, Subcommand, ValueEnum};
 use model::ProjectMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(
@@ -188,9 +189,48 @@ enum MemoryAction {
         query: String,
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// 自報的代理名稱；不是 hook 驗證的身分
+        #[arg(long, value_enum, default_value = "unknown")]
+        harness: MemoryHarnessArg,
         #[arg(long)]
         json: bool,
     },
+    /// 本機查詢事件統計，不含查詢內容，也不代表答案正確
+    Usage {
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 統計人工評分的成對試驗，檢查每筆原始輸出的 SHA-256
+    EvalReport {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum MemoryHarnessArg {
+    Unknown,
+    ClaudeCode,
+    Codex,
+    Kimi,
+    Grok,
+    Other,
+}
+
+impl MemoryHarnessArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Kimi => "kimi",
+            Self::Grok => "grok",
+            Self::Other => "other",
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -563,33 +603,116 @@ fn main() {
                     std::process::exit(1);
                 }
             },
-            MemoryAction::Recall { query, root, json } => match memory::recall(&root, &query) {
-                Ok(result) if json => match serde_json::to_string_pretty(&result) {
+            MemoryAction::Recall {
+                query,
+                root,
+                harness,
+                json,
+            } => {
+                let started = Instant::now();
+                let result = memory::recall(&root, &query);
+                if let Err(e) = usage::record_memory_recall(
+                    &root,
+                    harness.as_str(),
+                    result.as_ref().ok(),
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                ) {
+                    eprintln!("memory telemetry unavailable: {e}");
+                }
+                match result {
+                    Ok(result) if json => match serde_json::to_string_pretty(&result) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("memory JSON: {e}");
+                            std::process::exit(1);
+                        }
+                    },
+                    Ok(result) => {
+                        if result.ledger_status == "absent" {
+                            println!("memory ledger absent");
+                        } else if result.hits.is_empty() {
+                            println!("no project memory match in present ledger");
+                        }
+                        for hit in result.hits {
+                            println!(
+                                "{} [{}] {}",
+                                hit.entry.key, hit.evidence_status, hit.entry.claim
+                            );
+                            println!(
+                                "  id={} source={}:{}",
+                                hit.entry.id, hit.entry.source, hit.entry.source_line
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("memory recall: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            MemoryAction::Usage { days, json } => match usage::memory_report(days) {
+                Ok(report) if json => match serde_json::to_string_pretty(&report) {
                     Ok(s) => println!("{s}"),
                     Err(e) => {
-                        eprintln!("memory JSON: {e}");
+                        eprintln!("memory usage JSON: {e}");
                         std::process::exit(1);
                     }
                 },
-                Ok(result) => {
-                    if result.ledger_status == "absent" {
-                        println!("memory ledger absent");
-                    } else if result.hits.is_empty() {
-                        println!("no project memory match in present ledger");
+                Ok(report) => {
+                    println!("memory recall usage ({}d)", report.window_days);
+                    println!(
+                        "calls={} errors={} absent={} no_match={} unchanged_hits={} changed_hits={} missing_hits={} conflict_hits={}",
+                        report.recall_calls, report.errors, report.absent_ledgers,
+                        report.no_match_calls, report.unchanged_hits, report.changed_hits,
+                        report.missing_hits, report.conflict_hits
+                    );
+                    for (harness, count) in report.by_harness_declared {
+                        println!("harness_declared={harness} calls={count}");
                     }
-                    for hit in result.hits {
-                        println!(
-                            "{} [{}] {}",
-                            hit.entry.key, hit.evidence_status, hit.entry.claim
-                        );
-                        println!(
-                            "  id={} source={}:{}",
-                            hit.entry.id, hit.entry.source, hit.entry.source_line
-                        );
+                    for (machine, count) in report.by_machine {
+                        println!("machine={machine} calls={count}");
                     }
+                    for (project, count) in report.by_project_id {
+                        println!("project_id={project} calls={count}");
+                    }
+                    println!(
+                        "recall_elapsed_ms total={} max={}",
+                        report.total_recall_elapsed_ms, report.max_recall_elapsed_ms
+                    );
                 }
                 Err(e) => {
-                    eprintln!("memory recall: {e}");
+                    eprintln!("memory usage: {e}");
+                    std::process::exit(1);
+                }
+            },
+            MemoryAction::EvalReport { file, json } => match memory_eval::report(&file) {
+                Ok(report) if json => match serde_json::to_string_pretty(&report) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("memory eval-report JSON: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok(report) => {
+                    println!(
+                        "paired memory eval: trials={} complete_pairs={} incomplete_pairs={}",
+                        report.total_trials,
+                        report.complete_pairs,
+                        report.incomplete_pairs.len()
+                    );
+                    println!(
+                        "correct: on={} off={} improved={} regressed={} both_correct={} both_wrong={}",
+                        report.overall.memory_on_correct,
+                        report.overall.memory_off_correct,
+                        report.overall.improved,
+                        report.overall.regressed,
+                        report.overall.both_correct,
+                        report.overall.both_wrong
+                    );
+                    println!("{}", report.reading);
+                }
+                Err(e) => {
+                    eprintln!("memory eval-report: {e}");
                     std::process::exit(1);
                 }
             },
