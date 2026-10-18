@@ -31,37 +31,17 @@
 | 2026-09-25 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 63316 | 552 | 12 | 22225 | 0 | pattern_not_symbol=2375 |
 | 2026-09-26 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 64411 | 552 | 12 | 19958 | 0 | pattern_not_symbol=2401 |
 | 2026-09-27 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 65040 | 552 | 12 | 16363 | 0 | pattern_not_symbol=2404 |
+| 2026-09-28 | `/home/yanggf/a/claudecat` | i51149R3050 | STALE | 686 | 451 | 5 | 0 | synced | 10092 | 23 | 2 | 5025 | 0 | pattern_not_symbol=679 |
 ## 每日分析發現 (claudecat cort-audit)
 
-_2026-09-26_
+_2026-09-28_
 
-- deep/30d 持平在 12，但 deep/7d 連九天掛零（09-18 起）；30 天窗口內的新用量是零，舊量全落在窗口外半部，再無 deep 使用的話 30d 指標隨滾動掉只是時間問題，adoption 繼續盯。
-- 可動作標籤今日仍從缺，不開新規則：pattern_not_symbol 已裁決、剝皮規則觀察中不重開；concrete_file_read 是精確度閘門、unindexed_extension 是正確沉默；唯一候選 context_flag 仍 7 筆（<10，誠實等樣本）。
-- kimi 命中率停在約 0.98%（與昨日相同、無上移），剝皮規則觀察期繼續、不下結論；其餘 harness 皆低於 1%（unspecified 高命中是手動探針，不計）；grok 宣告值與實測不符仍在千筆量級，歸因繼續用實測值。
-- top no_shape shapes 覆蓋約兩成六，全是 Bash／Grep 的 envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
-- 數據品質全綠：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced、fresh；真缺口為零（未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 採樣仍零樣本、legacy 屬舊列預期。
-- 上游 origin/master 仍超前同一個 commit（425f5a5d：空索引 heal 邊界具名化），今日無新提交、無 decline／shape 口徑變動，下次方便時 pull 即可。
+_2026-09-28 — i51149R3050_
 
-_2026-09-22_
-
-- deep/30d 持平在 12，但 deep/7d 連五天掛零（09-18 起），30 天的量全落在窗口外半部；再無 deep 使用的話，30d 指標會隨滾動窗口開始掉，adoption 面是未來幾天要盯的數字。
-- 可動作標籤今日仍從缺，不開新規則：pattern_not_symbol 已裁決、剝皮規則觀察中不重開；concrete_file_read 是精確度閘門、unindexed_extension 是正確沉默、unparseable_command 是 parser 產品問題；唯一候選 context_flag 僅 7 筆（<10），誠實等樣本。
-- kimi 命中率約 0.98%（分子不動、分母膨脹），剝皮規則觀察期繼續、不下結論；其餘 harness 皆低於 1%（unspecified 高命中是手動探針，不計）；grok 宣告值與實測千筆不符，歸因仍不可信。
-- top no_shape shapes 覆蓋約兩成，全是 Bash／Grep 的 envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
-- 數據品質全綠：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced 且 fresh，repair=none 是自養預期不是無 staleness；真缺口為零（未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 採樣仍零樣本，legacy 屬舊列預期、不是零自癒。
-- 上游 origin/master 超前本地十個 commit（upgrade／install／deps 與 gate-audit／codegraph 文檔），無 hook 規則變動、口徑不變，下次方便時 pull 即可。
-
-_2026-09-21 — i51149R3050_
-
-- deep/30d=2 持平、deep7 連續歸零：過去 7 天零 context／recall 深水區使用，30 天內的 2 次深挖全落在 7 天窗口外；adoption 缺口延續，該做是維持 navigate 當 front door，下週再看 deep7 是否回升（各機 DB 獨立，不可拿 NUC11i5 的 12 來比；30 天滾動窗口會自然吞掉舊深挖）。
-- 不開新規則：pattern_not_symbol=300 已裁決、剝皮規則觀察期中（不重開）；unparseable_command=39 是 parser 產品問題、concrete_file_read=20 開火只會是精確度噪音（probe 樣本多為 concrete file+bare symbol 伴隨查詢）、unindexed_extension／non_source_target 各 8 屬正確沉默；context_flag=2（<10），誠實等樣本。
-- hook-suggest 命中 5/2567（<1%）；top no_shape shapes 覆蓋 32.9% 但仍全是 Bash／Grep envelope 鍵形狀、無語義形狀訊號——issue #3 的需求排序暫無新依據；grok 17 筆、codex 3 筆 harness_declared 與實測不符，歸因改用實測值。
-- 數據品質全綠：兩 hook census 加總＝fires、無 unknown/ 桶、FTS synced、fresh、repair=none（查詢自癒常態下 repair=none 更常見，不得誤讀為無 staleness）、真缺口 0（5 未 chunk 檔全是 chunk_count=0 的正確沉默）；self-heal 仍零真實樣本（scanned=14 全是 legacy 舊列，屬預期）。
-- 上游已同步到 e4e97bc6（HEAD..origin/master 無落後，自 09-19 起無新 commit）；跨機列不可互比（本機 hostname 即 i51149R3050）。
-
-_2026-09-18 — MacBook-Pro.local_
-
-- 本機（Mac，第四台）首次入表：fresh、686 chunks / 451 relationships、真缺口 0、FTS synced；30d 命令 3503、deep 1——深挖歸零與 Thinkpade15 首列同構，adoption 缺口在 Mac 上同樣鮮明。
-- audit 列的 host 探測（cort.rs `host_name`）是 doctor 那個 `/etc/hostname` bug 的第二份拷貝：本機第一跑寫出 `unknown | no-index` 列。已修——刪拷貝、改呼叫 `doctor::resolve_host` 單一家（2026-09-18 修 doctor 時沒對 `resolve_host` 跑 impact，漏了這個呼叫點；「還有誰在用」正是該跑 caller-set 的場景）。
-- 同步跟上 d3f9ac9（+643：markdown sidecar、usage 指標、v2 skill 進 repo）：重裝 binary 後 `usage` 子命令才出現——版號凍在 2.1.0 不動，判斷新舊要比對子命令面而非版號；skill symlink 補上 `~/.claude/skills/claudecat`。
-- codex 558 筆 harness_declared 不符、claude-code 命中率 0.11%（1/916）——與 NUC11i5／Thinkpade15 同構；本機 fires 樣本尚小（1,585），只記不裁決。本機 `findings_update` 的「整段取代、只留最新一天」契約會蓋掉他機同日區塊，故本列採手動附加、保留他機內容。
+- deep/30d 持平在 2、deep/7d 連三週掛零（本機自 09-07 起）：30 天內僅 1 次 context＋1 次 recall，舊深挖全落在 7 天窗口外；再無深挖，30d 的 2 也會被滾動窗口吞掉，adoption 繼續盯（各機 DB 獨立，不可與 NUC11i5 的 12 互比）。
+- 可動作標籤今日仍從缺，不開新規則：pattern_not_symbol=679 已裁決、剝皮規則觀察中不重開；concrete_file_read=52 是精確度閘門、unparseable_command=40 是 parser 產品問題、unindexed_extension／non_source_target／target_not_source 皆正確沉默；唯一候選 context_flag 僅 2 筆（<10），誠實等樣本。
+- 整體命中 10/4837（<1%）：kimi 約 0.91%（2/220，無上移）、claude-code 0.14%、codex 0.19%，剝皮規則觀察期繼續、不下結論；grok 6.25% 是 16 筆小樣本、不裁決；codex 3 筆、grok 17 筆 harness_declared 與實測不符，歸因繼續用實測值。
+- top no_shape shapes 覆蓋 53.2%（772/1452，shape 寫入後的口徑改善），但全是 Bash／Grep envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
+- 數據品質：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced、真缺口為 0（5 未 chunk 檔全是 chunk_count=0 的正確沉默）；audit 當下 fresh=STALE 的根因是 09-27 的 audit 文件 commits、index 停在 09-24，報告時已自行回落（hook-refresh 修復，git_head 相符、changed_files 為空）——符合預期的自癒行為，非部署問題；errors=11／stale queries=12 屬同源殘留，下次複查是否歸零；self-heal 採樣仍零新樣本（scanned=20 全 legacy，屬舊列預期、不是零自癒）。
+- track 順手刪掉了 09-27 的口徑註記（header 重寫副作用），已手動恢復：跨 09-27（hook 靜默化＋parser 放行）前後的絕對數不可直接比，本機 09-21→09-28 的增量同理。
+- 上游已同步到 d0ffe7fd（2026-09-27，含靜默化與 parser 放行），fetch 後 HEAD..origin/master 無落後、無新提交，無 decline／shape 口徑變動。
