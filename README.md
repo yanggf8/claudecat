@@ -37,7 +37,9 @@ claudecat navigate "<要找什麼>"      # 從一句話給出目的地符號/檔
 claudecat navigate --cort "<要找什麼>"  # 優先吃 cort 全量索引（含反向依賴）
 claudecat usage --json             # 顯示本機導航統計（不含原始查詢）
 claudecat memory recall "deployment" --json  # 查有來源的專案記憶及來源新鮮度
+claudecat memory status --json         # 專案識別碼、同步狀態、有效記憶與衝突
 claudecat memory usage --json           # 本機記憶查詢狀態；非正確率
+claudecat telemetry sync --json         # 將本機結構化收集事件同步到共用 TursoDB
 claudecat cort-status --root <proj>   # cort 索引新鮮度 / chunks / relationships
 claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
 claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
@@ -64,12 +66,18 @@ token 只從 stdin 讀取，保存在本機 `~/.local/share/claudecat/turso-memo
 ```bash
 claudecat memory record --key "deployment option" --claim "Option B is current" \
   --source docs/decision.md --line 2
+claudecat memory status --json
 claudecat memory recall "deployment option" --json
 claudecat memory record --key "deployment option" --claim "Option C is current" \
   --source docs/decision.md --line 2 --supersedes <舊紀錄的 id>
+# 同一 key 有兩筆以上有效紀錄時，列出所有 ID，再以新主張明確收斂：
+claudecat memory resolve --key "deployment option" --claim "Reviewed choice" \
+  --source docs/decision.md --line 2 --supersedes <ID1> --supersedes <ID2>
 ```
 
-記錄保留來源路徑、行號與整檔 SHA-256。`recall` 的 `source_unchanged` 只表示來源位元組
+上傳前要求來源檔已追蹤且提交。記錄保留來源路徑、行號、整檔與來源行 SHA-256。
+`source_line_status: same_line` 只協助定位變動，不能把 `source_changed` 改判為可信。
+`recall` 的 `source_unchanged` 只表示來源位元組
 與記錄時相同，**不證明主張確實由該行支持**；`source_changed`、`source_missing`、
 `conflict` 都不得當成現行事實。同 key 的更正必須明確指出舊 id，舊紀錄保留作審計。
 格式損毀時查詢報錯，不回傳看似完整的空集合。這是來源與更新契約的第一輪，還沒有
@@ -82,6 +90,39 @@ JSON 輸出包含 `ledger_status`（`absent` / `present`）、`sync_status` 及 
 本機查詢、命中、來源與同步狀態，不存查詢原文、主張或來源路徑。這些數字不能判定答案正確；
 `memory eval-report <eval.json> --json` 對有凍結答案依據與原始輸出雜湊的成對試驗計分，
 格式及評分限制見 [試驗紀錄](docs/2026-10-18-memory-trial.md)。
+
+## 共用資料庫的結構化資料收集
+
+`cort` 的 hook 依目前程式預設只把判定寫入本機 `usage.db`，不對 Claude Code、Codex
+或 Kimi 輸出建議；`PostToolUse` 仍可修復既有索引。ClaudeCat 的導航和記憶查詢也先
+寫入本機 SQLite。網路同步由獨立的 Rust 指令執行，避免每次 hook 等待 TursoDB：
+
+```sh
+claudecat telemetry sync --json
+```
+
+這個指令逐筆上傳 `cort.command_log`、ClaudeCat 的 `navigation_log` 與
+`memory_recall_log`，以及 `cort-evals cost-collect` 產生的每日 JSON。上傳內容保留
+本機原欄位、機器標記、專案標記；重跑以事件 ID 去重。缺少來源會在回報的
+`missing_sources` 指出。`telemetry_project_aliases` 把本機路徑專案 ID 映到 Git-origin
+共享 ID；無法映射的事件數由 `unmatched_project_rows` 明列，不應跨機合併。
+舊導航列沒有逐列機器標記，會明列 `legacy_unknown`；新列
+才記錄機器 ID。`cort` schema-v2 新列也逐筆記錄機器 ID；schema-v1 舊列只有整個
+DB 的機器戳，搬過 DB 後無法可靠拆分逐列來源。同步回報以 `legacy_cort_rows` 明列
+這個風險，分析時仍須檢查混機狀態。這條路徑收集的是現有結構化紀錄與每日彙總，
+不是原始對話逐字稿。Turso 同步副本會拉取整個資料庫，因此要觀察容量與首次同步時間。
+記憶查詢與遙測上傳各用自己的本機同步副本及檔案鎖，雲端仍是同一個
+`harnessuse`；長時間的遙測上傳不會佔住記憶查詢的本機鎖。
+專案別名取同步當下的 Git origin；若 repo 改過 origin，它不能證明舊事件當時屬於
+同一遠端。`by_source`、`unattributed_machine_rows`、`unmatched_project_rows` 與
+`missing_sources` 是每次同步的資料品質檢查，不能把未歸屬的列合併分析。
+
+每日收集可以用 `systemd/claudecat-telemetry-sync.{service,timer}`。先安裝此 Rust
+binary，再把兩個 unit 放到 `~/.config/systemd/user/`，執行
+`systemctl --user daemon-reload` 和
+`systemctl --user enable --now claudecat-telemetry-sync.timer`。此 timer 每日
+01:45 UTC 執行；與 `cortexyoung/evals/systemd/cort-cost-collect.timer` 的 01:30 UTC
+錯開。每台機器都需設定自己的 Turso token 並安裝兩個 timer，才會有該機的完整後續資料。
 
 **迷你地圖（auto）**：專案 <300 LOC 時，讀全部比導航地圖便宜，`auto` 會自動改用
 15 行內的迷你地圖（About/Entry/Run/Build/Structure/Deps/Guardrails），避免負效益。

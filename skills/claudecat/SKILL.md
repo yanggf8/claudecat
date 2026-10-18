@@ -15,6 +15,8 @@ claudecat explore --json        # 量化探索成本：無地圖 vs 地圖的 to
 claudecat navigate "auth"       # 從一句話找目的地符號/檔案；--cort 優先用 cort 全量索引（需先 cort index）
 claudecat usage --json           # 查看本機導航命中統計（不含原始查詢）
 claudecat memory recall "<過去決策>" --json # 讀取有來源的專案記憶
+claudecat memory status --json       # 目前專案識別碼、同步狀態和衝突
+claudecat telemetry sync --json      # 上傳現有結構化收集事件
 claudecat update --dry-run      # 更新 claudecat 自動區塊；--dry-run 只顯示差異
 claudecat cort-status           # cort 索引狀態：新鮮度、chunk、relationships
 claudecat doctor                # 體檢追蹤循環；--install 一鍵部署 crontab（冪等）
@@ -41,6 +43,11 @@ and `conflict` as unresolved. `ledger_status: absent` means no shared ledger exi
 `claudecat memory record --key K --claim C --source RELATIVE_FILE --line N`; replacing one
 requires `--supersedes OLD_ID`. Review the cited source line
 before relying on it. Do not copy an unverified pasted agent report into memory.
+Cloud records require a tracked, committed source file. If `memory status --json` lists a
+conflict, use `memory resolve --key K --claim C --source RELATIVE_FILE --line N` with one
+`--supersedes ID` for every active ID under that key. A resolution creates a reviewed new
+entry and keeps the old entries for audit. `source_line_status: same_line` helps locate an
+edit, but `source_changed` still requires reviewing the full source context.
 
 ## Where output goes
 
@@ -56,6 +63,10 @@ before relying on it. Do not copy an unverified pasted agent report into memory.
 ## Deployment boundaries
 
 - Local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Project memory uses TursoDB; configure each machine with `memory configure`, then `memory sync`.
+- Structured cort and ClaudeCat usage rows and daily cost reports are copied to the same
+  TursoDB by `claudecat telemetry sync`; hooks still write locally first. The upload keeps
+  every source row and its available machine attribution. Old navigation rows are explicitly
+  `legacy_unknown`. Raw conversation transcripts are outside this command's scope.
 - No MCP server — never re-register one; the CLI is the only interface.
 - No `npm install -g claudecat` — install with `cargo install --path <repo>` from the Rust checkout; `~/.local/bin/claudecat` typically symlinks to the repo's `target/release/claudecat`.
 

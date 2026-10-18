@@ -9,6 +9,40 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+const CREATE_TELEMETRY: &str = "CREATE TABLE IF NOT EXISTS telemetry_events (source TEXT NOT NULL, event_id TEXT NOT NULL, machine_id TEXT NOT NULL, machine_source TEXT NOT NULL, project_id TEXT, time_ms INTEGER, payload TEXT NOT NULL, PRIMARY KEY (source, event_id))";
+const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS telemetry_project_aliases (machine_id TEXT NOT NULL, local_project_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, PRIMARY KEY (machine_id, local_project_id, shared_project_id))";
+
+#[derive(Debug, Serialize)]
+pub struct TelemetrySyncReport {
+    pub scanned: usize,
+    pub inserted: usize,
+    pub already_present: usize,
+    pub by_source: std::collections::BTreeMap<String, usize>,
+    pub unattributed_machine_rows: usize,
+    pub legacy_cort_rows: usize,
+    pub project_aliases: usize,
+    pub unresolved_project_ids: Vec<String>,
+    pub unmatched_project_rows: usize,
+    pub missing_sources: Vec<String>,
+    pub sync_status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryConflict {
+    pub key: String,
+    pub active_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryStatus {
+    pub project_id: String,
+    pub project_id_source: &'static str,
+    pub database_url: String,
+    pub sync_status: &'static str,
+    pub total_entries: usize,
+    pub active_entries: usize,
+    pub conflicts: Vec<MemoryConflict>,
+}
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -83,12 +117,18 @@ fn config() -> Result<Config, String> {
     serde_json::from_str(&body).map_err(|e| format!("invalid Turso memory config: {e}"))
 }
 
-fn project(root: &Path) -> Result<String, String> {
+pub(crate) fn project(root: &Path) -> Result<String, String> {
     if let Ok(value) = std::env::var("CLAUDECAT_MEMORY_PROJECT") {
         if !value.trim().is_empty() {
             return Ok(digest(value.trim()));
         }
     }
+    project_from_git_origin(root)
+}
+
+/// Resolve an indexed project's identity from its own origin, ignoring the process-wide
+/// override that applies only to the current memory command's chosen project.
+pub(crate) fn project_from_git_origin(root: &Path) -> Result<String, String> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(root)
@@ -103,6 +143,14 @@ fn project(root: &Path) -> Result<String, String> {
         return Err("empty origin remote".into());
     }
     Ok(digest(&normalize_remote(remote)))
+}
+
+fn project_source() -> &'static str {
+    if std::env::var("CLAUDECAT_MEMORY_PROJECT").is_ok_and(|v| !v.trim().is_empty()) {
+        "explicit"
+    } else {
+        "git_origin"
+    }
 }
 
 fn normalize_remote(remote: &str) -> String {
@@ -121,6 +169,28 @@ fn normalize_remote(remote: &str) -> String {
     normalized.to_lowercase()
 }
 
+fn require_committed_source(root: &Path, source: &Path) -> Result<(), String> {
+    let tracked = Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(source)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cannot check source in Git: {e}"))?;
+    if !tracked.status.success() {
+        return Err("cloud memory source must be a tracked, committed file".into());
+    }
+    let clean = Command::new("git")
+        .args(["diff", "--quiet", "HEAD", "--"])
+        .arg(source)
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("cannot compare source with HEAD: {e}"))?;
+    if !clean.success() {
+        return Err("cloud memory source has uncommitted changes; commit it first".into());
+    }
+    Ok(())
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -129,6 +199,14 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 }
 
 async fn open(config: &Config) -> Result<turso::sync::Database, String> {
+    open_replica(config, "memory.db").await
+}
+
+async fn open_telemetry(config: &Config) -> Result<turso::sync::Database, String> {
+    open_replica(config, "telemetry.db").await
+}
+
+async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Database, String> {
     let dir = crate::data_dir::data_dir()
         .join("turso-memory")
         .join(digest(&config.url));
@@ -138,7 +216,7 @@ async fn open(config: &Config) -> Result<turso::sync::Database, String> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     }
-    let path = dir.join("memory.db");
+    let path = dir.join(file);
     turso::sync::Builder::new_remote(&path.to_string_lossy())
         .with_remote_url(&config.url)
         .with_auth_token(&config.token)
@@ -172,8 +250,9 @@ async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLe
         let Some(index) = pending.iter().position(|entry| {
             entry
                 .supersedes
-                .as_ref()
-                .is_none_or(|old| seen.contains(old))
+                .iter()
+                .chain(entry.resolves.iter())
+                .all(|old| seen.contains(old))
         }) else {
             return Err("memory supersession has a missing id or cycle".into());
         };
@@ -190,6 +269,121 @@ async fn ensure_schema(conn: &turso::Connection) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+pub fn sync_telemetry(
+    cort_usage: Option<&Path>,
+    claudecat_usage: Option<&Path>,
+    cost_reports: Option<&Path>,
+) -> Result<TelemetrySyncReport, String> {
+    let scan = crate::telemetry::scan(cort_usage, claudecat_usage, cost_reports)?;
+    with_telemetry_lock(|config| {
+        runtime()?.block_on(async {
+            let db = open_telemetry(&config).await?;
+            let conn = db.connect().await.map_err(|e| e.to_string())?;
+            conn.execute(CREATE_TELEMETRY, ())
+                .await
+                .map_err(|e| e.to_string())?;
+            conn.execute(CREATE_ALIASES, ())
+                .await
+                .map_err(|e| e.to_string())?;
+            db.push().await.map_err(|e| format!("pending telemetry could not sync: {e}"))?;
+            db.pull().await.map_err(|e| format!("cannot pull telemetry before upload: {e}"))?;
+            let mut known = std::collections::HashSet::new();
+            let mut rows = conn
+                .query("SELECT source, event_id FROM telemetry_events", ())
+                .await
+                .map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+                let source: String = row.get(0).map_err(|e| e.to_string())?;
+                let id: String = row.get(1).map_err(|e| e.to_string())?;
+                known.insert((source, id));
+            }
+            drop(rows);
+            let pending: Vec<_> = scan
+                .events
+                .iter()
+                .filter(|event| !known.contains(&(event.source.to_string(), event.id.clone())))
+                .collect();
+            let has_pending = !pending.is_empty() || !scan.project_aliases.is_empty();
+            if has_pending {
+                conn.execute("BEGIN CONCURRENT", ())
+                    .await
+                    .map_err(|e| format!("cannot begin telemetry batch: {e}"))?;
+            }
+            let mut inserted = 0;
+            for event in pending {
+                match conn
+                    .execute(
+                        "INSERT OR IGNORE INTO telemetry_events (source, event_id, machine_id, machine_source, project_id, time_ms, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            event.source,
+                            event.id.as_str(),
+                            event.machine_id.as_str(),
+                            event.machine_source.as_str(),
+                            event.project_id.as_deref(),
+                            event.time_ms,
+                            event.payload.as_str(),
+                        ),
+                    )
+                    .await
+                {
+                    Ok(n) => inserted += n as usize,
+                    Err(e) => {
+                        let _ = conn.execute("ROLLBACK", ()).await;
+                        return Err(format!("telemetry batch insert failed: {e}"));
+                    }
+                }
+            }
+            for alias in &scan.project_aliases {
+                if let Err(e) = conn
+                    .execute(
+                        "INSERT OR IGNORE INTO telemetry_project_aliases (machine_id, local_project_id, shared_project_id) VALUES (?, ?, ?)",
+                        (
+                            alias.machine_id.as_str(),
+                            alias.local_project_id.as_str(),
+                            alias.shared_project_id.as_str(),
+                        ),
+                    )
+                    .await
+                {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(format!("project alias insert failed: {e}"));
+                }
+            }
+            if has_pending {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| format!("telemetry batch commit failed: {e}"))?;
+            }
+            db.push().await.map_err(|e| format!("telemetry saved locally but push failed: {e}"))?;
+            db.pull().await.map_err(|e| format!("telemetry pushed but pull failed: {e}"))?;
+            db.checkpoint()
+                .await
+                .map_err(|e| format!("telemetry synced but local checkpoint failed: {e}"))?;
+            let mut by_source = std::collections::BTreeMap::new();
+            for event in &scan.events {
+                *by_source.entry(event.source.to_string()).or_insert(0) += 1;
+            }
+            Ok(TelemetrySyncReport {
+                scanned: scan.events.len(),
+                inserted,
+                already_present: scan.events.len().saturating_sub(inserted),
+                by_source,
+                unattributed_machine_rows: scan
+                    .events
+                    .iter()
+                    .filter(|event| event.machine_id == "legacy_unknown")
+                    .count(),
+                legacy_cort_rows: scan.legacy_cort_rows,
+                project_aliases: scan.project_aliases.len(),
+                unresolved_project_ids: scan.unresolved_project_ids,
+                unmatched_project_rows: scan.unmatched_project_rows,
+                missing_sources: scan.missing_sources,
+                sync_status: "synced",
+            })
+        })
+    })
 }
 
 async fn insert(
@@ -231,12 +425,29 @@ fn with_lock<T>(
     action: impl FnOnce(Config, String) -> Result<T, String>,
     root: &Path,
 ) -> Result<T, String> {
+    with_store_lock(|config| {
+        let project = project(root)?;
+        action(config, project)
+    })
+}
+
+fn with_store_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
+    with_named_lock("memory.lock", action)
+}
+
+fn with_telemetry_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
+    with_named_lock("telemetry.lock", action)
+}
+
+fn with_named_lock<T>(
+    name: &str,
+    action: impl FnOnce(Config) -> Result<T, String>,
+) -> Result<T, String> {
     let config = config()?;
-    let project = project(root)?;
     let lock_path = crate::data_dir::data_dir()
         .join("turso-memory")
         .join(digest(&config.url))
-        .join("memory.lock");
+        .join(name);
     fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| e.to_string())?;
     let lock = OpenOptions::new()
         .create(true)
@@ -245,7 +456,7 @@ fn with_lock<T>(
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
-    action(config, project)
+    action(config)
 }
 
 pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
@@ -277,6 +488,98 @@ pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
     )
 }
 
+pub fn status(root: &Path) -> Result<MemoryStatus, String> {
+    with_lock(
+        |config, project| {
+            runtime()?.block_on(async {
+                let db = open(&config).await?;
+                let conn = db.connect().await.map_err(|e| e.to_string())?;
+                ensure_schema(&conn).await?;
+                let pushed = db.push().await.is_ok();
+                let pulled = db.pull().await.is_ok();
+                let ledger = read_ledger(&conn, &project).await?;
+                let active = memory::active_entries(&ledger);
+                let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
+                for entry in &active {
+                    by_key
+                        .entry(entry.key.clone())
+                        .or_default()
+                        .push(entry.id.clone());
+                }
+                let conflicts = by_key
+                    .into_iter()
+                    .filter(|(_, ids)| ids.len() > 1)
+                    .map(|(key, active_ids)| MemoryConflict { key, active_ids })
+                    .collect();
+                Ok(MemoryStatus {
+                    project_id: project,
+                    project_id_source: project_source(),
+                    database_url: config.url,
+                    sync_status: if pushed && pulled {
+                        "synced"
+                    } else {
+                        "offline_or_pending"
+                    },
+                    total_entries: ledger.entries.len(),
+                    active_entries: active.len(),
+                    conflicts,
+                })
+            })
+        },
+        root,
+    )
+}
+
+pub fn resolve(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: &Path,
+    line: usize,
+    supersedes: &[String],
+) -> Result<MemoryEntry, String> {
+    if supersedes.len() < 2 {
+        return Err("resolution needs at least two active ids".into());
+    }
+    let mut entry = memory::new_entry(root, key, claim, source, line, None)?;
+    require_committed_source(root, source)?;
+    entry.resolves = supersedes.to_vec();
+    with_lock(
+        |config, project| {
+            runtime()?.block_on(async {
+                let db = open(&config).await?;
+                db.push().await.map_err(|e| e.to_string())?;
+                db.pull().await.map_err(|e| e.to_string())?;
+                let conn = db.connect().await.map_err(|e| e.to_string())?;
+                let ledger = read_ledger(&conn, &project).await?;
+                let active_ids: std::collections::HashSet<_> = memory::active_entries(&ledger)
+                    .into_iter()
+                    .filter(|item| item.key == entry.key)
+                    .map(|item| item.id.as_str())
+                    .collect();
+                let requested: std::collections::HashSet<_> =
+                    supersedes.iter().map(String::as_str).collect();
+                if active_ids.len() < 2 || requested.len() != supersedes.len() || requested != active_ids {
+                    return Err("--supersedes must name every active id for this key exactly once; inspect memory status".into());
+                }
+                insert(&conn, &project, &entry).await?;
+                db.push().await.map_err(|e| format!("resolution saved locally but push failed; retry sync: {e}"))?;
+                db.pull().await.map_err(|e| format!("resolution pushed but pull failed: {e}"))?;
+                let after = read_ledger(&conn, &project).await?;
+                if memory::active_entries(&after)
+                    .iter()
+                    .filter(|item| item.key == entry.key)
+                    .count() != 1
+                {
+                    return Err("resolution pushed but a concurrent conflict remains; inspect memory status".into());
+                }
+                Ok(entry)
+            })
+        },
+        root,
+    )
+}
+
 pub fn record(
     root: &Path,
     key: &str,
@@ -286,6 +589,7 @@ pub fn record(
     supersedes: Option<&str>,
 ) -> Result<MemoryEntry, String> {
     let entry = memory::new_entry(root, key, claim, source, line, supersedes)?;
+    require_committed_source(root, source)?;
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
@@ -419,8 +723,10 @@ mod tests {
                 source: "decision.md".into(),
                 source_line: 1,
                 source_sha256: "hash".into(),
+                source_line_sha256: None,
                 recorded_at: "1".into(),
                 supersedes: None,
+                resolves: Vec::new(),
             };
             let mut second = first.clone();
             second.id = "second".into();

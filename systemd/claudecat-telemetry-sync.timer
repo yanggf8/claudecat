@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync structured agent and cort telemetry daily
+
+[Timer]
+OnCalendar=*-*-* 01:45:00 UTC
+Persistent=true
+Unit=claudecat-telemetry-sync.service
+
+[Install]
+WantedBy=timers.target

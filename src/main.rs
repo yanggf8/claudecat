@@ -133,6 +133,11 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// 將本機結構化收集事件批次同步到共用 TursoDB
+    Telemetry {
+        #[command(subcommand)]
+        action: TelemetryAction,
+    },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
         /// 目標 markdown 檔（例如 SESSION-EVIDENCE.md）
@@ -181,6 +186,13 @@ enum MemoryAction {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+    /// 顯示目前專案識別碼、同步狀態與待解決的記憶衝突
+    Status {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// 將舊 Git JSON ledger 匯入 Turso；舊檔保留供人工檢查
     ImportLegacy {
         #[arg(long, default_value = ".")]
@@ -200,6 +212,22 @@ enum MemoryAction {
         line: usize,
         #[arg(long)]
         supersedes: Option<String>,
+    },
+    /// 以新來源紀錄收斂同一 key 的所有有效衝突版本
+    Resolve {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        claim: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        line: usize,
+        /// 重複指定 memory status 列出的每個有效 ID
+        #[arg(long, required = true)]
+        supersedes: Vec<String>,
     },
     /// 讀取目前版本，並標示來源是否與記錄時相同；不把指紋相同當成語義驗證
     Recall {
@@ -222,6 +250,21 @@ enum MemoryAction {
     /// 統計人工評分的成對試驗，檢查每筆原始輸出的 SHA-256
     EvalReport {
         file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelemetryAction {
+    /// 同步 cort 用量、ClaudeCat 導航與記憶查詢、每日成本報告
+    Sync {
+        #[arg(long)]
+        cort_usage: Option<PathBuf>,
+        #[arg(long)]
+        claudecat_usage: Option<PathBuf>,
+        #[arg(long)]
+        cost_reports: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -628,6 +671,42 @@ fn main() {
                     std::process::exit(1);
                 }
             },
+            MemoryAction::Status { root, json } => match turso_memory::status(&root) {
+                Ok(status) if json => match serde_json::to_string_pretty(&status) {
+                    Ok(body) => println!("{body}"),
+                    Err(e) => {
+                        eprintln!("memory status JSON: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok(status) => {
+                    println!(
+                        "project_id={} ({})",
+                        status.project_id, status.project_id_source
+                    );
+                    println!(
+                        "database={} sync={}",
+                        status.database_url, status.sync_status
+                    );
+                    println!(
+                        "entries={} active={} conflicts={}",
+                        status.total_entries,
+                        status.active_entries,
+                        status.conflicts.len()
+                    );
+                    for conflict in status.conflicts {
+                        println!(
+                            "conflict {}: {}",
+                            conflict.key,
+                            conflict.active_ids.join(" ")
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("memory status: {e}");
+                    std::process::exit(1);
+                }
+            },
             MemoryAction::ImportLegacy { root } => match turso_memory::import_legacy(&root) {
                 Ok(count) => println!("imported {count} legacy entries into Turso"),
                 Err(e) => {
@@ -658,6 +737,20 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("memory record: {e}");
+                    std::process::exit(1);
+                }
+            },
+            MemoryAction::Resolve {
+                root,
+                key,
+                claim,
+                source,
+                line,
+                supersedes,
+            } => match turso_memory::resolve(&root, &key, &claim, &source, line, &supersedes) {
+                Ok(entry) => println!("resolved {} with {}", key, entry.id),
+                Err(e) => {
+                    eprintln!("memory resolve: {e}");
                     std::process::exit(1);
                 }
             },
@@ -700,6 +793,9 @@ fn main() {
                                 "{} [{}] {}",
                                 hit.entry.key, hit.evidence_status, hit.entry.claim
                             );
+                            if let Some(status) = hit.source_line_status {
+                                println!("  source_line_status={status}");
+                            }
                             println!(
                                 "  id={} source={}:{}",
                                 hit.entry.id, hit.entry.source, hit.entry.source_line
@@ -776,6 +872,41 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("memory eval-report: {e}");
+                    std::process::exit(1);
+                }
+            },
+        },
+        Commands::Telemetry { action } => match action {
+            TelemetryAction::Sync {
+                cort_usage,
+                claudecat_usage,
+                cost_reports,
+                json,
+            } => match turso_memory::sync_telemetry(
+                cort_usage.as_deref(),
+                claudecat_usage.as_deref(),
+                cost_reports.as_deref(),
+            ) {
+                Ok(report) if json => match serde_json::to_string_pretty(&report) {
+                    Ok(body) => println!("{body}"),
+                    Err(e) => {
+                        eprintln!("telemetry JSON: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok(report) => println!(
+                    "telemetry {}: scanned={} inserted={} already_present={} aliases={} unresolved_projects={} unmatched_project_rows={} missing={}",
+                    report.sync_status,
+                    report.scanned,
+                    report.inserted,
+                    report.already_present,
+                    report.project_aliases,
+                    report.unresolved_project_ids.len(),
+                    report.unmatched_project_rows,
+                    report.missing_sources.join(",")
+                ),
+                Err(e) => {
+                    eprintln!("telemetry sync: {e}");
                     std::process::exit(1);
                 }
             },

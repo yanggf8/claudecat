@@ -24,10 +24,15 @@ fn source_change_retracts_freshness_and_a_correction_replaces_the_active_claim()
     let found = recalled.hits;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].evidence_status, "source_unchanged");
+    assert_eq!(found[0].source_line_status.as_deref(), Some("same_line"));
 
     common::write(&t.0, "docs/decision.md", "# Decision\nUse option B.\n");
     let found = memory::recall(&t.0, "deployment option").unwrap().hits;
     assert_eq!(found[0].evidence_status, "source_changed");
+    assert_eq!(
+        found[0].source_line_status.as_deref(),
+        Some("changed_or_moved")
+    );
 
     let second = memory::record(
         &t.0,
@@ -43,6 +48,42 @@ fn source_change_retracts_freshness_and_a_correction_replaces_the_active_claim()
     assert_eq!(found[0].entry.id, second.id);
     assert_eq!(found[0].evidence_status, "source_unchanged");
     assert_eq!(memory::load(&t.0).unwrap().entries.len(), 2);
+}
+
+#[test]
+fn unrelated_file_edit_stays_unresolved_even_when_the_cited_line_matches() {
+    let t = common::Tmp(common::temp_dir());
+    common::write(&t.0, "facts.md", "Decision A.\nDetails.\n");
+    memory::record(&t.0, "decision", "A", Path::new("facts.md"), 1, None).unwrap();
+    common::write(&t.0, "facts.md", "Decision A.\nUpdated details.\n");
+    let hit = &memory::recall(&t.0, "decision").unwrap().hits[0];
+    assert_eq!(hit.evidence_status, "source_changed");
+    assert_eq!(hit.source_line_status.as_deref(), Some("same_line"));
+}
+
+#[test]
+fn one_resolution_can_close_two_concurrent_active_claims() {
+    let t = common::Tmp(common::temp_dir());
+    common::write(&t.0, "facts.md", "Decision C.\n");
+    let first = memory::record(&t.0, "decision", "A", Path::new("facts.md"), 1, None).unwrap();
+    let mut ledger = memory::load(&t.0).unwrap();
+    let mut concurrent = first.clone();
+    concurrent.id = "second".into();
+    concurrent.claim = "B".into();
+    ledger.entries.push(concurrent.clone());
+    let mut resolution = first.clone();
+    resolution.id = "resolution".into();
+    resolution.claim = "C".into();
+    resolution.resolves = vec![first.id.clone(), concurrent.id.clone()];
+    ledger.entries.push(resolution.clone());
+    fs::write(
+        memory::ledger_path(&t.0),
+        serde_json::to_string(&ledger).unwrap(),
+    )
+    .unwrap();
+    let hits = memory::recall(&t.0, "decision").unwrap().hits;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].entry.id, resolution.id);
 }
 
 #[test]

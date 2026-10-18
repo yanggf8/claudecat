@@ -20,9 +20,13 @@ pub struct MemoryEntry {
     pub source: String,
     pub source_line: usize,
     pub source_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_line_sha256: Option<String>,
     pub recorded_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +50,8 @@ pub struct MemoryHit {
     pub entry: MemoryEntry,
     /// `source_unchanged` checks bytes only. It does not prove the claim follows from the source.
     pub evidence_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_line_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -103,7 +109,17 @@ pub(crate) fn validate(ledger: &MemoryLedger) -> Result<(), String> {
         if entry.source_line == 0 || !safe_relative(Path::new(&entry.source)) {
             return Err(format!("invalid source in memory {}", entry.id));
         }
-        if let Some(old) = &entry.supersedes {
+        if (!entry.resolves.is_empty() && entry.resolves.len() < 2)
+            || (entry.supersedes.is_some() && !entry.resolves.is_empty())
+        {
+            return Err(format!("invalid resolution in memory {}", entry.id));
+        }
+        let predecessors = entry.supersedes.iter().chain(entry.resolves.iter());
+        let mut unique = HashSet::new();
+        for old in predecessors {
+            if !unique.insert(old) {
+                return Err(format!("memory {} repeats a superseded id", entry.id));
+            }
             let Some(prior) = by_id.get(old.as_str()) else {
                 return Err(format!("memory {} supersedes missing id {old}", entry.id));
             };
@@ -141,11 +157,25 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn line_hash(bytes: &[u8], line: usize) -> Option<String> {
+    std::str::from_utf8(bytes)
+        .ok()?
+        .lines()
+        .nth(line.checked_sub(1)?)
+        .map(|text| hash(text.as_bytes()))
+}
+
 pub(crate) fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
     let replaced: HashSet<_> = ledger
         .entries
         .iter()
-        .filter_map(|entry| entry.supersedes.as_deref())
+        .flat_map(|entry| {
+            entry
+                .supersedes
+                .iter()
+                .chain(entry.resolves.iter())
+                .map(String::as_str)
+        })
         .collect();
     ledger
         .entries
@@ -228,8 +258,10 @@ pub fn record(
         source: source_name,
         source_line,
         source_sha256,
+        source_line_sha256: line_hash(&bytes, source_line),
         recorded_at: timestamp.to_string(),
         supersedes: supersedes.map(str::to_string),
+        resolves: Vec::new(),
     };
     ledger.entries.push(entry.clone());
     validate(&ledger)?;
@@ -266,10 +298,21 @@ pub(crate) fn recall_ledger(
         if !terms.iter().all(|term| haystack.contains(term)) {
             continue;
         }
+        let source = source_bytes(root, Path::new(&entry.source));
+        let source_line_status = entry
+            .source_line_sha256
+            .as_ref()
+            .map(|expected| match &source {
+                Ok(bytes) if line_hash(bytes, entry.source_line).as_ref() == Some(expected) => {
+                    "same_line".to_string()
+                }
+                Ok(_) => "changed_or_moved".to_string(),
+                Err(_) => "source_missing".to_string(),
+            });
         let evidence_status = if counts[entry.key.as_str()] > 1 {
             "conflict"
         } else {
-            match source_bytes(root, Path::new(&entry.source)) {
+            match source {
                 Ok(bytes) if hash(&bytes) == entry.source_sha256 => "source_unchanged",
                 Ok(_) => "source_changed",
                 Err(_) => "source_missing",
@@ -278,6 +321,7 @@ pub(crate) fn recall_ledger(
         hits.push(MemoryHit {
             entry: entry.clone(),
             evidence_status: evidence_status.to_string(),
+            source_line_status,
         });
     }
     hits.sort_by(|a, b| {
@@ -331,7 +375,9 @@ pub(crate) fn new_entry(
         source: source_name,
         source_line,
         source_sha256,
+        source_line_sha256: line_hash(&bytes, source_line),
         recorded_at: timestamp.to_string(),
         supersedes: supersedes.map(str::to_string),
+        resolves: Vec::new(),
     })
 }

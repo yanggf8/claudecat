@@ -1,4 +1,5 @@
-//! Local-only navigation and memory recall telemetry.
+//! Navigation and memory recall telemetry is written locally first.
+//! `telemetry sync` copies these structured rows to TursoDB separately.
 //! Raw queries are deliberately never stored; recall counts are exposure, not correctness.
 use crate::data_dir;
 use crate::memory::MemoryRecall;
@@ -60,11 +61,13 @@ fn open() -> rusqlite::Result<Connection> {
         std::fs::create_dir_all(parent)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS navigation_log (
             ts INTEGER NOT NULL,
             project_id TEXT NOT NULL,
+            machine_id TEXT NOT NULL DEFAULT 'legacy_unknown',
+            machine_source TEXT NOT NULL DEFAULT 'legacy_no_stamp',
             mode TEXT NOT NULL,
             query_shape TEXT NOT NULL,
             query_hash TEXT NOT NULL,
@@ -96,10 +99,38 @@ fn open() -> rusqlite::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS memory_recall_log_ts ON memory_recall_log(ts);",
     )?;
+    ensure_navigation_machine_columns(&mut conn)?;
     Ok(conn)
 }
 
-fn machine_stamp() -> (String, &'static str) {
+fn ensure_navigation_machine_columns(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (column, ddl) in [
+        (
+            "machine_id",
+            "ALTER TABLE navigation_log ADD COLUMN machine_id TEXT NOT NULL DEFAULT 'legacy_unknown'",
+        ),
+        (
+            "machine_source",
+            "ALTER TABLE navigation_log ADD COLUMN machine_source TEXT NOT NULL DEFAULT 'legacy_no_stamp'",
+        ),
+    ] {
+        let present = tx
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('navigation_log') WHERE name = ?1 LIMIT 1",
+                [column],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !present {
+            tx.execute(ddl, [])?;
+        }
+    }
+    tx.commit()
+}
+
+pub(crate) fn machine_stamp() -> (String, &'static str) {
     if let Ok(raw) = std::fs::read_to_string("/etc/machine-id") {
         let id = raw.trim();
         if !id.is_empty() {
@@ -331,11 +362,12 @@ pub fn record_navigation(
     }
     let Ok(conn) = open() else { return };
     let primary = result.documents.first();
+    let (machine_id, machine_source) = machine_stamp();
     let _ = conn.execute(
         "INSERT INTO navigation_log
-         (ts, project_id, mode, query_shape, query_hash, symbol_hits, document_hits,
+         (ts, project_id, machine_id, machine_source, mode, query_shape, query_hash, symbol_hits, document_hits,
           file_hits, cort_hits, route_kind, primary_document, primary_heading)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             now_ms(),
             crate::cort::project_id(
@@ -343,6 +375,8 @@ pub fn record_navigation(
                     .unwrap_or_else(|_| root.to_path_buf())
                     .to_string_lossy()
             ),
+            machine_id,
+            machine_source,
             if used_cort { "cort" } else { "tree" },
             query_shape(query),
             query_hash(query),

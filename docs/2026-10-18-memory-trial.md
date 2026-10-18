@@ -16,10 +16,12 @@ used here. This trial is a pure Rust local CLI with a Git-reviewable ledger.
 
 The first trial used a Git-tracked JSON ledger. The current CLI uses the Rust `turso` sync SDK
 with a TursoDB cloud database and a local sync replica. The JSON file is now an import source
-only (`memory import-legacy`). The record/source/supersession contract below remains, but references
-to Git synchronization describe the original trial. A recall discloses `sync_status: synced` only
+only (`memory import-legacy`). A recall discloses `sync_status: synced` only
 when both push and pull succeeded; otherwise `offline_or_pending` makes its local-only basis clear.
-The local usage DB and paired eval report remain separate. A TursoDB organization must enable the
+Local usage writers and paired eval reports remain separate from the memory ledger. The
+structured usage rows can be copied to `harnessuse.telemetry_events` by the separate Rust
+`claudecat telemetry sync` command; this does not make a hook wait for the network.
+A TursoDB organization must enable the
 new engine; an existing libSQL database is not a substitute. No cross-machine outcome measurement
 has yet been claimed from the storage change.
 
@@ -38,17 +40,21 @@ independent local replicas on one machine; it does not yet measure behavior on a
 machine or agent uptake.
 The remote also accepted `BEGIN CONCURRENT; SELECT COUNT(*) FROM project_memory; COMMIT;`.
 
-## Trial contract
+## Current memory contract
 
-- One project ledger lives at `.claudecat/memory.json`. Agents on either harness read the same
-  bytes after Git synchronization; no harness-private memory is treated as this ledger.
-- `record` requires an explicit claim, stable key, source file and nonblank line within the repo.
-  It stores the whole source file's SHA-256 and requires `--supersedes` for a correction.
+- Curated rows live in `harnessuse.project_memory`, separated by a hash of the normalized Git
+  origin (or the explicit `CLAUDECAT_MEMORY_PROJECT` key). Both harnesses use the same ClaudeCat
+  CLI; `.claudecat/memory.json` is a legacy import source, not the active ledger.
+- `record` requires an explicit claim, stable key, tracked and committed source file, and
+  nonblank line within the repo. It stores the whole source file's SHA-256 and the cited line's
+  SHA-256, and requires `--supersedes` for a single-entry correction.
 - `recall` returns the active claim and a source freshness status. A missing ledger is distinct
-  from a present ledger with no match. Concurrent active claims for one key are a conflict.
+  from a present ledger with no match. Concurrent active claims for one key are a conflict;
+  `memory status` lists their IDs and `memory resolve` records a reviewed claim that supersedes
+  all of them.
 - A hash match checks source bytes only. A person or agent must inspect the cited line to decide
-  whether it supports the claim. Neither arbitrary transcript text nor pasted agent output is
-  automatically retained.
+  whether it supports the claim. A matching cited-line hash does not clear a changed-file status.
+  Neither arbitrary transcript text nor pasted agent output is automatically retained.
 - The first version is query-on-demand. It does not promise recall for questions whose agent
   never invokes the skill, nor semantic verification or complete capture of past decisions.
 
@@ -86,11 +92,12 @@ The harness label is supplied by the caller and is not independently verified. A
 writing telemetry is visible on stderr while recall still answers. Existing sessions before this
 change cannot be reconstructed from the new table.
 
-These rows show exposure, source freshness, and (after the storage update) sync outcome. They do not count questions that should have used
+These rows show exposure, source freshness, and sync outcome. They do not count questions that should have used
 memory but never called it, prove that an agent read the source, or grade its answer. `cort` usage
 counts code-intelligence commands and cannot fill those gaps. In the original trial there was no
-Turso/libSQL service; project memory moved between machines through reviewed Git commits, while
-usage data stayed local. The current TursoDB deployment status is described above.
+Turso/libSQL service; project memory moved between machines through reviewed Git commits then.
+The current TursoDB deployment status is described above. Structured local usage is now uploaded
+by `claudecat telemetry sync`, while the hook writes remain local and fast.
 
 `claudecat memory eval-report <eval.json> --json` adds a second, explicit evidence path. It reads
 schema 1 JSON with a `rubric_id`, frozen `cases`, and one `memory_on` and one `memory_off` trial per
