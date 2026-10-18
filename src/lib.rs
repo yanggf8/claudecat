@@ -14,5 +14,6 @@ pub mod model;
 pub mod navigate;
 pub mod outline;
 pub mod symbols;
+pub mod turso_memory;
 pub mod usage;
 pub mod walk;

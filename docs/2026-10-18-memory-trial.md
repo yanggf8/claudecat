@@ -12,6 +12,17 @@ Hindsight's coding-agent integration suggested three useful mechanisms: retain a
 retrieve it when needed, and reconcile later corrections. Its implementation and service are not
 used here. This trial is a pure Rust local CLI with a Git-reviewable ledger.
 
+## Storage update on 2026-10-18
+
+The first trial used a Git-tracked JSON ledger. The current CLI uses the Rust `turso` sync SDK
+with a TursoDB cloud database and a local sync replica. The JSON file is now an import source
+only (`memory import-legacy`). The record/source/supersession contract below remains, but references
+to Git synchronization describe the original trial. A recall discloses `sync_status: synced` only
+when both push and pull succeeded; otherwise `offline_or_pending` makes its local-only basis clear.
+The local usage DB and paired eval report remain separate. A TursoDB organization must enable the
+new engine; an existing libSQL database is not a substitute. No cross-machine outcome measurement
+has yet been claimed from the storage change.
+
 ## Trial contract
 
 - One project ledger lives at `.claudecat/memory.json`. Agents on either harness read the same
@@ -60,10 +71,11 @@ The harness label is supplied by the caller and is not independently verified. A
 writing telemetry is visible on stderr while recall still answers. Existing sessions before this
 change cannot be reconstructed from the new table.
 
-These rows show exposure and source freshness. They do not count questions that should have used
+These rows show exposure, source freshness, and (after the storage update) sync outcome. They do not count questions that should have used
 memory but never called it, prove that an agent read the source, or grade its answer. `cort` usage
-counts code-intelligence commands and cannot fill those gaps. There is no Turso/libSQL service;
-project memory moves between machines through reviewed Git commits, while usage data stays local.
+counts code-intelligence commands and cannot fill those gaps. In the original trial there was no
+Turso/libSQL service; project memory moved between machines through reviewed Git commits, while
+usage data stayed local. The current TursoDB deployment status is described above.
 
 `claudecat memory eval-report <eval.json> --json` adds a second, explicit evidence path. It reads
 schema 1 JSON with a `rubric_id`, frozen `cases`, and one `memory_on` and one `memory_off` trial per

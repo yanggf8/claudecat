@@ -32,6 +32,8 @@ pub struct MemoryUsageReport {
     pub changed_hits: i64,
     pub missing_hits: i64,
     pub conflict_hits: i64,
+    pub synced_calls: i64,
+    pub offline_or_pending_calls: i64,
     pub total_recall_elapsed_ms: i64,
     pub max_recall_elapsed_ms: i64,
     /// The caller supplies this label. It is not independently verified from a harness payload.
@@ -84,6 +86,7 @@ fn open() -> rusqlite::Result<Connection> {
             harness_declared TEXT NOT NULL,
             outcome TEXT NOT NULL,
             ledger_status TEXT NOT NULL,
+            sync_status TEXT NOT NULL DEFAULT 'legacy_unknown',
             hit_count INTEGER NOT NULL,
             unchanged_hits INTEGER NOT NULL,
             changed_hits INTEGER NOT NULL,
@@ -119,6 +122,10 @@ fn ensure_memory_machine_columns(conn: &mut Connection) -> rusqlite::Result<()> 
         (
             "machine_source",
             "ALTER TABLE memory_recall_log ADD COLUMN machine_source TEXT NOT NULL DEFAULT 'legacy_no_stamp'",
+        ),
+        (
+            "sync_status",
+            "ALTER TABLE memory_recall_log ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'legacy_unknown'",
         ),
     ] {
         let present = tx
@@ -165,9 +172,9 @@ pub fn record_memory_recall(
     let (machine_id, machine_source) = machine_stamp();
     conn.execute(
         "INSERT INTO memory_recall_log
-         (ts, project_id, machine_id, machine_source, harness_declared, outcome, ledger_status, hit_count,
+         (ts, project_id, machine_id, machine_source, harness_declared, outcome, ledger_status, sync_status, hit_count,
           unchanged_hits, changed_hits, missing_hits, conflict_hits, elapsed_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             now_ms(),
             crate::cort::project_id(&real_root.to_string_lossy()),
@@ -176,6 +183,7 @@ pub fn record_memory_recall(
             harness_declared,
             if result.is_some() { "ok" } else { "error" },
             result.map_or("unknown", |r| r.ledger_status.as_str()),
+            result.and_then(|r| r.sync_status.as_deref()).unwrap_or("unknown"),
             result.map_or(0, |r| r.hits.len() as i64),
             counts[0],
             counts[1],
@@ -202,6 +210,8 @@ pub fn memory_report(days: u32) -> Result<MemoryUsageReport, String> {
                     COALESCE(SUM(changed_hits), 0),
                     COALESCE(SUM(missing_hits), 0),
                     COALESCE(SUM(conflict_hits), 0),
+                    COALESCE(SUM(sync_status = 'synced'), 0),
+                    COALESCE(SUM(sync_status = 'offline_or_pending'), 0),
                     COALESCE(SUM(elapsed_ms), 0),
                     COALESCE(MAX(elapsed_ms), 0)
              FROM memory_recall_log WHERE ts >= ?1",
@@ -217,8 +227,10 @@ pub fn memory_report(days: u32) -> Result<MemoryUsageReport, String> {
                     changed_hits: row.get(5)?,
                     missing_hits: row.get(6)?,
                     conflict_hits: row.get(7)?,
-                    total_recall_elapsed_ms: row.get(8)?,
-                    max_recall_elapsed_ms: row.get(9)?,
+                    synced_calls: row.get(8)?,
+                    offline_or_pending_calls: row.get(9)?,
+                    total_recall_elapsed_ms: row.get(10)?,
+                    max_recall_elapsed_ms: row.get(11)?,
                     ..Default::default()
                 })
             },

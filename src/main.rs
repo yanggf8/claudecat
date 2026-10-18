@@ -7,12 +7,12 @@ use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
 use claudecat::markdown;
-use claudecat::memory;
 use claudecat::memory_eval;
 use claudecat::model::{self, MapProfile};
 use claudecat::navigate;
 use claudecat::outline;
 use claudecat::symbols;
+use claudecat::turso_memory;
 use claudecat::usage;
 use claudecat::walk;
 
@@ -128,7 +128,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// 查詢或記錄有來源的專案記憶；資料留在該 repo 的 .claudecat/memory.json
+    /// 查詢或記錄有來源的專案記憶；使用 Turso Database 同步
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -169,6 +169,23 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum MemoryAction {
+    /// 設定本機 Turso 連線；token 從 stdin 讀取，絕不放入命令參數
+    Configure {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        token_stdin: bool,
+    },
+    /// 推送待同步的本機記錄並拉取其他機器的記錄
+    Sync {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// 將舊 Git JSON ledger 匯入 Turso；舊檔保留供人工檢查
+    ImportLegacy {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// 記錄一項待人工審查的主張，來源必須是 repo 內現有檔案與行號
     Record {
         #[arg(long, default_value = ".")]
@@ -583,6 +600,41 @@ fn main() {
             }
         },
         Commands::Memory { action } => match action {
+            MemoryAction::Configure { url, token_stdin } => {
+                if !token_stdin {
+                    eprintln!(
+                        "memory configure: pass --token-stdin to read the auth token privately"
+                    );
+                    std::process::exit(1);
+                }
+                use std::io::Read;
+                let mut token = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut token) {
+                    eprintln!("memory configure: {e}");
+                    std::process::exit(1);
+                }
+                match turso_memory::configure(&url, &token) {
+                    Ok(path) => println!("Turso memory configured at {}", path.display()),
+                    Err(e) => {
+                        eprintln!("memory configure: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            MemoryAction::Sync { root } => match turso_memory::sync(&root) {
+                Ok(message) => println!("{message}"),
+                Err(e) => {
+                    eprintln!("memory sync: {e}");
+                    std::process::exit(1);
+                }
+            },
+            MemoryAction::ImportLegacy { root } => match turso_memory::import_legacy(&root) {
+                Ok(count) => println!("imported {count} legacy entries into Turso"),
+                Err(e) => {
+                    eprintln!("memory import-legacy: {e}");
+                    std::process::exit(1);
+                }
+            },
             MemoryAction::Record {
                 root,
                 key,
@@ -590,12 +642,18 @@ fn main() {
                 source,
                 line,
                 supersedes,
-            } => match memory::record(&root, &key, &claim, &source, line, supersedes.as_deref()) {
+            } => match turso_memory::record(
+                &root,
+                &key,
+                &claim,
+                &source,
+                line,
+                supersedes.as_deref(),
+            ) {
                 Ok(entry) => {
                     println!("recorded {}", entry.id);
                     println!(
-                        "review and commit {} before sharing",
-                        memory::ledger_path(&root).display()
+                        "pushed to Turso; review the cited source before relying on this claim"
                     );
                 }
                 Err(e) => {
@@ -610,7 +668,7 @@ fn main() {
                 json,
             } => {
                 let started = Instant::now();
-                let result = memory::recall(&root, &query);
+                let result = turso_memory::recall(&root, &query);
                 if let Err(e) = usage::record_memory_recall(
                     &root,
                     harness.as_str(),
@@ -628,6 +686,10 @@ fn main() {
                         }
                     },
                     Ok(result) => {
+                        println!(
+                            "Turso sync: {}",
+                            result.sync_status.as_deref().unwrap_or("unknown")
+                        );
                         if result.ledger_status == "absent" {
                             println!("memory ledger absent");
                         } else if result.hits.is_empty() {
@@ -661,8 +723,9 @@ fn main() {
                 Ok(report) => {
                     println!("memory recall usage ({}d)", report.window_days);
                     println!(
-                        "calls={} errors={} absent={} no_match={} unchanged_hits={} changed_hits={} missing_hits={} conflict_hits={}",
-                        report.recall_calls, report.errors, report.absent_ledgers,
+                        "calls={} errors={} synced={} offline_or_pending={} absent={} no_match={} unchanged_hits={} changed_hits={} missing_hits={} conflict_hits={}",
+                        report.recall_calls, report.errors, report.synced_calls,
+                        report.offline_or_pending_calls, report.absent_ledgers,
                         report.no_match_calls, report.unchanged_hits, report.changed_hits,
                         report.missing_hits, report.conflict_hits
                     );

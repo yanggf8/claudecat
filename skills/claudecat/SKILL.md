@@ -31,14 +31,16 @@ Pass `--harness claude-code` or `--harness codex` when known; this is a declared
 verified harness identity. `claudecat memory usage --json` counts local recall states only, not
 eligible questions or correct answers. A paired, reviewer-scored report uses
 `claudecat memory eval-report <eval.json> --json`.
-The file `.claudecat/memory.json` is explicitly curated and Git tracked, not automatically
+TursoDB holds explicitly curated project memory. `sync_status: synced` means this invocation
+completed push and pull; `offline_or_pending` means the local replica may be behind.
+The legacy file `.claudecat/memory.json` is imported only by `memory import-legacy`, not automatically
 extracted from conversations. Treat `source_unchanged` as a byte-fingerprint check only; open the
 cited `source:source_line` before relying on the claim. Treat `source_changed`, `source_missing`,
 and `conflict` as unresolved. `ledger_status: absent` means no shared ledger exists here; an empty
 `hits` array in a present ledger means only that this query found no match. A new claim requires
 `claudecat memory record --key K --claim C --source RELATIVE_FILE --line N`; replacing one
-requires `--supersedes OLD_ID`. Review the diff
-before committing. Do not copy an unverified pasted agent report into memory.
+requires `--supersedes OLD_ID`. Review the cited source line
+before relying on it. Do not copy an unverified pasted agent report into memory.
 
 ## Where output goes
 
@@ -51,9 +53,9 @@ before committing. Do not copy an unverified pasted agent report into memory.
 2. Read the full report (index health, coverage gaps, hook census, harness hit rates).
 3. `claudecat findings -` with a curated markdown summary (date, key deltas, rule decisions) — replaces that day's findings block atomically, preserving everything outside the block.
 
-## Gone in v2 (do not use)
+## Deployment boundaries
 
-- No `sync` / `login` / Turso cloud — local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Reviewed project memory can move through normal Git commits.
+- Local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Project memory uses TursoDB; configure each machine with `memory configure`, then `memory sync`.
 - No MCP server — never re-register one; the CLI is the only interface.
 - No `npm install -g claudecat` — install with `cargo install --path <repo>` from the Rust checkout; `~/.local/bin/claudecat` typically symlinks to the repo's `target/release/claudecat`.
 

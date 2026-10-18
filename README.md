@@ -47,8 +47,19 @@ claudecat scan --root /path/to/project
 ## 可審核的專案記憶（Rust 試驗版）
 
 `memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
-每個 repo 的資料在 `.claudecat/memory.json`；檢查 diff 後把它提交到該 repo，Claude Code
-與 Codex 及其他機器才會透過 Git 讀到同一份。`--root` 可指定目標 repo。
+記憶現在存於 TursoDB，同一資料庫與 Git origin 的專案識別供 Claude Code、Codex 和其他機器共用。
+先建立 **TursoDB**（`turso db create claudecat-memory --tursodb`），取得 URL 與 token，於每台機器設定：
+CLI 回傳的 `libsql://` URL 只是連線格式；請確認資料庫類型是 TursoDB。
+
+```sh
+turso db tokens create claudecat-memory | claudecat memory configure --url "$(turso db show claudecat-memory --url)" --token-stdin
+claudecat memory sync
+```
+
+token 只從 stdin 讀取，保存在本機 `~/.local/share/claudecat/turso-memory.json`（Unix 權限 0600）；
+同步副本也在本機資料目錄，不進 Git。若沒有 Git origin，設定相同的
+`CLAUDECAT_MEMORY_PROJECT` 以讓不同機器選到同一專案。舊 `.claudecat/memory.json` 可用
+`claudecat memory import-legacy` 明示匯入；確認同步後再另行處理舊檔。`--root` 可指定目標 repo。
 
 ```bash
 claudecat memory record --key "deployment option" --claim "Option B is current" \
@@ -63,12 +74,14 @@ claudecat memory record --key "deployment option" --claim "Option C is current" 
 `conflict` 都不得當成現行事實。同 key 的更正必須明確指出舊 id，舊紀錄保留作審計。
 格式損毀時查詢報錯，不回傳看似完整的空集合。這是來源與更新契約的第一輪，還沒有
 語義驗證、跨 repo 個人偏好、或自動載入到代理上下文的 hook。
-JSON 輸出包含 `ledger_status`（`absent` / `present`）及 `hits`；缺少記憶檔不等於確認
-沒有相關決策。Git 只同步經審查、提交的記憶檔；各機器的導航地圖及統計資料仍是本機資料。
+JSON 輸出包含 `ledger_status`（`absent` / `present`）、`sync_status` 及 `hits`；
+空的專案記憶不等於確認沒有相關決策。導航地圖及統計資料仍是本機資料。
+`memory recall` 的 `sync_status` 為 `synced` 才表示這次 push/pull 成功；
+`offline_or_pending` 的結果只代表本機副本，不能當成跨機最新版本。
 `memory recall` 可加 `--harness claude-code|codex` 記自報來源；`memory usage --json` 只統計
-本機查詢、命中與來源狀態，不存查詢原文、主張或來源路徑。這些數字不能判定答案正確；
+本機查詢、命中、來源與同步狀態，不存查詢原文、主張或來源路徑。這些數字不能判定答案正確；
 `memory eval-report <eval.json> --json` 對有凍結答案依據與原始輸出雜湊的成對試驗計分，
-格式及評分限制見 [試驗紀錄](docs/2026-10-18-memory-trial.md)。沒有 Turso/libSQL 雲端同步。
+格式及評分限制見 [試驗紀錄](docs/2026-10-18-memory-trial.md)。
 
 **迷你地圖（auto）**：專案 <300 LOC 時，讀全部比導航地圖便宜，`auto` 會自動改用
 15 行內的迷你地圖（About/Entry/Run/Build/Structure/Deps/Guardrails），避免負效益。

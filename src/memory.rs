@@ -1,6 +1,5 @@
-//! A small, reviewable project-memory ledger. The file lives in the repository so both coding
-//! agents and other machines can read the same records after Git synchronization. A remembered
-//! claim is never treated as proof: recall reports whether its source file is still byte-identical.
+//! The original Git JSON ledger, retained for explicit import and regression tests. The CLI now
+//! uses `turso_memory`; these source checks and entry types remain shared with that backend.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -53,6 +52,8 @@ pub struct MemoryHit {
 pub struct MemoryRecall {
     /// An absent ledger is different from a present ledger with no matching entries.
     pub ledger_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_status: Option<String>,
     pub hits: Vec<MemoryHit>,
 }
 
@@ -86,7 +87,7 @@ fn reject_ledger_symlinks(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn validate(ledger: &MemoryLedger) -> Result<(), String> {
+pub(crate) fn validate(ledger: &MemoryLedger) -> Result<(), String> {
     if ledger.schema != SCHEMA {
         return Err(format!("unsupported memory schema {}", ledger.schema));
     }
@@ -140,7 +141,7 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
+pub(crate) fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
     let replaced: HashSet<_> = ledger
         .entries
         .iter()
@@ -243,8 +244,18 @@ pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
         .try_exists()
         .map_err(|e| format!("cannot check memory ledger: {e}"))?;
     let ledger = load(root)?;
+    Ok(recall_ledger(root, query, &ledger, present, None))
+}
+
+pub(crate) fn recall_ledger(
+    root: &Path,
+    query: &str,
+    ledger: &MemoryLedger,
+    present: bool,
+    sync_status: Option<String>,
+) -> MemoryRecall {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
-    let active = active_entries(&ledger);
+    let active = active_entries(ledger);
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for entry in &active {
         *counts.entry(&entry.key).or_default() += 1;
@@ -275,8 +286,52 @@ pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
             .cmp(&b.entry.key)
             .then(a.entry.id.cmp(&b.entry.id))
     });
-    Ok(MemoryRecall {
+    MemoryRecall {
         ledger_status: if present { "present" } else { "absent" }.into(),
+        sync_status,
         hits,
+    }
+}
+
+pub(crate) fn new_entry(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: &Path,
+    source_line: usize,
+    supersedes: Option<&str>,
+) -> Result<MemoryEntry, String> {
+    let key = key.trim();
+    let claim = claim.trim();
+    if key.is_empty() || claim.is_empty() {
+        return Err("key and claim must be nonempty".into());
+    }
+    let bytes = source_bytes(root, source)?;
+    let source_text = std::str::from_utf8(&bytes).map_err(|_| "source is not UTF-8")?;
+    if source_line == 0
+        || source_text
+            .lines()
+            .nth(source_line - 1)
+            .is_none_or(|line| line.trim().is_empty())
+    {
+        return Err("source line does not exist".into());
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("clock error: {e}"))?
+        .as_nanos();
+    let source_name = source.to_string_lossy().to_string();
+    let source_sha256 = hash(&bytes);
+    let id =
+        hash(format!("{key}\0{claim}\0{source_name}\0{source_sha256}\0{timestamp}").as_bytes());
+    Ok(MemoryEntry {
+        id,
+        key: key.to_string(),
+        claim: claim.to_string(),
+        source: source_name,
+        source_line,
+        source_sha256,
+        recorded_at: timestamp.to_string(),
+        supersedes: supersedes.map(str::to_string),
     })
 }
