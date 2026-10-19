@@ -373,6 +373,24 @@ fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> Pr
 }
 
 fn main() {
+    // Cortexyoung owns the shared memory database. ClaudeCat remains a client, forwarding the
+    // memory verbs and their stdin unchanged so it cannot acquire a second active ledger.
+    let raw: Vec<_> = std::env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|arg| arg == "memory")
+        && !matches!(
+            raw.get(1).and_then(|arg| arg.to_str()),
+            Some("usage" | "eval-report")
+        )
+    {
+        let bin = std::env::var_os("CORT_BIN").unwrap_or_else(|| "cort".into());
+        match std::process::Command::new(bin).args(&raw).status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!("cannot run cort memory: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let cli = Cli::parse();
     match cli.command {
         Commands::Scan {

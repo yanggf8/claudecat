@@ -2,9 +2,8 @@ mod common;
 
 use claudecat::memory::{self, MemoryLedger};
 use std::fs;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[test]
 fn source_change_retracts_freshness_and_a_correction_replaces_the_active_claim() {
@@ -174,55 +173,23 @@ fn a_hand_edited_future_supersession_is_rejected() {
 }
 
 #[test]
-fn cli_reports_unconfigured_turso_without_logging_private_query() {
+fn memory_commands_delegate_to_cort_without_echoing_a_private_query_on_launch_failure() {
     let t = common::Tmp(common::temp_dir());
-    common::write(&t.0, "facts.md", "Secret answer is option A.\n");
-    memory::record(
-        &t.0,
-        "private deployment",
-        "Secret answer is option A",
-        Path::new("facts.md"),
-        1,
-        None,
-    )
-    .unwrap();
-    let bin = env!("CARGO_BIN_EXE_claudecat");
-    let data = t.0.join("local-data");
-    let call = |query: &str| {
-        let mut command = Command::new(bin);
-        command.env("CLAUDECAT_DATA_DIR", &data).args([
+    let result = Command::new(env!("CARGO_BIN_EXE_claudecat"))
+        .env("CORT_BIN", t.0.join("missing-cort"))
+        .args([
             "memory",
             "recall",
-            query,
-            "--root",
-            t.0.to_str().unwrap(),
+            "private deployment",
             "--harness",
             "codex",
-            "--json",
-        ]);
-        command.output().unwrap()
-    };
-    let result = call("private deployment");
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("Turso memory is not configured"));
-
-    let report = Command::new(bin)
-        .env("CLAUDECAT_DATA_DIR", &data)
-        .args(["memory", "usage", "--json"])
+        ])
         .output()
         .unwrap();
-    assert!(report.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
-    assert_eq!(json["recall_calls"], 1);
-    assert_eq!(json["errors"], 1);
-    assert_eq!(json["unchanged_hits"], 0);
-    assert_eq!(json["by_harness_declared"]["codex"], 1);
-    assert_eq!(json["by_machine"].as_object().unwrap().len(), 1);
-    let db = fs::read(data.join("usage.db")).unwrap();
-    let bytes = String::from_utf8_lossy(&db);
-    assert!(!bytes.contains("private deployment"));
-    assert!(!bytes.contains("Secret answer is option A"));
-    assert!(!bytes.contains("facts.md"));
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("cannot run cort memory"), "{stderr}");
+    assert!(!stderr.contains("private deployment"));
 }
 
 #[test]
@@ -256,48 +223,4 @@ fn old_recall_rows_keep_an_unknown_machine_instead_of_being_relabelled() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(report["recall_calls"], 1);
     assert_eq!(report["by_machine"]["legacy_no_stamp:legacy_unknown"], 1);
-}
-
-#[test]
-fn turso_configure_keeps_token_out_of_cli_output_and_private_on_disk() {
-    let t = common::Tmp(common::temp_dir());
-    let data = t.0.join("local-data");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claudecat"))
-        .env("CLAUDECAT_DATA_DIR", &data)
-        .args([
-            "memory",
-            "configure",
-            "--url",
-            "https://example.turso.io",
-            "--token-stdin",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"private-token\n")
-        .unwrap();
-    let result = child.wait_with_output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(!String::from_utf8_lossy(&result.stdout).contains("private-token"));
-    let path = data.join("turso-memory.json");
-    let config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(config["token"], "private-token");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
 }

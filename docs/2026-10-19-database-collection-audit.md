@@ -7,9 +7,9 @@ This inventory is based on the Rust writers and readers, not older architecture 
 | Code index and call graph | `cort index` | one cache DB per local checkout | none | Rebuildable cache tied to a path and tree; not a measurement stream. |
 | `cort` commands and hook verdicts | `rust/src/usage.rs` | `cort` `usage.db`, `command_log` | `telemetry_events`, `source=cort_command` | Structured command, outcome, available cost and staleness fields. Schema-v2 rows have per-row machine stamps. |
 | ClaudeCat navigation | `src/usage.rs` | ClaudeCat `usage.db`, `navigation_log` | `telemetry_events`, `source=claudecat_navigation` | Hit and route metrics, no raw query. |
-| Project-memory recalls | `src/usage.rs` | ClaudeCat `usage.db`, `memory_recall_log` | `telemetry_events`, `source=claudecat_memory_recall` | Exposure and source freshness, not answer correctness. |
+| Historical project-memory recalls | `src/usage.rs` | ClaudeCat `usage.db`, `memory_recall_log` | `telemetry_events`, `source=claudecat_memory_recall` | Pre-delegation exposure and source freshness, not answer correctness. Current recalls are cort command rows. |
 | Claude Code daily cost | `cort-evals cost-collect` | `cort-evals/claude-cost/*.json` | `telemetry_events`, `source=cost_daily` | Daily descriptive aggregate from surviving local transcripts. |
-| Curated project memory | `claudecat memory record/resolve` | Turso sync replica | `project_memory` | Reviewed claims with Git source fingerprints, pulled by both harnesses. |
+| Curated project memory | `cort memory record/resolve` | Cortexyoung-owned Turso sync replica | `project_memory` | Reviewed claims with Git source fingerprints, pulled by both harnesses. ClaudeCat forwards memory verbs to cort. |
 
 `claudecat telemetry sync` is the only cloud uploader for structured usage. It reads local
 sources without changing the writers, inserts each source row using a stable event ID, and

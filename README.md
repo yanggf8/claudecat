@@ -10,7 +10,7 @@ cort 回答「查詢時的問題」，ClaudeCat 回答「啟動時的導航」�
 - ❌ **不做**：「猜測式」auth/response/error pattern 偵測 + 假信心
 - ❌ **不做**：transit 壓縮——不改寫 agent 與 LLM 之間的任何位元組，
   地圖每行（`file:symbol:line`）必須逐字可查；與壓縮層（headroom 等）互補不重疊
-- ✅ **核心**：從 manifest + AST 產出**可驗證的事實地圖**；另有明示記錄的專案記憶試驗
+- ✅ **核心**：從 manifest + AST 產出**可驗證的事實地圖**；專案記憶由 cortexyoung/cort 管理
 - 對齊 Anthropic 官方大型 codebase 策略（agentic search > RAG）：
   給 Claude 精簡地圖（≤150 行），讓它自己做有目標的探索
 
@@ -46,22 +46,25 @@ claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo �
 claudecat scan --root /path/to/project
 ```
 
-## 可審核的專案記憶（Rust 試驗版）
+## 可審核的專案記憶（由 cortexyoung/cort 管理）
 
-`memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
+`claudecat memory` 將記憶指令轉交 `cort memory`；資料表、連線設定與本機同步副本由
+cortexyoung 管理。`memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
 記憶現在存於 TursoDB，同一資料庫與 Git origin 的專案識別供 Claude Code、Codex 和其他機器共用。
 先建立 **TursoDB**（本次使用 `turso db create --tursodb harnessuse`），取得 URL 與 token，於每台機器設定：
 `turso://` 或 `libsql://` 是連線 URL 前綴；資料庫類型以 `turso db show` 的 Type 判定。
 
 ```sh
-turso db tokens create harnessuse | claudecat memory configure --url "$(turso db show harnessuse --url)" --token-stdin
-claudecat memory sync
+turso db tokens create harnessuse | cort memory configure --url "$(turso db show harnessuse --url)" --token-stdin
+cort memory sync
 ```
 
-token 只從 stdin 讀取，保存在本機 `~/.local/share/claudecat/turso-memory.json`（Unix 權限 0600）；
+token 只從 stdin 讀取，保存在本機 `~/.local/share/cortexyoung/memory/turso-memory.json`（Unix 權限 0600）；
 同步副本也在本機資料目錄，不進 Git。若沒有 Git origin，設定相同的
-`CLAUDECAT_MEMORY_PROJECT` 以讓不同機器選到同一專案。舊 `.claudecat/memory.json` 可用
-`claudecat memory import-legacy` 明示匯入；確認同步後再另行處理舊檔。`--root` 可指定目標 repo。
+`CORT_MEMORY_PROJECT` 以讓不同機器選到同一專案。舊設定可用 `cort memory import-config --from
+<舊的 turso-memory.json>` 匯入；若舊副本有待上傳的寫入，先以舊版 ClaudeCat 同步。
+舊 `.claudecat/memory.json` 可用 `cort memory import-legacy` 明示匯入。
+`--root` 可指定目標 repo；每台機器都須安裝 cort 並設定相同的遠端資料庫。
 
 ```bash
 claudecat memory record --key "deployment option" --claim "Option B is current" \
@@ -86,16 +89,17 @@ JSON 輸出包含 `ledger_status`（`absent` / `present`）、`sync_status` 及 
 空的專案記憶不等於確認沒有相關決策。導航地圖及統計資料仍是本機資料。
 `memory recall` 的 `sync_status` 為 `synced` 才表示這次 push/pull 成功；
 `offline_or_pending` 的結果只代表本機副本，不能當成跨機最新版本。
-`memory recall` 可加 `--harness claude-code|codex` 記自報來源；`memory usage --json` 只統計
-本機查詢、命中、來源與同步狀態，不存查詢原文、主張或來源路徑。這些數字不能判定答案正確；
+`memory recall` 可加 `--harness claude-code|codex` 記自報來源；新的 cort 查詢會寫入 cort
+本機 `usage.db`，不存查詢原文。`claudecat memory usage --json` 僅讀取舊版 ClaudeCat 的
+本機查詢資料，不包含轉交後的新查詢。這些數字不能判定答案正確；
 `memory eval-report <eval.json> --json` 對有凍結答案依據與原始輸出雜湊的成對試驗計分，
 格式及評分限制見 [試驗紀錄](docs/2026-10-18-memory-trial.md)。
 
 ## 共用資料庫的結構化資料收集
 
 `cort` 的 hook 依目前程式預設只把判定寫入本機 `usage.db`，不對 Claude Code、Codex
-或 Kimi 輸出建議；`PostToolUse` 仍可修復既有索引。ClaudeCat 的導航和記憶查詢也先
-寫入本機 SQLite。網路同步由獨立的 Rust 指令執行，避免每次 hook 等待 TursoDB：
+或 Kimi 輸出建議；`PostToolUse` 仍可修復既有索引。ClaudeCat 導航與 cort 記憶查詢
+分別寫入各自的本機 SQLite。網路同步由獨立的 Rust 指令執行，避免每次 hook 等待 TursoDB：
 
 ```sh
 claudecat telemetry sync --json

@@ -4,7 +4,7 @@
 
 - 每日 cort-audit 分析的**發現**寫在 [CORT-AUDIT.md](CORT-AUDIT.md) 的「每日分析發現」區，
   長期指標表在同一份檔。本檔只留規則，文件放文件。
-- 回答本專案的過去決策或更正時，先執行 `claudecat memory recall "<關鍵詞>" --json`，
+- 回答本專案的過去決策或更正時，先執行 `cort memory recall "<關鍵詞>"`，
   再讀命中紀錄的 `source:source_line`。`ledger_status: absent`、無命中、來源變動或衝突
   都要如實說明；`sync_status: offline_or_pending` 只代表本機副本，不能宣稱跨機最新。
   來源指紋相同也不代表該行一定支持主張。Claude Code 查詢時加

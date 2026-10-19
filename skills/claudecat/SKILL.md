@@ -1,6 +1,6 @@
 ---
 name: claudecat
-description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, query explicitly recorded project memory with source freshness, quantify exploration cost, integrate with cortexyoung/cort, and run the daily cort-audit. Use when the user asks about a past project decision, a project map, a symbol location, cort index health, the daily audit, or invokes /claudecat.
+description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, use cortexyoung/cort for explicitly recorded project memory, quantify exploration cost, and run the daily cort-audit. Use when the user asks about a project map, a symbol location, cort index health, the daily audit, or invokes /claudecat.
 ---
 
 # ClaudeCat — Project Map & cort Integration
@@ -14,8 +14,8 @@ claudecat scan                  # 掃描專案，輸出導航地圖（--format t
 claudecat explore --json        # 量化探索成本：無地圖 vs 地圖的 token 粗估
 claudecat navigate "auth"       # 從一句話找目的地符號/檔案；--cort 優先用 cort 全量索引（需先 cort index）
 claudecat usage --json           # 查看本機導航命中統計（不含原始查詢）
-claudecat memory recall "<過去決策>" --json # 讀取有來源的專案記憶
-claudecat memory status --json       # 目前專案識別碼、同步狀態和衝突
+cort memory recall "<過去決策>" --harness claude-code # 讀取有來源的專案記憶
+cort memory status                 # 目前專案識別碼、同步狀態和衝突
 claudecat telemetry sync --json      # 上傳現有結構化收集事件
 claudecat update --dry-run      # 更新 claudecat 自動區塊；--dry-run 只顯示差異
 claudecat cort-status           # cort 索引狀態：新鮮度、chunk、relationships
@@ -26,11 +26,13 @@ claudecat findings - <<'EOF'    # 把每日分析發現寫進文件發現區塊�
 EOF
 ```
 
-## Project memory trial
+## Project memory through cort
 
-For a past project decision, use `claudecat memory recall "<query>" --json` from the target repo.
+For a past project decision, use `cort memory recall "<query>"` from the target repo.
+`claudecat memory` forwards active memory commands to cort for compatibility. Cortexyoung
+owns the memory table client, credentials, local replica, and sync behavior.
 Pass `--harness claude-code` or `--harness codex` when known; this is a declared label, not
-verified harness identity. `claudecat memory usage --json` counts local recall states only, not
+verified harness identity. `claudecat memory usage --json` counts only older ClaudeCat recall rows, not
 eligible questions or correct answers. A paired, reviewer-scored report uses
 `claudecat memory eval-report <eval.json> --json`.
 TursoDB holds explicitly curated project memory. `sync_status: synced` means this invocation
@@ -40,7 +42,7 @@ extracted from conversations. Treat `source_unchanged` as a byte-fingerprint che
 cited `source:source_line` before relying on the claim. Treat `source_changed`, `source_missing`,
 and `conflict` as unresolved. `ledger_status: absent` means no shared ledger exists here; an empty
 `hits` array in a present ledger means only that this query found no match. A new claim requires
-`claudecat memory record --key K --claim C --source RELATIVE_FILE --line N`; replacing one
+`cort memory record --key K --claim C --source RELATIVE_FILE --line N`; replacing one
 requires `--supersedes OLD_ID`. Review the cited source line
 before relying on it. Do not copy an unverified pasted agent report into memory.
 Cloud records require a tracked, committed source file. If `memory status --json` lists a
@@ -62,7 +64,7 @@ edit, but `source_changed` still requires reviewing the full source context.
 
 ## Deployment boundaries
 
-- Local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Project memory uses TursoDB; configure each machine with `memory configure`, then `memory sync`.
+- Local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Project memory uses TursoDB; configure each machine with `cort memory configure`, then `cort memory sync`.
 - Structured cort and ClaudeCat usage rows and daily cost reports are copied to the same
   TursoDB by `claudecat telemetry sync`; hooks still write locally first. The upload keeps
   every source row and its available machine attribution. Old navigation rows are explicitly

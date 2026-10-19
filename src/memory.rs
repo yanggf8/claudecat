@@ -233,11 +233,10 @@ pub fn record(
         );
     }
     match supersedes {
-        Some(id) => {
-            if !active.iter().any(|e| e.id == id && e.key == key) {
-                return Err("superseded id must be the active entry for the same key".into());
-            }
+        Some(id) if !active.iter().any(|e| e.id == id && e.key == key) => {
+            return Err("superseded id must be the active entry for the same key".into());
         }
+        Some(_) => {}
         None if active.iter().any(|e| e.key == key) => {
             return Err("an active entry has this key; pass --supersedes with its id".into());
         }

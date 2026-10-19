@@ -1,5 +1,17 @@
 # 2026-10-18: cross-agent project memory trial
 
+## Ownership correction, 2026-10-19
+
+The recommendation that ClaudeCat should own the memory product was wrong. The intended
+dependency has always been ClaudeCat → cort. Cortexyoung's `cort memory` now owns the reviewed
+claim logic, Turso connection, and per-machine replica. `claudecat memory` forwards its active
+record, resolve, recall, status, sync, configure, and import commands to `cort`; its `usage` and
+`eval-report` commands remain historical analysis tools. The existing `project_memory` table
+and normalized Git-origin project key are kept so the stored claims remain addressable. Each
+machine must import its existing credential config into cort and sync before switching agents.
+The local paired probe below measured the former ClaudeCat client; it is not evidence that the
+new cort client has passed a two-machine, two-harness run.
+
 ## Why this exists
 
 On this machine, a no-tool headless probe found a prior deployment correction in Claude Code's
