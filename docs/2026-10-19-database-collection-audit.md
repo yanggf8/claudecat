@@ -44,3 +44,20 @@ source matched the local scan exactly. 13,716 of the 13,756 `cort` rows are sche
 `unmatched_project_rows` rather than silently dropped. Both user timers
 (`cort-cost-collect` 01:30 UTC, `claudecat-telemetry-sync` 01:45 UTC) are enabled on this
 machine.
+
+## Interpretation after collection, 2026-10-20
+
+A read-only `claudecat cort-audit --json` on the same machine reported 4,272 search-hook
+probes, 5,223 edit-hook refreshes, seven `impact` calls, and 11 `memory` commands in the
+local 30-day usage window. The seven-day window held no `impact` or `context` call. These
+totals come from one local cort usage database; running the audit from either repository
+shows the same command totals, not per-repository adoption. The recent memory commands
+include deployment and manual checks. Search-hook delivery is silent by default. None of
+these event counts is an eligible-task denominator or an answer-quality result.
+
+The immediate evaluation gate is paired Claude Code and Codex work on frozen past decisions,
+superseded claims, changed sources, and a false pasted report. ClaudeCat can check trial
+artifact integrity with `memory eval-report` and measure navigation on separately labeled
+long tasks. Cortexyoung owns the memory claim logic and any later change to capture or
+recall timing. The full priority and measurement plan is in the sibling cortexyoung
+repository's `docs/2026-10-20-direction-after-collection.md`.

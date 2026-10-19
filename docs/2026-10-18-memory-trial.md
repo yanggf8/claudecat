@@ -9,8 +9,9 @@ record, resolve, recall, status, sync, configure, and import commands to `cort`;
 `eval-report` commands remain historical analysis tools. The existing `project_memory` table
 and normalized Git-origin project key are kept so the stored claims remain addressable. Each
 machine must import its existing credential config into cort and sync before switching agents.
-The local paired probe below measured the former ClaudeCat client; it is not evidence that the
-new cort client has passed a two-machine, two-harness run.
+The local paired probe below measured the former ClaudeCat client. A later second-machine
+read checked cort's shared data path, but neither client has passed a two-machine,
+two-harness answer-quality trial.
 
 ## Why this exists
 
@@ -55,8 +56,10 @@ The remote also accepted `BEGIN CONCURRENT; SELECT COUNT(*) FROM project_memory;
 ## Current memory contract
 
 - Curated rows live in `harnessuse.project_memory`, separated by a hash of the normalized Git
-  origin (or the explicit `CLAUDECAT_MEMORY_PROJECT` key). Both harnesses use the same ClaudeCat
-  CLI; `.claudecat/memory.json` is a legacy import source, not the active ledger.
+  origin (or the explicit `CORT_MEMORY_PROJECT` key; the old
+  `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration). Both harnesses use
+  `cort memory` for the active ledger; `claudecat memory` forwards its active commands.
+  `.claudecat/memory.json` is a legacy import source, not the active ledger.
 - `record` requires an explicit claim, stable key, tracked and committed source file, and
   nonblank line within the repo. It stores the whole source file's SHA-256 and the cited line's
   SHA-256, and requires `--supersedes` for a single-entry correction.
@@ -105,8 +108,8 @@ writing telemetry is visible on stderr while recall still answers. Existing sess
 change cannot be reconstructed from the new table.
 
 These rows show exposure, source freshness, and sync outcome. They do not count questions that should have used
-memory but never called it, prove that an agent read the source, or grade its answer. `cort` usage
-counts code-intelligence commands and cannot fill those gaps. In the original trial there was no
+memory but never called it, prove that an agent read the source, or grade its answer. Current
+`cort` usage includes memory command rows but cannot fill those gaps. In the original trial there was no
 Turso/libSQL service; project memory moved between machines through reviewed Git commits then.
 The current TursoDB deployment status is described above. Structured local usage is now uploaded
 by `claudecat telemetry sync`, while the hook writes remain local and fast.
@@ -137,3 +140,26 @@ eligible-task denominator, complete pairs, improvements, regressions, source che
 cost separately by machine, harness, model and scenario. Record whether other agent memory was
 present, since it could contaminate the no-ledger arm. A successful recall count alone is not
 evidence of improved correctness, and the two prompted states above are not a controlled trial.
+
+## Direction after collection, 2026-10-20
+
+The `cortexyoung` strategy and exact local audit snapshot are recorded in
+`cortexyoung/docs/2026-10-20-direction-after-collection.md`. On 2026-10-19, machine
+`2eb02d46ec5c4319` recorded the reviewed `memory ownership` claim in the cortexyoung
+project. On 2026-10-20, machine `44a8a38f0b05b9a8` synchronized a fresh cort-owned replica
+and recalled the same active claim with `source_unchanged`; ClaudeCat's forwarding command
+returned it too. This verifies one write-to-other-machine-read path. A correction written
+on one physical machine and checked on another, followed by paired agent answers, remains
+open.
+
+The ClaudeCat project's active `memory database` entry now returns `source_changed` because
+its cited README bytes changed. The current README still names `harnessuse`, but that must be
+reviewed and recorded as an explicit supersession before this entry can serve as fresh
+evidence in the answer trial. An unchanged claim string does not waive the source check.
+
+ClaudeCat's next job is to measure whether a concise project entry point and on-demand
+navigation help on real long tasks. Its local 30-day navigation usage on this machine was
+one event, so adoption remains unproven. Select tasks with labeled outcomes and compare the
+normal workflow against one with navigation available, including the map or handoff cost in
+the result. Keep that trial separate from the memory-on/off trial and from compact tool-output
+experiments. The memory ledger, source rules, and recall behavior remain owned by cort.
