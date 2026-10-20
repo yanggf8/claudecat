@@ -193,6 +193,13 @@ enum MemoryAction {
 
 #[derive(Subcommand)]
 enum TelemetryAction {
+    /// 寫入 telemetry 同步用的 Turso 連線設定（token 由 stdin 讀入）
+    Configure {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        token_stdin: bool,
+    },
     /// 同步 cort 用量、ClaudeCat 導航與記憶查詢、每日成本報告
     Sync {
         #[arg(long)]
@@ -643,6 +650,27 @@ fn main() {
             },
         },
         Commands::Telemetry { action } => match action {
+            TelemetryAction::Configure { url, token_stdin } => {
+                if !token_stdin {
+                    eprintln!(
+                        "telemetry configure: pass --token-stdin to read the auth token privately"
+                    );
+                    std::process::exit(1);
+                }
+                use std::io::Read;
+                let mut token = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut token) {
+                    eprintln!("telemetry configure: {e}");
+                    std::process::exit(1);
+                }
+                match turso_memory::configure(&url, &token) {
+                    Ok(path) => println!("Turso telemetry configured at {}", path.display()),
+                    Err(e) => {
+                        eprintln!("telemetry configure: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             TelemetryAction::Sync {
                 cort_usage,
                 claudecat_usage,

@@ -45,16 +45,60 @@ fn config_path() -> PathBuf {
     crate::data_dir::data_dir().join("turso-memory.json")
 }
 
+/// Write the credentials `telemetry sync` reads. `claudecat memory configure` forwards to cort
+/// and writes cort's own config, so this is the only command that creates this file.
+pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
+    let url = url.trim().trim_end_matches('/');
+    if !(url.starts_with("https://") || url.starts_with("turso://") || url.starts_with("libsql://"))
+        || token.trim().is_empty()
+    {
+        return Err("provide a Turso database URL and a nonempty auth token".into());
+    }
+    let path = config_path();
+    let body = serde_json::to_string(&Config {
+        url: url.to_string(),
+        token: token.trim().to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+    // A credential file is local to this machine and private to its owner.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("Turso memory config must not be a symlink".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), stamp));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        use std::io::Write;
+        file.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    crate::data_dir::write_atomic(&path, &body).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn config() -> Result<Config, String> {
     let path = config_path();
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("Turso memory config must not be a symlink".into());
     }
-    // `claudecat memory configure` now forwards to cort and writes cort's own config, not this
-    // file, so the message names the file telemetry actually reads instead of that command.
     let body = fs::read_to_string(&path).map_err(|_| {
         format!(
-            "Turso telemetry is not configured: {} is missing",
+            "Turso telemetry is not configured: {} is missing; run `claudecat telemetry configure --url URL --token-stdin`",
             path.display()
         )
     })?;

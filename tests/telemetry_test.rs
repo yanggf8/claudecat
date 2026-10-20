@@ -4,8 +4,7 @@ use std::fs;
 use std::process::Command;
 
 /// `claudecat memory configure` forwards to cort and writes cort's config, not the file telemetry
-/// reads, so an unconfigured sync must name that file rather than send the user to a command
-/// that would leave it missing.
+/// reads, so an unconfigured sync must name that file and the command that does write it.
 #[test]
 fn unconfigured_sync_names_the_file_it_reads_instead_of_a_command_that_cannot_write_it() {
     let tmp = tempfile::tempdir().unwrap();
@@ -26,6 +25,58 @@ fn unconfigured_sync_names_the_file_it_reads_instead_of_a_command_that_cannot_wr
     let expected = data.join("turso-memory.json");
     assert!(stderr.contains(&expected.display().to_string()), "{stderr}");
     assert!(!stderr.contains("claudecat memory configure"), "{stderr}");
+    assert!(stderr.contains("claudecat telemetry configure"), "{stderr}");
+}
+
+/// A new machine must be able to create the file telemetry reads without copying it by hand,
+/// and the token arrives on stdin so it never lands in shell history or a process listing.
+#[test]
+fn configure_writes_the_private_file_sync_reads() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let configure = |url: &str, token: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_claudecat"))
+            .env("CLAUDECAT_DATA_DIR", &data)
+            .args(["telemetry", "configure", "--url", url, "--token-stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(token.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let rejected = configure("http://example.turso.io", "tok\n");
+    assert!(!rejected.status.success());
+    assert!(!data.join("turso-memory.json").exists());
+
+    let result = configure("libsql://example.turso.io/", "secret-token\n");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let path = data.join("turso-memory.json");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(config["url"], "libsql://example.turso.io");
+    assert_eq!(config["token"], "secret-token");
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("secret-token"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }
 
 #[test]

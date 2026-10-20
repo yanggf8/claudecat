@@ -102,8 +102,12 @@ JSON 輸出包含 `ledger_status`（`absent` / `present`）、`sync_status` 及 
 分別寫入各自的本機 SQLite。網路同步由獨立的 Rust 指令執行，避免每次 hook 等待 TursoDB：
 
 ```sh
+turso db tokens create harnessuse | claudecat telemetry configure --url "$(turso db show harnessuse --url)" --token-stdin
 claudecat telemetry sync --json
 ```
+
+每台機器先執行一次 `telemetry configure`：token 只從 stdin 讀取，寫到 ClaudeCat 資料夾的
+`turso-memory.json`（Unix 權限 0600）。這和 `cort memory configure` 是兩個檔，各自設定。
 
 這個指令逐筆上傳 `cort.command_log`、ClaudeCat 的 `navigation_log` 與
 `memory_recall_log`，以及 `cort-evals cost-collect` 產生的每日 JSON。上傳內容保留

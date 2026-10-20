@@ -70,7 +70,7 @@ self-reported machine id (a hint, not proof; absent on entries an older cort wro
 
 - Local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Project memory uses TursoDB; configure each machine with `cort memory configure`, then `cort memory sync`.
 - Structured cort and ClaudeCat usage rows and daily cost reports are copied to the same
-  TursoDB by `claudecat telemetry sync`; hooks still write locally first. The upload keeps
+  TursoDB by `claudecat telemetry sync` (configure each machine once with `claudecat telemetry configure --url URL --token-stdin`; this is a separate file from cort's); hooks still write locally first. The upload keeps
   every source row and its available machine attribution. Old navigation rows are explicitly
   `legacy_unknown`. Raw conversation transcripts are outside this command's scope.
 - No MCP server — never re-register one; the CLI is the only interface.
