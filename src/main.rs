@@ -19,7 +19,7 @@ use claudecat::walk;
 use clap::{Parser, Subcommand, ValueEnum};
 use model::ProjectMap;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(
@@ -172,74 +172,10 @@ enum Commands {
     },
 }
 
+/// 只列出 ClaudeCat 自己處理的兩個子指令。其餘 memory 子指令（configure、sync、status、
+/// import-legacy、record、resolve、recall）在 `main()` 解析參數前就整段轉給 `cort memory`。
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// 設定本機 Turso 連線；token 從 stdin 讀取，絕不放入命令參數
-    Configure {
-        #[arg(long)]
-        url: String,
-        #[arg(long)]
-        token_stdin: bool,
-    },
-    /// 推送待同步的本機記錄並拉取其他機器的記錄
-    Sync {
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-    },
-    /// 顯示目前專案識別碼、同步狀態與待解決的記憶衝突
-    Status {
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// 將舊 Git JSON ledger 匯入 Turso；舊檔保留供人工檢查
-    ImportLegacy {
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-    },
-    /// 記錄一項待人工審查的主張，來源必須是 repo 內現有檔案與行號
-    Record {
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long)]
-        key: String,
-        #[arg(long)]
-        claim: String,
-        #[arg(long)]
-        source: PathBuf,
-        #[arg(long)]
-        line: usize,
-        #[arg(long)]
-        supersedes: Option<String>,
-    },
-    /// 以新來源紀錄收斂同一 key 的所有有效衝突版本
-    Resolve {
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long)]
-        key: String,
-        #[arg(long)]
-        claim: String,
-        #[arg(long)]
-        source: PathBuf,
-        #[arg(long)]
-        line: usize,
-        /// 重複指定 memory status 列出的每個有效 ID
-        #[arg(long, required = true)]
-        supersedes: Vec<String>,
-    },
-    /// 讀取目前版本，並標示來源是否與記錄時相同；不把指紋相同當成語義驗證
-    Recall {
-        query: String,
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        /// 自報的代理名稱；不是 hook 驗證的身分
-        #[arg(long, value_enum, default_value = "unknown")]
-        harness: MemoryHarnessArg,
-        #[arg(long)]
-        json: bool,
-    },
     /// 本機查詢事件統計，不含查詢內容，也不代表答案正確
     Usage {
         #[arg(long, default_value_t = 30)]
@@ -268,29 +204,6 @@ enum TelemetryAction {
         #[arg(long)]
         json: bool,
     },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum MemoryHarnessArg {
-    Unknown,
-    ClaudeCode,
-    Codex,
-    Kimi,
-    Grok,
-    Other,
-}
-
-impl MemoryHarnessArg {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::ClaudeCode => "claude-code",
-            Self::Codex => "codex",
-            Self::Kimi => "kimi",
-            Self::Grok => "grok",
-            Self::Other => "other",
-        }
-    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -661,171 +574,6 @@ fn main() {
             }
         },
         Commands::Memory { action } => match action {
-            MemoryAction::Configure { url, token_stdin } => {
-                if !token_stdin {
-                    eprintln!(
-                        "memory configure: pass --token-stdin to read the auth token privately"
-                    );
-                    std::process::exit(1);
-                }
-                use std::io::Read;
-                let mut token = String::new();
-                if let Err(e) = std::io::stdin().read_to_string(&mut token) {
-                    eprintln!("memory configure: {e}");
-                    std::process::exit(1);
-                }
-                match turso_memory::configure(&url, &token) {
-                    Ok(path) => println!("Turso memory configured at {}", path.display()),
-                    Err(e) => {
-                        eprintln!("memory configure: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            MemoryAction::Sync { root } => match turso_memory::sync(&root) {
-                Ok(message) => println!("{message}"),
-                Err(e) => {
-                    eprintln!("memory sync: {e}");
-                    std::process::exit(1);
-                }
-            },
-            MemoryAction::Status { root, json } => match turso_memory::status(&root) {
-                Ok(status) if json => match serde_json::to_string_pretty(&status) {
-                    Ok(body) => println!("{body}"),
-                    Err(e) => {
-                        eprintln!("memory status JSON: {e}");
-                        std::process::exit(1);
-                    }
-                },
-                Ok(status) => {
-                    println!(
-                        "project_id={} ({})",
-                        status.project_id, status.project_id_source
-                    );
-                    println!(
-                        "database={} sync={}",
-                        status.database_url, status.sync_status
-                    );
-                    println!(
-                        "entries={} active={} conflicts={}",
-                        status.total_entries,
-                        status.active_entries,
-                        status.conflicts.len()
-                    );
-                    for conflict in status.conflicts {
-                        println!(
-                            "conflict {}: {}",
-                            conflict.key,
-                            conflict.active_ids.join(" ")
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!("memory status: {e}");
-                    std::process::exit(1);
-                }
-            },
-            MemoryAction::ImportLegacy { root } => match turso_memory::import_legacy(&root) {
-                Ok(count) => println!("imported {count} legacy entries into Turso"),
-                Err(e) => {
-                    eprintln!("memory import-legacy: {e}");
-                    std::process::exit(1);
-                }
-            },
-            MemoryAction::Record {
-                root,
-                key,
-                claim,
-                source,
-                line,
-                supersedes,
-            } => match turso_memory::record(
-                &root,
-                &key,
-                &claim,
-                &source,
-                line,
-                supersedes.as_deref(),
-            ) {
-                Ok(entry) => {
-                    println!("recorded {}", entry.id);
-                    println!(
-                        "pushed to Turso; review the cited source before relying on this claim"
-                    );
-                }
-                Err(e) => {
-                    eprintln!("memory record: {e}");
-                    std::process::exit(1);
-                }
-            },
-            MemoryAction::Resolve {
-                root,
-                key,
-                claim,
-                source,
-                line,
-                supersedes,
-            } => match turso_memory::resolve(&root, &key, &claim, &source, line, &supersedes) {
-                Ok(entry) => println!("resolved {} with {}", key, entry.id),
-                Err(e) => {
-                    eprintln!("memory resolve: {e}");
-                    std::process::exit(1);
-                }
-            },
-            MemoryAction::Recall {
-                query,
-                root,
-                harness,
-                json,
-            } => {
-                let started = Instant::now();
-                let result = turso_memory::recall(&root, &query);
-                if let Err(e) = usage::record_memory_recall(
-                    &root,
-                    harness.as_str(),
-                    result.as_ref().ok(),
-                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                ) {
-                    eprintln!("memory telemetry unavailable: {e}");
-                }
-                match result {
-                    Ok(result) if json => match serde_json::to_string_pretty(&result) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("memory JSON: {e}");
-                            std::process::exit(1);
-                        }
-                    },
-                    Ok(result) => {
-                        println!(
-                            "Turso sync: {}",
-                            result.sync_status.as_deref().unwrap_or("unknown")
-                        );
-                        if result.ledger_status == "absent" {
-                            println!("memory ledger absent");
-                        } else if result.hits.is_empty() {
-                            println!("no project memory match in present ledger");
-                        }
-                        for hit in result.hits {
-                            println!(
-                                "{} [{}] {}",
-                                hit.entry.key, hit.evidence_status, hit.entry.claim
-                            );
-                            if let Some(status) = hit.source_line_status {
-                                println!("  source_line_status={status}");
-                            }
-                            println!(
-                                "  id={} source={}:{}",
-                                hit.entry.id, hit.entry.source, hit.entry.source_line
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("memory recall: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
             MemoryAction::Usage { days, json } => match usage::memory_report(days) {
                 Ok(report) if json => match serde_json::to_string_pretty(&report) {
                     Ok(s) => println!("{s}"),

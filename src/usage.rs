@@ -2,7 +2,6 @@
 //! `telemetry sync` copies these structured rows to TursoDB separately.
 //! Raw queries are deliberately never stored; recall counts are exposure, not correctness.
 use crate::data_dir;
-use crate::memory::MemoryRecall;
 use crate::navigate::NavigateResult;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -174,59 +173,8 @@ fn ensure_memory_machine_columns(conn: &mut Connection) -> rusqlite::Result<()> 
     tx.commit()
 }
 
-/// Record the shape of one CLI recall. No query, claim, source, or session text is stored.
-/// This is an exposure count, never a correctness grade or an eligible-question denominator.
-pub fn record_memory_recall(
-    root: &Path,
-    harness_declared: &str,
-    result: Option<&MemoryRecall>,
-    elapsed_ms: u64,
-) -> Result<(), String> {
-    if std::env::var_os("CLAUDECAT_NO_USAGE").is_some() {
-        return Ok(());
-    }
-    let mut conn = open().map_err(|e| e.to_string())?;
-    ensure_memory_machine_columns(&mut conn).map_err(|e| e.to_string())?;
-    let mut counts = [0_i64; 4];
-    if let Some(result) = result {
-        for hit in &result.hits {
-            match hit.evidence_status.as_str() {
-                "source_unchanged" => counts[0] += 1,
-                "source_changed" => counts[1] += 1,
-                "source_missing" => counts[2] += 1,
-                "conflict" => counts[3] += 1,
-                _ => return Err("unknown memory evidence status".into()),
-            }
-        }
-    }
-    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let (machine_id, machine_source) = machine_stamp();
-    conn.execute(
-        "INSERT INTO memory_recall_log
-         (ts, project_id, machine_id, machine_source, harness_declared, outcome, ledger_status, sync_status, hit_count,
-          unchanged_hits, changed_hits, missing_hits, conflict_hits, elapsed_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![
-            now_ms(),
-            crate::cort::project_id(&real_root.to_string_lossy()),
-            machine_id,
-            machine_source,
-            harness_declared,
-            if result.is_some() { "ok" } else { "error" },
-            result.map_or("unknown", |r| r.ledger_status.as_str()),
-            result.and_then(|r| r.sync_status.as_deref()).unwrap_or("unknown"),
-            result.map_or(0, |r| r.hits.len() as i64),
-            counts[0],
-            counts[1],
-            counts[2],
-            counts[3],
-            elapsed_ms.min(i64::MAX as u64) as i64,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
+// `memory_recall_log` gets no new rows from ClaudeCat: `memory recall` forwards to cort, which
+// records its own usage. The table and this report stay so historical recall rows remain readable.
 pub fn memory_report(days: u32) -> Result<MemoryUsageReport, String> {
     let mut conn = open().map_err(|e| e.to_string())?;
     ensure_memory_machine_columns(&mut conn).map_err(|e| e.to_string())?;

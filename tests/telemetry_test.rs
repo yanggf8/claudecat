@@ -3,6 +3,31 @@ use rusqlite::Connection;
 use std::fs;
 use std::process::Command;
 
+/// `claudecat memory configure` forwards to cort and writes cort's config, not the file telemetry
+/// reads, so an unconfigured sync must name that file rather than send the user to a command
+/// that would leave it missing.
+#[test]
+fn unconfigured_sync_names_the_file_it_reads_instead_of_a_command_that_cannot_write_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir(&data).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_claudecat"))
+        .env("CLAUDECAT_DATA_DIR", &data)
+        .args(["telemetry", "sync", "--cort-usage"])
+        .arg(tmp.path().join("none-cort.db"))
+        .arg("--claudecat-usage")
+        .arg(tmp.path().join("none-cat.db"))
+        .arg("--cost-reports")
+        .arg(tmp.path().join("none-costs"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let expected = data.join("turso-memory.json");
+    assert!(stderr.contains(&expected.display().to_string()), "{stderr}");
+    assert!(!stderr.contains("claudecat memory configure"), "{stderr}");
+}
+
 #[test]
 fn collection_keeps_each_local_event_and_its_source_attribution() {
     let tmp = tempfile::tempdir().unwrap();
