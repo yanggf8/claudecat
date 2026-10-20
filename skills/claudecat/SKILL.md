@@ -50,9 +50,10 @@ conflict, use `memory resolve --key K --claim C --source RELATIVE_FILE --line N`
 `--supersedes ID` for every active ID under that key. A resolution creates a reviewed new
 entry and keeps the old entries for audit. `source_line_status: same_line` helps locate an
 edit, but `source_changed` still requires reviewing the full source context.
-`source_line_status: moved` means the cited text now sits only at `source_line_now`; read it
-there instead of recording a supersession. `recorded_machine` names the machine that wrote
-the entry (absent on entries written before cort stamped it).
+`source_line_status: moved` means the cited text now sits only at `source_line_now`; it locates
+the line but does not vouch for the claim. Read the line and its section there; skip the
+supersession only if that context still supports the claim. `recorded_machine` is the writer's
+self-reported machine id (a hint, not proof; absent on entries an older cort wrote).
 
 ## Where output goes
 
