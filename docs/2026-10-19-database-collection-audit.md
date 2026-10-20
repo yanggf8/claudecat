@@ -45,6 +45,16 @@ source matched the local scan exactly. 13,716 of the 13,756 `cort` rows are sche
 (`cort-cost-collect` 01:30 UTC, `claudecat-telemetry-sync` 01:45 UTC) are enabled on this
 machine.
 
+2026-10-20, machine `2eb02d46ec5c4319`: this machine had never synced, because no command
+could create its `turso-memory.json` after `memory configure` began forwarding to cort.
+`claudecat telemetry configure` (0e6cda6) wrote it from cort's own `harnessuse` credentials.
+The first sync inserted all 16,510 scanned rows; a rerun inserted only the 2 recorded in
+between. No `cost_daily` source exists here (`cost-collect` has never run on this machine).
+72 rows were unmatched, all from 12 project IDs absent from every local cort index. Hashing
+existing directories recovered 6: four live repos whose indexes were gone (20 rows; a fresh
+`cort index` in each mapped them, leaving 52) and `cortexyoung/rust` / `cortexyoung/evals`
+subdirectory runs (4 rows, left unmapped). The other 6 IDs (48 rows) match no existing path.
+
 ## Interpretation after collection, 2026-10-20
 
 A read-only `claudecat cort-audit --json` on the same machine reported 4,272 search-hook
