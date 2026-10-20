@@ -124,6 +124,9 @@ DB 的機器戳，搬過 DB 後無法可靠拆分逐列來源。同步回報以 
 專案別名取同步當下的 Git origin；若 repo 改過 origin，它不能證明舊事件當時屬於
 同一遠端。`by_source`、`unattributed_machine_rows`、`unmatched_project_rows` 與
 `missing_sources` 是每次同步的資料品質檢查，不能把未歸屬的列合併分析。
+別名只對「本機 cort 索引裡有、且有 Git origin」的專案產生：專案還在但索引已刪，
+在該專案跑一次 `cort index`，下次同步就會對上；在 repo 子目錄執行留下的 ID、
+或原路徑已不存在的 ID 無法可靠推回，維持未對應。
 
 每日收集可以用 `systemd/claudecat-telemetry-sync.{service,timer}`。先安裝此 Rust
 binary，再把兩個 unit 放到 `~/.config/systemd/user/`，執行
