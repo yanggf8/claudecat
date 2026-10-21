@@ -52,6 +52,39 @@ fn every_ledger_verb_forwards_to_cort() {
     }
 }
 
+/// `memory --help` used to forward too, so it printed cort's help and hid the two verbs only
+/// ClaudeCat answers. It is answered here and points at cort for the rest; a verb's own `--help`
+/// still forwards, because that verb's options live in cort.
+#[test]
+fn memory_help_is_answered_here_and_names_cort_for_the_ledger_verbs() {
+    let t = common::Tmp(common::temp_dir());
+    for spelling in ["--help", "-h", "help"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_claudecat"))
+            .env("CORT_BIN", t.0.join("missing-cort"))
+            .args(["memory", spelling])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            result.status.success(),
+            "{spelling}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(stdout.contains("usage"), "{spelling}: {stdout}");
+        assert!(stdout.contains("eval-report"), "{spelling}: {stdout}");
+        assert!(
+            stdout.contains("cort memory --help"),
+            "{spelling}: {stdout}"
+        );
+    }
+    let verb_help = Command::new(env!("CARGO_BIN_EXE_claudecat"))
+        .env("CORT_BIN", t.0.join("missing-cort"))
+        .args(["memory", "recall", "--help"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&verb_help.stderr).contains("cannot run cort memory"));
+}
+
 #[test]
 fn old_recall_rows_keep_an_unknown_machine_instead_of_being_relabelled() {
     let t = common::Tmp(common::temp_dir());

@@ -129,6 +129,9 @@ enum Commands {
         json: bool,
     },
     /// 查詢或記錄有來源的專案記憶；使用 Turso Database 同步
+    #[command(
+        after_help = "其餘子指令（configure、record、recall、status、sync 等）原樣轉交給 cort；用法見 `cort memory --help`。"
+    )]
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -295,11 +298,12 @@ fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> Pr
 fn main() {
     // Cortexyoung owns the shared memory database. ClaudeCat remains a client, forwarding the
     // memory verbs and their stdin unchanged so it cannot acquire a second active ledger.
+    // `memory --help` stays here: forwarded, it hid the two verbs only ClaudeCat answers.
     let raw: Vec<_> = std::env::args_os().skip(1).collect();
     if raw.first().is_some_and(|arg| arg == "memory")
         && !matches!(
             raw.get(1).and_then(|arg| arg.to_str()),
-            Some("usage" | "eval-report")
+            Some("usage" | "eval-report" | "--help" | "-h" | "help")
         )
     {
         let bin = std::env::var_os("CORT_BIN").unwrap_or_else(|| "cort".into());
