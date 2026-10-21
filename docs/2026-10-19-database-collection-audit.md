@@ -45,8 +45,9 @@ source matched the local scan exactly. 13,716 of the 13,756 `cort` rows are sche
 (`cort-cost-collect` 01:30 UTC, `claudecat-telemetry-sync` 01:45 UTC) are enabled on this
 machine.
 
-2026-10-20, machine `2eb02d46ec5c4319`: this machine had never synced, because no command
-could create its `turso-memory.json` after `memory configure` began forwarding to cort.
+2026-10-20, machine `2eb02d46ec5c4319`: this machine had never synced: its
+`turso-memory.json` had never existed, and once `memory configure` forwarded to cort no
+command could create it.
 `claudecat telemetry configure` (0e6cda6) wrote it from cort's own `harnessuse` credentials.
 The first sync inserted all 16,510 scanned rows; a rerun inserted only the 2 recorded in
 between. No `cost_daily` source exists here (`cost-collect` has never run on this machine).

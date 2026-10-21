@@ -65,7 +65,7 @@ pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err("Turso memory config must not be a symlink".into());
+        return Err("Turso telemetry config must not be a symlink".into());
     }
     #[cfg(unix)]
     {
@@ -82,9 +82,15 @@ pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
             .open(&tmp)
             .map_err(|e| e.to_string())?;
         use std::io::Write;
-        file.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        // A failed write must not leave a partial copy of the token beside the config.
+        let written = file
+            .write_all(body.as_bytes())
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&tmp, &path));
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
     }
     #[cfg(not(unix))]
     crate::data_dir::write_atomic(&path, &body).map_err(|e| e.to_string())?;
@@ -94,7 +100,7 @@ pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
 fn config() -> Result<Config, String> {
     let path = config_path();
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err("Turso memory config must not be a symlink".into());
+        return Err("Turso telemetry config must not be a symlink".into());
     }
     let body = fs::read_to_string(&path).map_err(|_| {
         format!(
@@ -102,7 +108,7 @@ fn config() -> Result<Config, String> {
             path.display()
         )
     })?;
-    serde_json::from_str(&body).map_err(|e| format!("invalid Turso memory config: {e}"))
+    serde_json::from_str(&body).map_err(|e| format!("invalid Turso telemetry config: {e}"))
 }
 
 /// Resolve an indexed project's identity from its own origin, ignoring the process-wide
