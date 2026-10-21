@@ -49,7 +49,8 @@ claudecat scan --root /path/to/project
 ## 可審核的專案記憶（由 cortexyoung/cort 管理）
 
 `claudecat memory` 將記憶指令轉交 `cort memory`；資料表、連線設定與本機同步副本由
-cortexyoung 管理。`memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
+cortexyoung 管理。`claudecat memory --help` 只列 ClaudeCat 自己處理的 `usage`、`eval-report`；
+轉交子指令的選項見 `cort memory --help`。`memory` 只處理**明示記錄**的專案主張，不自動把對話或貼來的 agent 報告寫成事實。
 記憶現在存於 TursoDB，同一資料庫與 Git origin 的專案識別供 Claude Code、Codex 和其他機器共用。
 先建立 **TursoDB**（本次使用 `turso db create --tursodb harnessuse`），取得 URL 與 token，於每台機器設定：
 `turso://` 或 `libsql://` 是連線 URL 前綴；資料庫類型以 `turso db show` 的 Type 判定。
