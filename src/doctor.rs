@@ -3,12 +3,14 @@
 //! `claudecat doctor --install`；各機的列靠 host 欄位在 CORT-AUDIT.md 共存。
 use std::path::Path;
 
-/// 每日追蹤的 cron 條目（09:17，避開整點；cargo 用絕對路徑——cron 的 PATH 很瘦）
+/// 每日追蹤的 cron 條目（09:17，避開整點；執行檔用絕對路徑——cron 的 PATH 很瘦）。
+/// 跑已安裝的 `claudecat`，不 `cargo run`：後者在原始碼變動後的第一個早上會在 cron 裡
+/// 整個重編，與其他 build 搶記憶體。代價是拉了新碼要 `cargo install --path . --locked`
+/// 排程才吃得到。
 pub fn track_cron_line(manifest_dir: &str, root: &Path) -> String {
     format!(
-        "17 9 * * * cd {manifest_dir} && $HOME/.cargo/bin/cargo run -q --manifest-path \
-         {manifest_dir}/Cargo.toml -- cort-audit --root {} --track CORT-AUDIT.md >> \
-         {manifest_dir}/cort-audit.log 2>&1",
+        "17 9 * * * cd {manifest_dir} && $HOME/.cargo/bin/claudecat cort-audit --root {} \
+         --track CORT-AUDIT.md >> {manifest_dir}/cort-audit.log 2>&1",
         root.display()
     )
 }
@@ -56,18 +58,24 @@ pub fn runtime_dirs() -> Vec<String> {
         .collect()
 }
 
+/// 這一行是不是追蹤條目（寬鬆比對：cort-audit + --track；新舊模板都認得）
+fn is_track_line(l: &str) -> bool {
+    l.contains("cort-audit") && l.contains("--track")
+}
+
+/// 這一行是不是分析條目
+fn is_analysis_line(l: &str) -> bool {
+    l.contains("cort-audit-analysis-prompt.md")
+}
+
 /// 判斷既有 crontab 是否已含追蹤條目（寬鬆比對：cort-audit + --track）
 pub fn has_track_entry(crontab: &str) -> bool {
-    crontab
-        .lines()
-        .any(|l| l.contains("cort-audit") && l.contains("--track"))
+    crontab.lines().any(is_track_line)
 }
 
 /// 判斷既有 crontab 是否已含分析條目
 pub fn has_analysis_entry(crontab: &str) -> bool {
-    crontab
-        .lines()
-        .any(|l| l.contains("cort-audit-analysis-prompt.md"))
+    crontab.lines().any(is_analysis_line)
 }
 
 /// 分析條目用哪顆執行檔。`CLAUDECAT_ANALYSIS_BIN` 指名（musecode/claude/絕對路徑）；
@@ -118,10 +126,24 @@ fn resolve_bin(name: &str) -> Option<String> {
 /// 「已是最新」，`--install` 會安靜地什麼都不做——一個宣稱幂等、實際是「永不升級」的比對。
 /// 整行比對同時涵蓋原本的用途（換執行檔＝換行內容）。
 pub fn merge_analysis_entry(existing: &str, line: &str) -> (String, bool) {
-    let is_analysis = |l: &str| l.contains("cort-audit-analysis-prompt.md");
-    let stale = |l: &str| is_analysis(l) && l.trim() != line.trim();
+    merge_whole_line(existing, line, is_analysis_line)
+}
+
+/// 併入追蹤條目：與 [`merge_analysis_entry`] 同一套整行語意——既有追蹤條目與期望整行
+/// 不同就換掉，相同才不動，沒有就附加。回傳 (新內容, 是否有變更)。
+///
+/// 原本用 `has_track_entry` 判「在不在」，於是把模板從 `cargo run` 換成已安裝的
+/// `claudecat` 後，舊的 09:17 條目永遠升級不了——與分析條目當初同一個「永不升級」的坑。
+pub fn merge_track_entry(existing: &str, line: &str) -> (String, bool) {
+    merge_whole_line(existing, line, is_track_line)
+}
+
+/// 兩種條目共用的整行合併：`is_entry` 認出的行中，trim 後與 `line` 不同者移除；
+/// 剩下仍有相符者就不附加，否則把 `line` 附在最後。只留一份實作，兩條才不會再分岔。
+fn merge_whole_line(existing: &str, line: &str, is_entry: fn(&str) -> bool) -> (String, bool) {
+    let stale = |l: &str| is_entry(l) && l.trim() != line.trim();
     let kept: Vec<&str> = existing.lines().filter(|l| !stale(l)).collect();
-    let up_to_date = kept.iter().any(|l| is_analysis(l));
+    let up_to_date = kept.iter().any(|l| is_entry(l));
     if up_to_date {
         let out = format!("{}\n", kept.join("\n"));
         let changed = existing != out;

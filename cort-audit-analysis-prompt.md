@@ -8,9 +8,10 @@
 ## 步驟
 
 1. 確認 `/home/yanggf/a/claudecat/CORT-AUDIT.md` 最新列是今天的；缺則：
-   `cd /home/yanggf/a/claudecat && /home/yanggf/.cargo/bin/cargo run -q -- cort-audit --root . --track CORT-AUDIT.md`
+   `cd /home/yanggf/a/claudecat && /home/yanggf/.cargo/bin/claudecat cort-audit --root . --track CORT-AUDIT.md`
+   （一律用已安裝的 `claudecat`，不要 `cargo run`——排程裡重編會與其他 build 搶記憶體。）
 2. decline/shape 的需求排序看 `cort-audit` 報告本身（步驟 1 的 stdout 就有，或
-   `cargo run -q -- cort-audit --root .`），不用再開手工 SQL——報告的「hook census」區
+   `cd /home/yanggf/a/claudecat && /home/yanggf/.cargo/bin/claudecat cort-audit --root .`），不用再開手工 SQL——報告的「hook census」區
    （claudecat 已自算 cortexyoung 6623113d 口徑）每列恰落一桶、加總＝fires；
    「top declines」已排除 `not_a_search_tool` baseline（那是「本來就不是搜尋」的正確沉默）；
    「top no_shape shapes」＝`工具名|排序後的 top-level key 名`，是 issue #3 的需求排序依據：
@@ -27,7 +28,7 @@
    - deep/30d、deep/7d 趨勢（2026-09-06 基線 deep30=3、deep7=2；注意 30 天滾動窗口效應）
    - decline 排序與樣本數
 3b. **回報**（最後一步，不可省略）：把結論濃縮成 3–8 條 markdown bullet，寫進文件：
-   `/home/yanggf/.cargo/bin/cargo run -q -- findings - --file CORT-AUDIT.md`
+   `cd /home/yanggf/a/claudecat && /home/yanggf/.cargo/bin/claudecat findings - --file CORT-AUDIT.md`
    （內容走 stdin）。只寫**判讀與該做什麼**，不要貼原始數字表——數字在同檔的長期指標表裡。
    整段取代、只留最新一天，歷史在 git。**log 檔不算回報**：使用者看的是文件，
    2026-09-09 之前這條循環跑完等於沒回報，就是因為終點只有 log。
@@ -56,7 +57,8 @@
    提醒先跑 `cort_upgrade --check` 診斷，再 `cort_upgrade` 修——**必須用樹內 binary**
    `/home/yanggf/a/cortexyoung/rust/target/release/cort_upgrade`：PATH 上 `~/.cargo/bin`
    那份的 `repo_root()` 從 `current_exe()` 往上找樹（找 `src/pack`/`skills`），永遠走到
-   `/home` 就 fatal；且 target 可能比樹舊，先 `cargo build --release`（`15487664` 起
+   `/home` 就 fatal；且 target 可能比樹舊，先 `cd /home/yanggf/a/cortexyoung/rust && cargo build --release`
+   （先 `pgrep -af 'cargo (build|test|install)'` 確認沒有別的 build 在跑；一次只跑一個）（`15487664` 起
    `--check` 自己會把 target 比樹舊判成 Drifted，修法仍是先 build）。它不動才退回
    `cargo install --path /home/yanggf/a/cortexyoung/rust --force`）——先查根因再回報。
 5b. **未chunk檔用欄位判形狀，不要再開檔人工猜**（cortexyoung schema v7 起；09-09 那條人工走法

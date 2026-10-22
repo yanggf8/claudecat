@@ -414,16 +414,16 @@ fn main() {
             if install {
                 let manifest_dir = env!("CARGO_MANIFEST_DIR");
                 let existing = doctor::read_crontab();
-                let mut updated = existing.clone();
-                if doctor::has_track_entry(&updated) {
-                    println!("Track cron: 已存在，不重複安裝");
-                } else {
-                    updated = doctor::merge_entry(
-                        &updated,
-                        &doctor::track_cron_line(manifest_dir, &root),
-                        doctor::has_track_entry,
-                    );
+                let (mut updated, track_changed) = doctor::merge_track_entry(
+                    &existing,
+                    &doctor::track_cron_line(manifest_dir, &root),
+                );
+                if track_changed && doctor::has_track_entry(&existing) {
+                    println!("Track cron -> 已更新為目前模板");
+                } else if track_changed {
                     println!("Track cron -> 已安裝");
+                } else {
+                    println!("Track cron: 已是最新");
                 }
                 match doctor::analysis_bin() {
                     Ok(bin) => {

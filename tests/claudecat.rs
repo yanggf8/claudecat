@@ -1398,6 +1398,10 @@ fn doctor_track_cron_line_detection_and_merge_idempotent() {
     assert!(line.starts_with("17 9 * * * "), "避開整點的分鐘數");
     assert!(line.contains("cort-audit --root /home/u/proj --track CORT-AUDIT.md"));
     assert!(line.contains("cort-audit.log"), "輸出要落 log 便于診斷");
+    assert!(
+        line.contains("$HOME/.cargo/bin/claudecat cort-audit") && !line.contains("cargo run"),
+        "跑已安裝的執行檔，cron 裡不得重編"
+    );
 
     assert!(!claudecat::doctor::has_track_entry(""));
     assert!(claudecat::doctor::has_track_entry(&line));
@@ -1469,6 +1473,40 @@ fn doctor_analysis_entry_swaps_runner_on_preference_change() {
     let (same, changed2) = claudecat::doctor::merge_analysis_entry(&out, &new_line);
     assert!(!changed2);
     assert_eq!(same, out);
+}
+
+/// 追蹤條目換了模板（cargo run → 已安裝的 claudecat），既有的舊條目必須被升級，
+/// 不能因為「cort-audit + --track 已存在」就被判成已安裝而永遠不動。
+#[test]
+fn doctor_track_entry_upgrades_old_cargo_run_line() {
+    let old_track = "17 9 * * * cd /home/u/claudecat && $HOME/.cargo/bin/cargo run -q \
+                     --manifest-path /home/u/claudecat/Cargo.toml -- cort-audit --root \
+                     /home/u/proj --track CORT-AUDIT.md >> /home/u/claudecat/cort-audit.log 2>&1";
+    let aline = claudecat::doctor::analysis_cron_line(
+        "/home/u/.local/bin/musecode",
+        "/home/u/claudecat",
+        &[],
+    );
+    let existing = format!("0 0 * * * echo hi\n{old_track}\n{aline}\n");
+    let new_track = claudecat::doctor::track_cron_line(
+        "/home/u/claudecat",
+        std::path::Path::new("/home/u/proj"),
+    );
+
+    let (out, changed) = claudecat::doctor::merge_track_entry(&existing, &new_track);
+    assert!(changed, "舊 cargo run 條目必須被換掉");
+    assert_eq!(
+        out.lines().filter(|l| *l == new_track).count(),
+        1,
+        "新條目恰好一份"
+    );
+    assert!(!out.contains("cargo run"), "舊條目不得殘留");
+    assert!(out.contains("0 0 * * * echo hi"), "無關條目保留");
+    assert!(out.lines().any(|l| l == aline), "分析條目保留");
+
+    let (again, changed2) = claudecat::doctor::merge_track_entry(&out, &new_track);
+    assert!(!changed2, "已是目前模板 → 不動");
+    assert_eq!(again, out);
 }
 
 /// CLAUDECAT_ANALYSIS_BIN 指名時必須被尊重（額度調頭的開關）。
