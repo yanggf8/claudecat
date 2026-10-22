@@ -19,7 +19,8 @@ pub fn find_claude_md(root: &Path) -> PathBuf {
     root.join("CLAUDE.md")
 }
 
-/// 地圖位置指標種子：播種一次、之後永不改寫（同 guardrails 的契約）。
+/// 地圖位置指標種子：只隨首次 guardrails 播種一起播種、之後永不改寫——
+/// guardrails 已在而指標不在，代表使用者刪了它，刪除就此生效、不再補種。
 pub fn pointer_block() -> String {
     format!(
         "{PTR_BEGIN}\n- 專案地圖（Project Map）不在本檔：`claudecat update` 會把它寫到各機器的 `~/.local/share/claudecat/<project-id>/map.md`（`CLAUDECAT_DATA_DIR` 可覆蓋），並在輸出印出 `map ->` 的確切路徑。本檔只放手寫規則，產生的地圖不進 git。本區由 claudecat 播種一次，之後永不改寫。\n{PTR_END}\n"
@@ -73,8 +74,9 @@ pub fn strip_auto_block(content: &str) -> (String, bool) {
     }
 }
 
-/// v2.1：CLAUDE.md 只放手寫規則＋種子。移除舊版 auto 區塊、確保 guardrails 與地圖
-/// 指標兩個種子（都只在缺時播種、之後永不改寫）。
+/// v2.1：CLAUDE.md 只放手寫規則＋種子。移除舊版 auto 區塊、確保 guardrails 種子
+/// （缺時播種、之後永不改寫）；地圖指標只在首次設定（本次執行前 guardrails 不在）時
+/// 一併播種，所以使用者刪掉指標後不會被補回。不靠狀態檔或新標記，每台機器行為一致。
 /// 回傳 (changed, new_content)；dry_run 只算差異不寫檔。
 pub fn update_section(path: &Path, dry_run: bool) -> std::io::Result<(bool, String)> {
     // 讀取失敗必須傳播：整檔改寫的世界裡，把讀不到當成空檔等於銷毀它。
@@ -86,6 +88,10 @@ pub fn update_section(path: &Path, dry_run: bool) -> std::io::Result<(bool, Stri
     let (stripped, _) = strip_auto_block(&existing);
     let mut new_content = stripped;
     let mut changed = new_content != existing.as_str();
+
+    // 首次設定 = 本次播種前 guardrails 不在。必須在 guardrails 播種前算一次：
+    // 之後 new_content 已含 guardrails（dry_run 時則沒有），不能再拿來判斷。
+    let first_setup = !crate::guardrails::has_marker(&new_content);
 
     // First-time setup: seed a guardrails block (never overwrite after creation)
     if !crate::guardrails::has_marker(&new_content) {
@@ -100,8 +106,10 @@ pub fn update_section(path: &Path, dry_run: bool) -> std::io::Result<(bool, Stri
         }
     }
 
-    // First-time setup: seed the map-pointer rule (same never-overwrite contract)
-    if !has_pointer(&new_content) {
+    // First-time setup only: seed the map-pointer rule alongside a first-time guardrails
+    // seed (same never-overwrite contract). Guardrails present + pointer absent means the
+    // user deleted it, so the deletion sticks.
+    if first_setup && !has_pointer(&new_content) {
         let mut with_seed = new_content.clone();
         if !with_seed.ends_with('\n') {
             with_seed.push('\n');

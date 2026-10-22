@@ -254,6 +254,35 @@ fn map_pointer_seeded_once_and_never_rewritten() {
 }
 
 #[test]
+fn map_pointer_removed_by_user_is_not_reseeded() {
+    use claudecat::claude_md::{PTR_BEGIN, PTR_END};
+    use claudecat::guardrails::GR_BEGIN;
+    let dir = temp_project();
+    let path = dir.join("CLAUDE.md");
+    fs::write(&path, "# P\n").unwrap();
+    let (_, content) = claudecat::claude_md::update_section(&path, false).unwrap();
+    assert!(content.contains(GR_BEGIN));
+    assert!(content.contains(PTR_BEGIN));
+    // user deletes the whole map-pointer block (begin line through end line), keeps guardrails
+    let begin = content.find(PTR_BEGIN).unwrap();
+    let line_start = content[..begin].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = content.find(PTR_END).unwrap() + PTR_END.len();
+    let line_end = content[end..]
+        .find('\n')
+        .map(|i| end + i + 1)
+        .unwrap_or(content.len());
+    let removed = format!("{}{}", &content[..line_start], &content[line_end..]);
+    assert!(!removed.contains(PTR_BEGIN) && !removed.contains(PTR_END));
+    fs::write(&path, &removed).unwrap();
+    // second update: guardrails present + pointer absent -> user removed it, leave it absent
+    let (changed, content2) = claudecat::claude_md::update_section(&path, false).unwrap();
+    assert!(!changed, "使用者刪掉的指標不得被補種");
+    assert!(!content2.contains(PTR_BEGIN), "指標不得再出現");
+    assert_eq!(content2.matches(GR_BEGIN).count(), 1);
+    assert_eq!(fs::read_to_string(&path).unwrap(), removed);
+}
+
+#[test]
 fn data_dir_honors_env_override_and_xdg_default() {
     let _lock = cort_env_lock();
     let home = temp_project();
