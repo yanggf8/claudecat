@@ -53,18 +53,19 @@
 | 2026-10-16 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 117611 | 6 | 0 | 35820 | 0 | pattern_not_symbol=14458 |
 | 2026-10-17 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 118872 | 6 | 0 | 36289 | 0 | pattern_not_symbol=15150 |
 | 2026-10-18 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 686 | 451 | 5 | 0 | synced | 119278 | 6 | 0 | 35478 | 0 | pattern_not_symbol=15468 |
+| 2026-10-19 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 786 | 704 | 5 | 0 | synced | 117941 | 6 | 0 | 35901 | 0 | pattern_not_symbol=15524 |
+| 2026-10-20 | `/home/yanggf/a/claudecat` | NUC11i5 | STALE/refresh | 786 | 704 | 5 | 0 | synced | 115093 | 6 | 0 | 31964 | 0 | pattern_not_symbol=15520 |
+| 2026-10-21 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 785 | 700 | 5 | 0 | synced | 114501 | 6 | 0 | 24750 | 0 | pattern_not_symbol=15697 |
+| 2026-10-22 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 785 | 700 | 5 | 0 | synced | 117699 | 6 | 0 | 25806 | 0 | pattern_not_symbol=16346 |
 ## 每日分析發現 (claudecat cort-audit)
 
-_2026-10-18_
+_2026-10-22_
 
-- deep 歸零進入第八天、不是新壞掉：deep/30d 連八天為零、deep/7d 自 09-18 連續為零，core/30d 持平六；該做：續當 adoption 指標追，不當品質事件辦。
-- pattern_not_symbol 續創新高但仍歸口徑效應、不推翻 09-11 裁決；該做：繼續觀察，不重開規則。
-- 可動作標籤仍從缺，不開新規則：context_flag 在全母體 census 仍零樣本；其餘 concrete_file_read 是精確度閘門、extension／target 三類是正確沉默、unparseable_command 是 parser 產品問題。
-- 剝皮規則觀察期繼續、不下結論：agent 實際命中維持二十筆、仍遠低於 5% 驗收線，codex／kimi 依然零命中；grok 假宣告七百餘筆，歸因一律用實測值。
-- no_shape shapes 覆蓋百分之百，但前五仍全是 Bash／Grep 的 envelope 鍵形狀、無語義形狀訊號——issue #3 的需求排序暫無新依據。
-- 數據品質全綠、上游無新事：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced、fresh、repair=none、真缺口為零（未 chunk 檔全是正確沉默）；errors／index_stale 為窗口計數；self-heal 有效樣本仍小不下定論；遠端無新 commit、本地與遠端同位 abe719cc；任務追蹤點 5f6d5267 已大幅落後本地，下次宜更新。
-
-_2026-09-28_
+- 量掉回升、證實是窗口滾動：命令數/30d 止住連四日下滑、回升至約十一萬七千餘（+3,198），命令數/7d 回升至約二萬五千餘（+1,056）；昨日「續滑再判斷」可結案——是窗口滾動不是真掉量；deep/30d 歸零第十二天、deep/7d 續零、core/30d 持平於六，續當 adoption 指標追。
+- 可動作標籤仍從缺，不開新規則：context_flag 在全母體 census 缺席（零樣本，<10 誠實等）；pattern_not_symbol 佔 no_shape 約三成但 09-11 已裁決不再重開；其餘 unindexed_extension／concrete_file_read／target_not_source／non_source_target 分屬精確度閘門／正確沉默；no_shape 覆蓋百分之百但前五仍全是 Bash／Grep envelope 形狀——issue #3 暫無新依據。
+- 剝皮規則觀察期繼續、不下結論：命中維持二十筆（claude-code 命中率 0.04%），遠低於 5% 驗收線；codex／kimi／grok 依然零命中；harness_declared 不符 claude-code 一筆持平、grok 回落至 185 筆（窗口滾動），歸因一律用實測值。
+- 數據品質皆好、無新事件：census 加總＝fires、無 unknown 桶、fresh、FTS synced、真缺口為零、五檔未 chunk 全是 chunk_count=0 的正確沉默；self-heal scanned=6／healed=1／deferred=1／legacy=4 與昨日完全相同、無新樣本；errors=2 是九月下旬舊列（status 命令）、index_stale 查詢持平於三——都不當事件辦。
+- 上游新增九個 docs／memory／upgrade commit（10-20～10-22），無 hook 口徑變動；本地落後九個 commit，無需為量測同步；任務追蹤點 5f6d5267 已大幅落後，下次宜更新。
 
 _2026-09-28 — i51149R3050_
 
