@@ -4,6 +4,7 @@ use claudecat::cort_audit;
 use claudecat::data_dir;
 use claudecat::doctor;
 use claudecat::explore;
+use claudecat::gate::{self, Kind};
 use claudecat::guardrails;
 use claudecat::manifest;
 use claudecat::markdown;
@@ -34,6 +35,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Check whether a heavy task may start
+    Gate {
+        #[command(subcommand)]
+        action: GateAction,
+    },
+    /// Show machine resources, gate slots, compilers, and orphan brokers
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// 掃描專案並輸出導航地圖
     Scan {
         /// 專案根目錄
@@ -172,6 +183,22 @@ enum Commands {
         /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
         #[arg(long, value_enum, default_value = "auto")]
         map: MapArg,
+    },
+}
+
+#[derive(Subcommand)]
+enum GateAction {
+    /// Check current resources (exit 0 or 75)
+    Check {
+        #[arg(long, value_enum, default_value = "other")]
+        kind: Kind,
+    },
+    /// Run a command with a slot at low CPU priority
+    Run {
+        #[arg(long, value_enum, default_value = "other")]
+        kind: Kind,
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<String>,
     },
 }
 
@@ -317,6 +344,11 @@ fn main() {
     }
     let cli = Cli::parse();
     match cli.command {
+        Commands::Gate { action } => std::process::exit(match action {
+            GateAction::Check { kind } => gate::check(kind),
+            GateAction::Run { kind, command } => gate::run(kind, &command),
+        }),
+        Commands::Status { json } => std::process::exit(gate::status(json)),
         Commands::Scan {
             root,
             format,

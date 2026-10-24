@@ -2,7 +2,7 @@
 name = "claudecat"
 version = "2.1.0"
 edition = "2021"
-description = "ClaudeCat V2 — 給 Claude Code 一張可信任的專案導航地圖 (pure Rust CLI)"
+description = "ClaudeCat V3 — shared machine resource gate and heavy-work assistant (pure Rust CLI)"
 license = "MIT"
 repository = "https://github.com/yanggf8/claudecat"
 

@@ -24,7 +24,10 @@ agent 把重工跑得不擾民。
 - **負載與記憶體閘門**：重工開始前同時看 1 分鐘負載與 swap 已用量。`nice` 只讓得出 CPU、
   讓不出記憶體，所以負載不高時也可能卡，swap 要分開擋。起始門檻：負載 > 6、swap ≥ 1024 MB，
   都可用環境變數調整。
-- **不疊兩個完整編譯**：已經有人在跑 `rustc` 或 Gradle 時，新的 build／測試排隊，不疊上去。
+- **不疊兩個完整編譯**：已經有人在跑 `rustc` 或 Gradle worker（`GradleWorkerMain`）時，新的 build／測試排隊，不疊上去。
+  閒置的 Gradle daemon 不算：它在建置後會常駐數小時。代價是沒經過 `gate run` 的 Gradle 純編譯
+  （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
+  `gate run --kind build|test` 另外持有一把 `compiler.lock`，蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
 - **名額是鎖，不是公告**：整台的重工名額（預設 3 個）用 `flock`，程序死掉時由 kernel 釋放，
   不會留下過期紀錄；鎖檔記著持有者的 pid 與指令，「誰在跑」就是從鎖算出來的。
 - **兩個入口，同一套門檻**：
@@ -39,6 +42,8 @@ agent 把重工跑得不擾民。
 - 以低優先序（`nice`）執行重工，使用者的終端機保持順暢。
 - 一個指令看整台機器的現況，人和 agent 看到的是同一份；包括 Codex 工作結束後留下來的孤兒
   `app-server-broker`／`codex app-server`（每組約 45 MB，不會自己結束），以及它們屬於哪個工作目錄。
+  孤兒的判定是「parent 已不是 codex-companion」，不是「parent 是 pid 1」：WSL 會把孤兒交給
+  session 自己的 `/init`，它的 pid 不是 1。
   只回報，不自動收掉。
 
 ## 介面（建置中）
@@ -49,6 +54,15 @@ agent 把重工跑得不擾民。
 | `claudecat gate run [--kind …] -- <cmd>` | 拿名額、以 `nice` 執行、結束時釋放 | 指令本身的 exit code；拿不到名額回 75 |
 | `claudecat status [--json]` | 整台現況：負載、swap、名額持有者、編譯程序、孤兒 Codex broker | 只回報 |
 | `claudecat gate hook` | 由 cort 的轉交點呼叫，payload 走 stdin | deny 並附原因；逾時或出錯一律放行 |
+
+門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_SWAP_MB`、`CLAUDECAT_SLOTS` 覆寫（不是正數就用預設）；
+名額目錄是 `CLAUDECAT_GATE_DIR`，否則 `$XDG_RUNTIME_DIR/claudecat/gate`，再否則
+`/tmp/claudecat-<uid>/gate`。`gate check` 只回答「現在能不能開工」，不占名額；要讓名額真正反映
+誰在跑，重工本身要經 `gate run` 執行。
+
+`claudecat` 自己被殺時，名額會由 kernel 釋放，但子程序不會跟著結束，所以派工端逾時要殺整個
+process group。`gate run` 會原樣回傳子程序的 exit code；子程序自己回 75 時呼叫端分不出是排隊，
+要排隊語意請先 `gate check`。
 
 上線順序：`gate check`、`gate run`、`status` 先上（不依賴 cort）；`gate hook` 等 cort 拆完搜尋建議、
 加上通用轉交點之後。

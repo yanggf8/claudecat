@@ -5,6 +5,7 @@ pub mod data_dir;
 pub mod dates;
 pub mod doctor;
 pub mod explore;
+pub mod gate;
 pub mod guardrails;
 pub mod manifest;
 pub mod markdown;

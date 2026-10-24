@@ -57,22 +57,15 @@
 | 2026-10-20 | `/home/yanggf/a/claudecat` | NUC11i5 | STALE/refresh | 786 | 704 | 5 | 0 | synced | 115093 | 6 | 0 | 31964 | 0 | pattern_not_symbol=15520 |
 | 2026-10-21 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 785 | 700 | 5 | 0 | synced | 114501 | 6 | 0 | 24750 | 0 | pattern_not_symbol=15697 |
 | 2026-10-22 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 785 | 700 | 5 | 0 | synced | 117699 | 6 | 0 | 25806 | 0 | pattern_not_symbol=16346 |
+| 2026-10-23 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 748 | 545 | 5 | 0 | synced | 126382 | 15 | 0 | 31105 | 0 | pattern_not_symbol=17841 |
+| 2026-10-24 | `/home/yanggf/a/claudecat` | NUC11i5 | fresh | 748 | 545 | 5 | 0 | synced | 129604 | 16 | 0 | 32786 | 0 | pattern_not_symbol=18672 |
 ## 每日分析發現 (claudecat cort-audit)
 
-_2026-10-22_
+_2026-10-24_
 
-- 量掉回升、證實是窗口滾動：命令數/30d 止住連四日下滑、回升至約十一萬七千餘（+3,198），命令數/7d 回升至約二萬五千餘（+1,056）；昨日「續滑再判斷」可結案——是窗口滾動不是真掉量；deep/30d 歸零第十二天、deep/7d 續零、core/30d 持平於六，續當 adoption 指標追。
-- 可動作標籤仍從缺，不開新規則：context_flag 在全母體 census 缺席（零樣本，<10 誠實等）；pattern_not_symbol 佔 no_shape 約三成但 09-11 已裁決不再重開；其餘 unindexed_extension／concrete_file_read／target_not_source／non_source_target 分屬精確度閘門／正確沉默；no_shape 覆蓋百分之百但前五仍全是 Bash／Grep envelope 形狀——issue #3 暫無新依據。
-- 剝皮規則觀察期繼續、不下結論：命中維持二十筆（claude-code 命中率 0.04%），遠低於 5% 驗收線；codex／kimi／grok 依然零命中；harness_declared 不符 claude-code 一筆持平、grok 回落至 185 筆（窗口滾動），歸因一律用實測值。
-- 數據品質皆好、無新事件：census 加總＝fires、無 unknown 桶、fresh、FTS synced、真缺口為零、五檔未 chunk 全是 chunk_count=0 的正確沉默；self-heal scanned=6／healed=1／deferred=1／legacy=4 與昨日完全相同、無新樣本；errors=2 是九月下旬舊列（status 命令）、index_stale 查詢持平於三——都不當事件辦。
-- 上游新增九個 docs／memory／upgrade commit（10-20～10-22），無 hook 口徑變動；本地落後九個 commit，無需為量測同步；任務追蹤點 5f6d5267 已大幅落後，下次宜更新。
-
-_2026-09-28 — i51149R3050_
-
-- deep/30d 持平在 2、deep/7d 連三週掛零（本機自 09-07 起）：30 天內僅 1 次 context＋1 次 recall，舊深挖全落在 7 天窗口外；再無深挖，30d 的 2 也會被滾動窗口吞掉，adoption 繼續盯（各機 DB 獨立，不可與 NUC11i5 的 12 互比）。
-- 可動作標籤今日仍從缺，不開新規則：pattern_not_symbol=679 已裁決、剝皮規則觀察中不重開；concrete_file_read=52 是精確度閘門、unparseable_command=40 是 parser 產品問題、unindexed_extension／non_source_target／target_not_source 皆正確沉默；唯一候選 context_flag 僅 2 筆（<10），誠實等樣本。
-- 整體命中 10/4837（<1%）：kimi 約 0.91%（2/220，無上移）、claude-code 0.14%、codex 0.19%，剝皮規則觀察期繼續、不下結論；grok 6.25% 是 16 筆小樣本、不裁決；codex 3 筆、grok 17 筆 harness_declared 與實測不符，歸因繼續用實測值。
-- top no_shape shapes 覆蓋 53.2%（772/1452，shape 寫入後的口徑改善），但全是 Bash／Grep envelope 鍵形狀、尚無語義形狀訊號——issue #3 的需求排序暫無新依據。
-- 數據品質：兩 hook census 加總等於 fires、無 unknown 桶、FTS synced、真缺口為 0（5 未 chunk 檔全是 chunk_count=0 的正確沉默）；audit 當下 fresh=STALE 的根因是 09-27 的 audit 文件 commits、index 停在 09-24，報告時已自行回落（hook-refresh 修復，git_head 相符、changed_files 為空）——符合預期的自癒行為，非部署問題；errors=11／stale queries=12 屬同源殘留，下次複查是否歸零；self-heal 採樣仍零新樣本（scanned=20 全 legacy，屬舊列預期、不是零自癒）。
-- track 順手刪掉了 09-27 的口徑註記（header 重寫副作用），已手動恢復：跨 09-27（hook 靜默化＋parser 放行）前後的絕對數不可直接比，本機 09-21→09-28 的增量同理。
-- 上游已同步到 d0ffe7fd（2026-09-27，含靜默化與 parser 放行），fetch 後 HEAD..origin/master 無落後、無新提交，無 decline／shape 口徑變動。
+- 量續升、昨日「窗口滾動」結論不變：命令數/30d 與/7d 連兩日回升（各 +3,198、+1,681 口徑量級）；core/30d 15→16（impact 多一筆）；deep/30d 歸零第十四天、deep/7d 續零——但上游已移除 context／struct／read／recall 動詞，deep 歸零是口徑死亡不是 adoption 下滑，往後 adoption 改盯 core／impact 與 measure 新口徑，不再拿 deep 基線（09-06 deep30=3）說事。
+- 可動作標籤仍從缺，不開新規則：context_flag 在全母體 census 缺席（零樣本，<10 誠實等）；pattern_not_symbol 雖續增但 09-11 已裁決不再重開；其餘 unindexed_extension／concrete_file_read／target_not_source／non_source_target 分屬精確度閘門／正確沉默；no_shape 覆蓋百分之百但前五仍全是 Bash／Grep envelope 形狀——issue #3 暫無新依據。
+- 剝皮規則觀察期繼續、不下結論：命中 22 筆（+2）全是 claude-code（0.04%），遠低於 5% 驗收線；codex／kimi 依然零命中；harness_declared 不符 claude-code 一筆、grok 二十七筆持平，歸因一律用實測值。
+- 數據品質皆好、errors 已查根因：census 加總＝fires、無 unknown 桶、fresh、FTS synced、真缺口為零（五檔未 chunk 全是 chunk_count=0 的正確沉默）；errors=37 全落在 10-22／23——三十五筆 measure（error_code=measure_error）加兩筆 memory，是本機 measure 分支開發試驗的殘留，非 hook／index 品質事件，不當事件辦；index_stale 查詢持平於三。
+- self-heal 無新訊號：scanned=16／healed=1／deferred=2／legacy=13——legacy 膨脹是三十天窗口納入 heal 欄位之前的舊 impact 列所致，與「零自癒」是兩回事；healed 與 deferred 皆無新增。
+- 上游無需動作：fetch 後 HEAD..origin/master 無落後；本地 measure 分支（f99ef6c8）已大幅超前任務追蹤點 5f6d5267，多為 measure／docs 口徑、無 hook census 變動，下次更新追蹤點即可。
