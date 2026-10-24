@@ -1,5 +1,5 @@
 //! 日期工具：無外部依賴的 civil date（Howard Hinnant 演算法）。
-//! lib 與 bin 共用——之前 main.rs 與 cort_audit.rs 各持一份，有 drift 風險。
+//! lib 與 bin 共用（main.rs 的 `now_iso` 用 lib 這份）。
 
 /// 天數 → (年, 月, 日)
 pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -13,14 +13,4 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// 今天（UTC）的 `YYYY-MM-DD`
-pub fn today_iso() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, m, d) = civil_from_days((secs / 86400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
 }

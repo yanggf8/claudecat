@@ -14,7 +14,7 @@ agent 把重工跑得不擾民。
 | 機器資源規則：負載、記憶體與 swap、整台的重工名額、不疊兩個完整編譯、`nice`、cargo `-j`、殘留程序 | **ClaudeCat** | 門檻只在這裡維護一份。這些規則跟專案無關，以前散在各專案的派工腳本與各 session 的記憶裡。 |
 | 各專案自己的派工流程：誰寫誰審、工單、認領、推送規矩 | 各專案 | 各專案只管流程，要開重工前問 ClaudeCat（`claudecat gate check`），不再自己維護門檻。 |
 | Agent 與專案記憶 | cortexyoung/cort | `cort memory` 是唯一的帳本；ClaudeCat 不另存一份。 |
-| Agent 工作方式的量測：收集與分析 | cortexyoung/cort | `cort measure` 由 cort 自己的 hook 觸發、自己分析。ClaudeCat 不再收集任何東西。 |
+| Agent 工作方式的量測：收集與分析 | cortexyoung/cort | `cort measure` 由 cort 自己的 hook 觸發、自己分析。ClaudeCat 不再上傳或稽核任何東西；V2 導航仍在本機 `usage.db` 記自己的統計（`CLAUDECAT_NO_USAGE=1` 可停用），隨 V2 一起移除。 |
 | Claude Code／Codex／Kimi 上的 hook | cortexyoung/cort | ClaudeCat 不另裝 hook，經 cort 的通用轉交點被呼叫。 |
 
 依賴方向只有一個：ClaudeCat → cort。cort 不指名 ClaudeCat，拿掉 ClaudeCat 對 cort 沒有任何影響。
@@ -72,7 +72,11 @@ process group。`gate run` 會原樣回傳子程序的 exit code；子程序自�
 - **V2 導航地圖**（`scan`、`update`、`navigate`、`explore`、`track`）：做出來過，也寫進過 agent 的
   指示檔，但 30 天內 agent 呼叫 0 次（`claudecat usage`），Claude Code 的 transcript 裡沒有任何一次
   呼叫；相關程式碼會隨 V3 移除。
-- **用量上傳與每日稽核**（`claudecat telemetry sync`、`CORT-AUDIT.md`）：改由 `cort measure` 負責。
+- **用量上傳與每日稽核**（`claudecat telemetry`、`cort-audit`、`findings`、`doctor`、`CORT-AUDIT.md`）：
+  改由 `cort measure` 負責；表格的歷史已匯入 cort 的量測資料庫（`cort measure import-audit`）。
+  **升級前先清舊排程**：這些子命令已經不存在，還留著舊條目的機器在升級後會每天報 unknown
+  subcommand。要清的是 crontab 裡呼叫 `claudecat cort-audit` 的 09:17 條目與跑每日分析的 09:29 條目，
+  以及 `claudecat-telemetry-sync.timer`／`.service`（`systemctl --user disable --now` 後刪 unit 檔）。
 
 ## 授權
 

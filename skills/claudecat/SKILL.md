@@ -1,6 +1,6 @@
 ---
 name: claudecat
-description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, use cortexyoung/cort for explicitly recorded project memory, quantify exploration cost, and run the daily cort-audit. Use when the user asks about a project map, a symbol location, cort index health, the daily audit, or invokes /claudecat.
+description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, use cortexyoung/cort for explicitly recorded project memory, and quantify exploration cost. Use when the user asks about a project map, a symbol location, cort index health, or invokes /claudecat.
 ---
 
 # ClaudeCat — Project Map & cort Integration
@@ -16,14 +16,8 @@ claudecat navigate "auth"       # 從一句話找目的地符號/檔案；--cort
 claudecat usage --json           # 查看本機導航命中統計（不含原始查詢）
 cort memory recall "<過去決策>" --harness claude-code # 讀取有來源的專案記憶
 cort memory status                 # 目前專案識別碼、同步狀態和衝突
-claudecat telemetry sync --json      # 上傳現有結構化收集事件
 claudecat update --dry-run      # 更新 claudecat 自動區塊；--dry-run 只顯示差異
 claudecat cort-status           # cort 索引狀態：新鮮度、chunk、relationships
-claudecat doctor                # 體檢追蹤循環；--install 一鍵部署 crontab（冪等）
-claudecat cort-audit --track CORT-AUDIT.md   # 每日審計 + 寫長期指標表（原子、同日更新）
-claudecat findings - <<'EOF'    # 把每日分析發現寫進文件發現區塊（--file 預設 CORT-AUDIT.md）
-...markdown findings...
-EOF
 ```
 
 ## Project memory through cort
@@ -60,19 +54,9 @@ self-reported machine id (a hint, not proof; absent on entries an older cort wro
 - `update` writes **only** the `claudecat:auto` / `guardrails` / `map-pointer` blocks in the rules file (AGENTS.md / CLAUDE.md symlink) — never touches hand-written rules.
 - The generated project map goes to `~/.local/share/claudecat/<project-id>/map.md` (`CLAUDECAT_DATA_DIR` overrides); `update` prints the `map ->` path. Maps do not go into git.
 
-## Daily audit workflow
-
-1. `claudecat cort-audit --track CORT-AUDIT.md` — appends/updates today's row in the long-term metrics table.
-2. Read the full report (index health, coverage gaps, hook census, harness hit rates).
-3. `claudecat findings -` with a curated markdown summary (date, key deltas, rule decisions) — replaces that day's findings block atomically, preserving everything outside the block.
-
 ## Deployment boundaries
 
 - Local maps and usage DBs stay per-machine (kimi denominators differ across hosts by design). Project memory uses TursoDB; configure each machine with `cort memory configure`, then `cort memory sync`.
-- Structured cort and ClaudeCat usage rows and daily cost reports are copied to the same
-  TursoDB by `claudecat telemetry sync` (configure each machine once with `claudecat telemetry configure --url URL --token-stdin`; this is a separate file from cort's); hooks still write locally first. The upload keeps
-  every source row and its available machine attribution. Old navigation rows are explicitly
-  `legacy_unknown`. Raw conversation transcripts are outside this command's scope.
 - No MCP server — never re-register one; the CLI is the only interface.
 - No `npm install -g claudecat` — install with `cargo install --path <repo>` from the Rust checkout; `~/.local/bin/claudecat` typically symlinks to the repo's `target/release/claudecat`.
 

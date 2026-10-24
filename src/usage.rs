@@ -1,5 +1,4 @@
-//! Navigation and memory recall telemetry is written locally first.
-//! `telemetry sync` copies these structured rows to TursoDB separately.
+//! Navigation and memory recall usage is written locally only.
 //! Raw queries are deliberately never stored; recall counts are exposure, not correctness.
 use crate::data_dir;
 use crate::navigate::NavigateResult;
@@ -136,7 +135,7 @@ pub(crate) fn machine_stamp() -> (String, &'static str) {
             return (query_hash(id), "etc-machine-id-sha256");
         }
     }
-    if let Some(host) = crate::doctor::resolve_host() {
+    if let Some(host) = crate::host::resolve_host() {
         return (query_hash(&host), "hostname-sha256");
     }
     ("unknown".into(), "unavailable")

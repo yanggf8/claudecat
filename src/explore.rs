@@ -149,8 +149,8 @@ pub fn row_md(m: &ExploreMetrics) -> String {
 
 /// section 邊界：s 內第一個以 `#` 開頭之行的 byte offset（找不到 → None＝到 EOF）。
 /// 用 `split_inclusive` 逐行累加，offset 是位元組位置，對 UTF-8 安全。
-/// `pub(crate)` 是因為發現區塊（`cort_audit::findings_update`）要用同一套邊界規則——
-/// 第二份拷貝正是 2026-09-06 那個「從 section 掃到 EOF、吃掉使用者筆記」的 bug 的溫床。
+/// 只留一份實作，否則第二份拷貝正是 2026-09-06 那個「從 section 掃到 EOF、
+/// 吃掉使用者筆記」的 bug 的溫床。
 pub(crate) fn next_heading_offset(s: &str) -> Option<usize> {
     let mut off = 0usize;
     for line in s.split_inclusive('\n') {
@@ -282,7 +282,7 @@ pub fn track_table(
     Ok((changed, path.to_string_lossy().into_owned()))
 }
 
-/// 原子寫入（同目錄 temp + fsync + rename）。長期指標表與發現區塊共用，
+/// 原子寫入（同目錄 temp + fsync + rename）。長期指標表用；
 /// 兩份拷貝就會有一份忘了 fsync。
 pub(crate) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("track.tmp");

@@ -1,7 +1,0 @@
-[Unit]
-Description=Sync structured agent and cort telemetry to TursoDB
-
-[Service]
-Type=oneshot
-ExecStart=%h/.cargo/bin/claudecat telemetry sync --json
-TimeoutStartSec=30min

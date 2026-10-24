@@ -2,9 +2,6 @@
 
 本檔提供 Claude Code / Codex 在本 repo 工作時的指引；CLAUDE.md 是本檔的 symlink。
 
-- 每日 cort-audit 分析的**發現**寫在 [CORT-AUDIT.md](CORT-AUDIT.md) 的「每日分析發現」區，
-  長期指標表在同一份檔。本檔只留規則，文件放文件。
-
 <!-- claudecat:guardrails:begin -->
 <!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 agent harness 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->
 <!-- claudecat:guardrails:end -->

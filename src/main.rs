@@ -1,8 +1,6 @@
 use claudecat::claude_md;
 use claudecat::cort;
-use claudecat::cort_audit;
 use claudecat::data_dir;
-use claudecat::doctor;
 use claudecat::explore;
 use claudecat::gate::{self, Kind};
 use claudecat::guardrails;
@@ -13,7 +11,6 @@ use claudecat::model::{self, MapProfile};
 use claudecat::navigate;
 use claudecat::outline;
 use claudecat::symbols;
-use claudecat::turso_memory;
 use claudecat::usage;
 use claudecat::walk;
 
@@ -81,38 +78,6 @@ enum Commands {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
-    /// 體檢本機的追蹤循環；--install 一鍵部署全部 crontab 條目（幂等）
-    Doctor {
-        /// 專案根目錄
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        /// 安裝每日追蹤 + 分析的 crontab 條目
-        #[arg(long)]
-        install: bool,
-    },
-    /// cort 整合審計：索引健康 / 覆蓋缺口 / FTS 同步 / 用量（收集數據驗證 → 據此改善）
-    CortAudit {
-        /// 專案根目錄
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        /// 用量統計窗口（天）
-        #[arg(long, default_value_t = 30)]
-        window: u32,
-        /// JSON 輸出
-        #[arg(long)]
-        json: bool,
-        /// 寫進文件的長期指標表（原子、同日更新），例如 SESSION-EVIDENCE.md
-        #[arg(long)]
-        track: Option<PathBuf>,
-    },
-    /// 把每日分析的發現寫進文件的發現區塊（原子；區塊外原樣保留）
-    Findings {
-        /// 發現內容（markdown）；用 `-` 從 stdin 讀
-        text: String,
-        /// 寫進哪個文件
-        #[arg(long, default_value = "CORT-AUDIT.md")]
-        file: PathBuf,
-    },
     /// 導航：從一句話找到目的地符號/檔案，並給出 cort 低成本路線
     Navigate {
         /// 要找什麼（例如 auth / user creation）
@@ -146,11 +111,6 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
-    },
-    /// 將本機結構化收集事件批次同步到共用 TursoDB
-    Telemetry {
-        #[command(subcommand)]
-        action: TelemetryAction,
     },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
@@ -216,28 +176,6 @@ enum MemoryAction {
     /// 統計人工評分的成對試驗，檢查每筆原始輸出的 SHA-256
     EvalReport {
         file: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum TelemetryAction {
-    /// 寫入 telemetry 同步用的 Turso 連線設定（token 由 stdin 讀入）
-    Configure {
-        #[arg(long)]
-        url: String,
-        #[arg(long)]
-        token_stdin: bool,
-    },
-    /// 同步 cort 用量、ClaudeCat 導航與記憶查詢、每日成本報告
-    Sync {
-        #[arg(long)]
-        cort_usage: Option<PathBuf>,
-        #[arg(long)]
-        claudecat_usage: Option<PathBuf>,
-        #[arg(long)]
-        cost_reports: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -442,119 +380,6 @@ fn main() {
                 }
             }
         },
-        Commands::Doctor { root, install } => {
-            if install {
-                let manifest_dir = env!("CARGO_MANIFEST_DIR");
-                let existing = doctor::read_crontab();
-                let (mut updated, track_changed) = doctor::merge_track_entry(
-                    &existing,
-                    &doctor::track_cron_line(manifest_dir, &root),
-                );
-                if track_changed && doctor::has_track_entry(&existing) {
-                    println!("Track cron -> 已更新為目前模板");
-                } else if track_changed {
-                    println!("Track cron -> 已安裝");
-                } else {
-                    println!("Track cron: 已是最新");
-                }
-                match doctor::analysis_bin() {
-                    Ok(bin) => {
-                        let line =
-                            doctor::analysis_cron_line(&bin, manifest_dir, &doctor::runtime_dirs());
-                        let (next, changed) = doctor::merge_analysis_entry(&updated, &line);
-                        updated = next;
-                        let had = doctor::has_analysis_entry(&existing);
-                        let runner = std::path::Path::new(&bin)
-                            .file_name()
-                            .map(|f| f.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| bin.clone());
-                        if changed && had {
-                            println!("Analysis cron -> 已切換至 {runner}");
-                        } else if changed {
-                            println!("Analysis cron -> 已安裝（{runner}）");
-                        } else {
-                            println!("Analysis cron: 已是最新（{runner}）");
-                        }
-                    }
-                    Err(e) => eprintln!("Analysis cron: {e}——既有條目維持原樣"),
-                }
-                if updated != existing {
-                    if let Err(e) = doctor::write_crontab(&updated) {
-                        eprintln!("Failed to write crontab: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            println!("{}", doctor::report(&root));
-        }
-        Commands::CortAudit {
-            root,
-            window,
-            json,
-            track,
-        } => {
-            let a = cort::audit(&root, window);
-            if json {
-                match serde_json::to_string_pretty(&a) {
-                    Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("JSON serialization failed: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                println!("{}", cort_audit::render(&a));
-            }
-            if let Some(f) = track {
-                match cort_audit::track_update(&f, &[&a]) {
-                    Ok((changed, path)) => println!(
-                        "{} {}",
-                        if changed {
-                            "Audit metrics ->"
-                        } else {
-                            "Up to date:"
-                        },
-                        path
-                    ),
-                    Err(e) => {
-                        eprintln!("Failed to track cort audit into {}: {e}", f.display());
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-        Commands::Findings { text, file } => {
-            let body = if text == "-" {
-                use std::io::Read;
-                let mut buf = String::new();
-                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-                    eprintln!("讀 stdin 失敗：{e}");
-                    std::process::exit(1);
-                }
-                buf
-            } else {
-                text
-            };
-            if body.trim().is_empty() {
-                eprintln!("發現內容是空的——不寫入（空區塊比沒有更糟：看起來像跑過且沒發現）");
-                std::process::exit(1);
-            }
-            match cort_audit::findings_update(&file, &body) {
-                Ok((changed, _)) => println!(
-                    "Findings -> {}{}",
-                    file.display(),
-                    if changed {
-                        ""
-                    } else {
-                        "（內容相同，未變更）"
-                    }
-                ),
-                Err(e) => {
-                    eprintln!("寫入失敗：{e}");
-                    std::process::exit(1);
-                }
-            }
-        }
         Commands::Navigate {
             query,
             root,
@@ -681,62 +506,6 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("memory eval-report: {e}");
-                    std::process::exit(1);
-                }
-            },
-        },
-        Commands::Telemetry { action } => match action {
-            TelemetryAction::Configure { url, token_stdin } => {
-                if !token_stdin {
-                    eprintln!(
-                        "telemetry configure: pass --token-stdin to read the auth token privately"
-                    );
-                    std::process::exit(1);
-                }
-                use std::io::Read;
-                let mut token = String::new();
-                if let Err(e) = std::io::stdin().read_to_string(&mut token) {
-                    eprintln!("telemetry configure: {e}");
-                    std::process::exit(1);
-                }
-                match turso_memory::configure(&url, &token) {
-                    Ok(path) => println!("Turso telemetry configured at {}", path.display()),
-                    Err(e) => {
-                        eprintln!("telemetry configure: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            TelemetryAction::Sync {
-                cort_usage,
-                claudecat_usage,
-                cost_reports,
-                json,
-            } => match turso_memory::sync_telemetry(
-                cort_usage.as_deref(),
-                claudecat_usage.as_deref(),
-                cost_reports.as_deref(),
-            ) {
-                Ok(report) if json => match serde_json::to_string_pretty(&report) {
-                    Ok(body) => println!("{body}"),
-                    Err(e) => {
-                        eprintln!("telemetry JSON: {e}");
-                        std::process::exit(1);
-                    }
-                },
-                Ok(report) => println!(
-                    "telemetry {}: scanned={} inserted={} already_present={} aliases={} unresolved_projects={} unmatched_project_rows={} missing={}",
-                    report.sync_status,
-                    report.scanned,
-                    report.inserted,
-                    report.already_present,
-                    report.project_aliases,
-                    report.unresolved_project_ids.len(),
-                    report.unmatched_project_rows,
-                    report.missing_sources.join(",")
-                ),
-                Err(e) => {
-                    eprintln!("telemetry sync: {e}");
                     std::process::exit(1);
                 }
             },
