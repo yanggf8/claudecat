@@ -1,4 +1,6 @@
+use claudecat::gate::{classify, Classification, Kind};
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
@@ -55,6 +57,165 @@ impl Fixture {
 
 fn code(o: &Output) -> i32 {
     o.status.code().expect("exit code")
+}
+
+#[test]
+fn classify_shell_commands() {
+    use Classification::{Heavy, NotHeavy, Unparsed};
+    let cases = [
+        ("cd x && cargo test", Heavy(Kind::Test)),
+        (
+            "RUST_TEST_THREADS=2 nice -n 15 cargo test",
+            Heavy(Kind::Test),
+        ),
+        ("cargo +stable build", Heavy(Kind::Build)),
+        ("/usr/bin/cargo build", Heavy(Kind::Build)),
+        ("command cargo build", Heavy(Kind::Build)),
+        ("claudecat gate run -- cargo build", NotHeavy),
+        (
+            "claudecat gate run -- cargo build && cargo test",
+            Heavy(Kind::Test),
+        ),
+        ("echo cargo build", NotHeavy),
+        ("git commit -m \"cargo test\"", NotHeavy),
+        ("git commit -m \"docs; cargo build; why\"", NotHeavy),
+        ("echo \"unterminated", Unparsed),
+        ("cargo fmt --all", NotHeavy),
+        (
+            "timeout -s TERM 30s env A=b ./gradlew test",
+            Heavy(Kind::Build),
+        ),
+        ("exec cargo -C dir --config foo test", Heavy(Kind::Test)),
+        ("echo 'x && cargo test'; cargo build", Heavy(Kind::Build)),
+        ("echo cargo\\;test", NotHeavy),
+        ("cargo build | cargo bench", Heavy(Kind::Test)),
+        ("cargo build\ncargo test", Heavy(Kind::Test)),
+        ("~/.cargo/bin/cargo check", Heavy(Kind::Build)),
+        (
+            "cat > p.md <<'EOF'\nnice -n 15 cargo test\nEOF\necho done",
+            NotHeavy,
+        ),
+        ("cat <<EOF\ncargo build\nEOF\ncargo test", Heavy(Kind::Test)),
+        ("cat <<-\"END\"\n\tcargo build\n\tEND", NotHeavy),
+        ("cat <<EOF\ncargo build", NotHeavy),
+        ("grep x <<< \"cargo build\"", NotHeavy),
+        ("cargo test <<EOF\ninput\nEOF", Heavy(Kind::Test)),
+        ("echo ok # && cargo test", NotHeavy),
+        ("# cargo build\necho ok", NotHeavy),
+        ("echo a#b && cargo test", Heavy(Kind::Test)),
+        ("cat <<EOF\n\tEOF\ncargo test\nEOF", NotHeavy),
+        ("cat <<EOF\nEOF \ncargo test\nEOF", NotHeavy),
+        ("cargo --color always test", Heavy(Kind::Test)),
+        ("cargo -Z build-std build", Heavy(Kind::Build)),
+        ("2>/tmp/cargo.log cargo test", Heavy(Kind::Test)),
+        ("> log cargo build", Heavy(Kind::Build)),
+        ("cargo test 2>&1 | tail -5", Heavy(Kind::Test)),
+        ("echo hi >&2; echo done", NotHeavy),
+    ];
+    for (command, expected) in cases {
+        assert_eq!(classify(command), expected, "{command}");
+    }
+}
+
+fn hook(f: &Fixture, stdin: &str) -> Output {
+    let mut child = f
+        .cmd(&["gate", "hook"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("hook");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .expect("payload");
+    child.wait_with_output().expect("hook output")
+}
+
+#[test]
+fn hook_allows_and_denies_with_one_stdout_line() {
+    let clear = Fixture::new("0.5", 0);
+    let allowed = hook(&clear, r#"{"tool_input":{"command":"cargo test"}}"#);
+    assert_eq!(code(&allowed), 0);
+    assert!(allowed.stdout.is_empty());
+    let busy = Fixture::new("7", 0);
+    let denied = hook(&busy, r#"{"tool_input":{"command":"cargo test"}}"#);
+    assert_eq!(code(&denied), 75);
+    let line = String::from_utf8(denied.stdout).unwrap();
+    assert!(line.starts_with("gate denied"));
+    assert!(line.ends_with("Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.\n"));
+    assert_eq!(line.lines().count(), 1);
+    assert!(denied.stderr.is_empty());
+    let light = hook(&busy, r#"{"tool_input":{"command":"cargo fmt --all"}}"#);
+    assert_eq!(code(&light), 0);
+    assert!(light.stdout.is_empty());
+    let garbage = hook(&busy, "not json");
+    assert_eq!(code(&garbage), 0);
+    assert!(garbage.stdout.is_empty());
+}
+
+#[test]
+fn hook_without_path_or_gate_env_still_uses_uid() {
+    let f = Fixture::new("7", 0);
+    let mut child = f
+        .cmd(&["gate", "hook"])
+        .env("PATH", "")
+        .env_remove("CLAUDECAT_GATE_DIR")
+        .env_remove("XDG_RUNTIME_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("hook");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"tool_input":{"command":"cargo build"}}"#)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(code(&output), 75);
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("gate denied"));
+}
+
+#[test]
+fn install_and_uninstall_forward_to_cort() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("0.5", 0);
+    let bin = f.temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let script = bin.join("cort");
+    fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let install = f
+        .cmd(&["gate", "install"])
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(code(&install), 0);
+    let lines: Vec<_> = std::str::from_utf8(&install.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "hook-gate",
+            "set",
+            "--",
+            env!("CARGO_BIN_EXE_claudecat"),
+            "gate",
+            "hook"
+        ]
+    );
+    let uninstall = f
+        .cmd(&["gate", "uninstall"])
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(code(&uninstall), 0);
+    assert_eq!(uninstall.stdout, b"hook-gate\nclear\n");
 }
 
 #[test]

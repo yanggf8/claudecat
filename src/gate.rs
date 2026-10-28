@@ -12,12 +12,281 @@ const DEFAULT_LOAD: f64 = 6.0;
 const DEFAULT_SWAP_MB: u64 = 1024;
 const DEFAULT_SLOTS: usize = 3;
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Kind {
     Build,
     Test,
     E2e,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Classification {
+    Heavy(Kind),
+    NotHeavy,
+    Unparsed,
+}
+
+#[derive(Debug)]
+enum ShellToken {
+    Word(String),
+    Separator,
+}
+
+fn lex(command: &str) -> Option<Vec<ShellToken>> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote = None;
+    // Pending heredoc delimiters, and whether each was `<<-` (which strips leading tabs).
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    word.push(ch);
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '\\' => word.push(chars.next()?),
+                _ => word.push(ch),
+            },
+            _ => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    started = true;
+                }
+                '\\' => {
+                    word.push(chars.next()?);
+                    started = true;
+                }
+                ' ' | '\t' | '\r' => {
+                    if started {
+                        tokens.push(ShellToken::Word(std::mem::take(&mut word)));
+                        started = false;
+                    }
+                }
+                // A heredoc body is data, not commands: `cat > f <<'EOF'` followed by a line that
+                // starts with `cargo test` must not read as a build. Record the delimiter here and
+                // skip the body at the end of the line. `<<<` is a here-string, not a heredoc.
+                '<' if chars.peek() == Some(&'<') => {
+                    chars.next();
+                    if chars.peek() == Some(&'<') {
+                        chars.next();
+                        word.push_str("<<<");
+                        started = true;
+                        continue;
+                    }
+                    if started {
+                        tokens.push(ShellToken::Word(std::mem::take(&mut word)));
+                        started = false;
+                    }
+                    let strip_tabs = chars.peek() == Some(&'-');
+                    if strip_tabs {
+                        chars.next();
+                    }
+                    while matches!(chars.peek(), Some(' ' | '\t')) {
+                        chars.next();
+                    }
+                    let mut delimiter = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>') {
+                            break;
+                        }
+                        chars.next();
+                        if !matches!(c, '\'' | '"' | '\\') {
+                            delimiter.push(c);
+                        }
+                    }
+                    if delimiter.is_empty() {
+                        return None;
+                    }
+                    heredocs.push((delimiter, strip_tabs));
+                }
+                '\n' if !heredocs.is_empty() => {
+                    if started {
+                        tokens.push(ShellToken::Word(std::mem::take(&mut word)));
+                        started = false;
+                    }
+                    tokens.push(ShellToken::Separator);
+                    for (delimiter, strip_tabs) in std::mem::take(&mut heredocs) {
+                        let mut closed = false;
+                        while chars.peek().is_some() {
+                            let line: String = chars.by_ref().take_while(|&c| c != '\n').collect();
+                            let line = if strip_tabs {
+                                line.trim_start_matches('\t')
+                            } else {
+                                line.as_str()
+                            };
+                            if line == delimiter {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        if !closed {
+                            // An unterminated body is still a body; nothing after it is a command.
+                            return Some(tokens);
+                        }
+                    }
+                }
+                // A comment runs to the end of the line; `echo ok # && cargo test` runs no cargo.
+                // `#` inside a word (`a#b`) is an ordinary character, as in the shell.
+                '#' if !started => {
+                    while chars.peek().is_some_and(|&c| c != '\n') {
+                        chars.next();
+                    }
+                }
+                // `2>&1` and `>&2` duplicate a descriptor; that `&` does not end a command.
+                '&' if started && (word.ends_with('>') || word.ends_with('<')) => word.push(ch),
+                '\n' | ';' | '|' | '&' => {
+                    if started {
+                        tokens.push(ShellToken::Word(std::mem::take(&mut word)));
+                        started = false;
+                    }
+                    // A doubled operator still separates the same two segments.
+                    if (ch == '|' || ch == '&') && chars.peek() == Some(&ch) {
+                        chars.next();
+                    }
+                    tokens.push(ShellToken::Separator);
+                }
+                _ => {
+                    word.push(ch);
+                    started = true;
+                }
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        tokens.push(ShellToken::Word(word));
+    }
+    Some(tokens)
+}
+
+fn assignment(s: &str) -> bool {
+    s.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().enumerate().all(|(i, c)| {
+                c == '_' || (c.is_ascii_alphabetic()) || (i > 0 && c.is_ascii_digit())
+            })
+    })
+}
+
+fn basename(s: &str) -> &str {
+    s.rsplit('/').next().unwrap_or(s)
+}
+
+/// How many words a redirection at the front of a command occupies: `2>/tmp/x` is one, `2> /tmp/x`
+/// and `<<< text` are two. `None` when the word is not a redirection.
+fn redirection(word: &str) -> Option<usize> {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !rest.starts_with(['<', '>']) {
+        return None;
+    }
+    let target = rest.trim_start_matches(['<', '>', '&', '|']);
+    Some(if target.is_empty() { 2 } else { 1 })
+}
+
+fn segment_kind(words: &[String]) -> Option<Kind> {
+    let mut i = 0;
+    while i < words.len() {
+        let name = basename(&words[i]);
+        if let Some(n) = redirection(&words[i]) {
+            i += n;
+        } else if assignment(&words[i]) || name == "exec" || name == "command" {
+            i += 1;
+        } else if name == "nice" {
+            i += 1;
+            if i < words.len() && words[i] == "-n" {
+                i += 2;
+            } else if i < words.len()
+                && (words[i].starts_with("-n")
+                    || (words[i].starts_with('-')
+                        && words[i][1..].chars().all(|c| c.is_ascii_digit())))
+            {
+                i += 1;
+            }
+        } else if name == "timeout" {
+            i += 1;
+            while i < words.len() && words[i].starts_with('-') {
+                if matches!(words[i].as_str(), "-s" | "--signal" | "-k" | "--kill-after") {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1; // duration
+        } else if name == "env" {
+            i += 1;
+            while i < words.len() {
+                if assignment(&words[i]) {
+                    i += 1;
+                } else if matches!(words[i].as_str(), "-u" | "--unset" | "-C" | "--chdir") {
+                    i += 2;
+                } else if words[i].starts_with('-') {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    let cmd = words.get(i)?;
+    match basename(cmd) {
+        "cargo" => {
+            i += 1;
+            while let Some(arg) = words.get(i) {
+                if arg.starts_with('+') || arg.starts_with('-') {
+                    let takes_value = matches!(
+                        arg.as_str(),
+                        "-C" | "--config" | "--manifest-path" | "-Z" | "--color"
+                    );
+                    i += 1 + usize::from(takes_value);
+                } else {
+                    break;
+                }
+            }
+            match words.get(i).map(String::as_str) {
+                Some("test" | "bench" | "nextest") => Some(Kind::Test),
+                Some("build" | "clippy" | "check" | "run" | "install" | "doc") => Some(Kind::Build),
+                _ => None,
+            }
+        }
+        "gradle" | "gradlew" => Some(Kind::Build),
+        _ => None,
+    }
+}
+
+/// Classify a shell command conservatively; malformed quotes allow the command through.
+pub fn classify(command: &str) -> Classification {
+    let Some(tokens) = lex(command) else {
+        return Classification::Unparsed;
+    };
+    let mut segment = Vec::new();
+    let mut result = Classification::NotHeavy;
+    for token in tokens.iter().chain(std::iter::once(&ShellToken::Separator)) {
+        match token {
+            ShellToken::Word(word) => segment.push(word.clone()),
+            ShellToken::Separator => {
+                if let Some(kind) = segment_kind(&segment) {
+                    if kind == Kind::Test {
+                        result = Classification::Heavy(Kind::Test);
+                    } else if result == Classification::NotHeavy {
+                        result = Classification::Heavy(kind);
+                    }
+                }
+                segment.clear();
+            }
+        }
+    }
+    result
 }
 
 impl Kind {
@@ -117,14 +386,8 @@ fn config() -> io::Result<Config> {
     } else if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
         PathBuf::from(dir).join("claudecat/gate")
     } else {
-        let output = Command::new("id").arg("-u").output()?;
-        if !output.status.success() {
-            return Err(io::Error::other("id -u failed"));
-        }
-        let uid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if uid.parse::<u32>().is_err() {
-            return Err(io::Error::other("invalid uid"));
-        }
+        // Use the real proc mount, as snapshot() does: CLAUDECAT_PROC_ROOT may be a fixture.
+        let uid = fs::metadata("/proc/self")?.uid();
         PathBuf::from(format!("/tmp/claudecat-{uid}/gate"))
     };
     Ok(Config {
@@ -455,6 +718,89 @@ pub fn check(kind: Kind) -> i32 {
         Err(e) => {
             warning(&e);
             0
+        }
+    }
+}
+
+pub fn hook() -> i32 {
+    let mut payload = String::new();
+    if io::stdin().read_to_string(&mut payload).is_err() {
+        return 0;
+    }
+    let Some(command) = serde_json::from_str::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/tool_input/command")?
+                .as_str()
+                .map(str::to_owned)
+        })
+    else {
+        return 0;
+    };
+    let Classification::Heavy(kind) = classify(&command) else {
+        return 0;
+    };
+    let Ok((cfg, snap)) = config().and_then(|cfg| snapshot(&cfg).map(|snap| (cfg, snap))) else {
+        return 0;
+    };
+    if let Some(reason) = deny_reason(&snap, &cfg, kind) {
+        // One line, always: holder commands and compiler cwds are arbitrary bytes and may hold newlines.
+        let reason = reason.replace(['\n', '\r'], " ");
+        let _ = writeln!(io::stdout(), "{reason} Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.");
+        75
+    } else {
+        0
+    }
+}
+
+fn cort_path() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: &PathBuf| {
+        p.is_file()
+            && fs::metadata(p)
+                .ok()
+                .is_some_and(|m| m.permissions().mode() & 0o111 != 0)
+    };
+    if let Some(path) = env::var_os("PATH") {
+        for dir in env::split_paths(&path) {
+            let candidate = dir.join("cort");
+            if executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/share/cortexyoung/cort"))
+        .filter(executable)
+}
+
+pub fn install(install: bool) -> i32 {
+    let Some(cort) = cort_path() else {
+        eprintln!("gate: cort not found on PATH or in ~/.local/share/cortexyoung/cort");
+        return 1;
+    };
+    let mut cmd = Command::new(cort);
+    cmd.arg("hook-gate");
+    if install {
+        let exe = match env::current_exe() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("gate install: {e}");
+                return 1;
+            }
+        };
+        cmd.args(["set", "--"]).arg(exe).args(["gate", "hook"]);
+    } else {
+        cmd.arg("clear");
+    }
+    match cmd.status() {
+        Ok(status) => status
+            .code()
+            .or_else(|| status.signal().map(|s| 128 + s))
+            .unwrap_or(1),
+        Err(e) => {
+            eprintln!("gate: cannot run cort: {e}");
+            1
         }
     }
 }

@@ -160,6 +160,12 @@ enum GateAction {
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<String>,
     },
+    /// Check a Bash hook payload from stdin
+    Hook,
+    /// Register this executable with cort's hook gate
+    Install,
+    /// Remove cort's hook gate registration
+    Uninstall,
 }
 
 /// 只列出 ClaudeCat 自己處理的兩個子指令。其餘 memory 子指令（configure、sync、status、
@@ -285,6 +291,9 @@ fn main() {
         Commands::Gate { action } => std::process::exit(match action {
             GateAction::Check { kind } => gate::check(kind),
             GateAction::Run { kind, command } => gate::run(kind, &command),
+            GateAction::Hook => gate::hook(),
+            GateAction::Install => gate::install(true),
+            GateAction::Uninstall => gate::install(false),
         }),
         Commands::Status { json } => std::process::exit(gate::status(json)),
         Commands::Scan {

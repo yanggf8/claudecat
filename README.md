@@ -53,7 +53,9 @@ agent 把重工跑得不擾民。
 | `claudecat gate check [--kind build\|test\|e2e\|other]` | 腳本與 shell 問「現在能不能開工」 | exit 0 可以；**exit 75**（EX_TEMPFAIL）＝排隊，原因印在 stderr |
 | `claudecat gate run [--kind …] -- <cmd>` | 拿名額、以 `nice` 執行、結束時釋放 | 指令本身的 exit code；拿不到名額回 75 |
 | `claudecat status [--json]` | 整台現況：負載、swap、名額持有者、編譯程序、孤兒 Codex broker | 只回報 |
-| `claudecat gate hook` | 由 cort 的轉交點呼叫，payload 走 stdin | deny 並附原因；逾時或出錯一律放行 |
+| `claudecat gate hook` | 由 cort 轉交 Bash payload，從 stdin 讀 `tool_input.command` | 重工被擋時 stdout 一行原因與重試指示、exit 75；其他情況安靜放行 |
+| `claudecat gate install` | 透過 `cort hook-gate set` 安裝目前的 ClaudeCat | 原樣顯示 cort 輸出與 exit code |
+| `claudecat gate uninstall` | 透過 `cort hook-gate clear` 移除轉交 | 原樣顯示 cort 輸出與 exit code |
 
 門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_SWAP_MB`、`CLAUDECAT_SLOTS` 覆寫（不是正數就用預設）；
 名額目錄是 `CLAUDECAT_GATE_DIR`，否則 `$XDG_RUNTIME_DIR/claudecat/gate`，再否則
@@ -64,8 +66,13 @@ agent 把重工跑得不擾民。
 process group。`gate run` 會原樣回傳子程序的 exit code；子程序自己回 75 時呼叫端分不出是排隊，
 要排隊語意請先 `gate check`。
 
-上線順序：`gate check`、`gate run`、`status` 先上（不依賴 cort）；`gate hook` 等 cort 拆完搜尋建議、
-加上通用轉交點之後。
+`gate hook` 會辨識引號、跳脫字元、`#` 註解、開頭的重導向（`2>log cargo test`）與 shell 分段符號；各段略過前置變數設定、`nice`、`timeout`、
+`env`、`exec`、`command` 後，將 Cargo 的 build/test/clippy/check/bench/run/install/doc/nextest
+和 Gradle 指令視為重工。多段中有 test、bench 或 nextest 時，以測試門檻判斷；`gate run` 那段
+已有自己的排隊機制，不再重複攔截。heredoc（`<<EOF` 到結束行）的內容是資料，不當成指令。無法解析的指令放行。已知漏網包括 `$(…)`、反引號、
+`bash -c`、`make`／`just` 包裹的指令，以及腳本檔內的重工。
+
+安裝轉交需有 cort 的 `hook-gate` 子指令；`gate install` 與 `gate uninstall` 不直接修改 cort 設定檔。
 
 ## 不再提供的東西
 
