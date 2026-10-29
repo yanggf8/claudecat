@@ -202,7 +202,9 @@ fn redirection(word: &str) -> Option<usize> {
     Some(if target.is_empty() { 2 } else { 1 })
 }
 
-fn segment_kind(words: &[String]) -> Option<Kind> {
+/// Index of the word a segment executes, past redirections, assignments and the
+/// wrappers (`exec`, `command`, `nice`, `timeout`, `env`) together with their options.
+fn command_index(words: &[String]) -> usize {
     let mut i = 0;
     while i < words.len() {
         let name = basename(&words[i]);
@@ -247,6 +249,11 @@ fn segment_kind(words: &[String]) -> Option<Kind> {
             break;
         }
     }
+    i
+}
+
+fn segment_kind(words: &[String]) -> Option<Kind> {
+    let mut i = command_index(words);
     let cmd = words.get(i)?;
     match basename(cmd) {
         "cargo" => {
@@ -357,7 +364,10 @@ fn option_value<'a>(words: &'a [String], key: &str) -> Option<&'a str> {
 }
 
 fn identity(words: &[String], base: &Path, inherited_target: Option<&str>) -> Option<Identity> {
-    let cargo = words.iter().position(|word| basename(word) == "cargo")?;
+    let cargo = command_index(words);
+    if basename(words.get(cargo)?) != "cargo" {
+        return None;
+    }
     let prefix = &words[..cargo];
     let env_dir = option_value(prefix, "-C").or_else(|| option_value(prefix, "--chdir"));
     let cargo_words = &words[cargo + 1..];
@@ -851,15 +861,19 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
         if !same_dir {
             continue;
         }
-        let target = if wanted.dir != candidate.dir
-            && wanted.target.as_ref() == Some(&wanted.dir.join("target"))
-        {
-            canonical_dir
-                .as_ref()
-                .and_then(|p| p.as_ref())
-                .map(|p| p.join("target"))
-        } else {
-            wanted.target.clone()
+        // A target under the command's dir (the default, or a relative --target-dir or
+        // CARGO_TARGET_DIR) follows the dir when only the canonical form matched.
+        let target = match (
+            &wanted.target,
+            canonical_dir.as_ref().and_then(|p| p.as_ref()),
+        ) {
+            (Some(target), Some(canonical)) if wanted.dir != candidate.dir => Some(
+                target
+                    .strip_prefix(&wanted.dir)
+                    .map(|rest| canonical.join(rest))
+                    .unwrap_or_else(|_| target.clone()),
+            ),
+            _ => wanted.target.clone(),
         };
         if target != candidate.target {
             continue;
@@ -1146,11 +1160,11 @@ fn record_allow(now: u64, session: Option<&str>, id: Option<&str>, sub: &str) ->
         return Ok(());
     };
     let path = gate_log_path()?;
+    compact_log(&path, now)?;
     let rows = read_log(&path)?;
     if active_denies(&rows, now, session, id).is_empty() {
         return Ok(());
     }
-    compact_log(&path, now)?;
     append_log(
         &path,
         &GateLogRow {
