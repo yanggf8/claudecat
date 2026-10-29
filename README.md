@@ -72,6 +72,12 @@ process group。`gate run` 會原樣回傳子程序的 exit code；子程序自�
 已有自己的排隊機制，不再重複攔截。heredoc（`<<EOF` 到結束行）的內容是資料，不當成指令。無法解析的指令放行。已知漏網包括 `$(…)`、反引號、
 `bash -c`、`make`／`just` 包裹的指令，以及腳本檔內的重工。
 
+`gate hook` 也會在負載判斷前找同目錄、同 target、同參數的執行中 Cargo 指令；找到就回報 duplicate，
+即使機器閒置也會擋。Gradle 不做重複比對。target 只依 `--target-dir`、`CARGO_TARGET_DIR` 或預設目錄估算，
+只可能漏抓、不會因此誤擋；一般 Cargo 程序的 `environ` 讀不到時也可能漏抓。目錄先做字面比對，只有不相等時才對新指令目錄
+呼叫一次 `canonicalize`；無回應的網路檔案系統可能讓 hook 超過 cort 的 200 ms 時限而放行。
+duplicate 訊息的 `since` 只用於 `gate run` 持有者，不用於一般 Cargo 程序。
+
 安裝轉交需有 cort 的 `hook-gate` 子指令；`gate install` 與 `gate uninstall` 不直接修改 cort 設定檔。
 
 ## 不再提供的東西

@@ -39,7 +39,8 @@ impl Fixture {
             .env("CLAUDECAT_GATE_DIR", self.gate())
             .env_remove("CLAUDECAT_MAX_LOAD")
             .env_remove("CLAUDECAT_MAX_SWAP_MB")
-            .env_remove("CLAUDECAT_SLOTS");
+            .env_remove("CLAUDECAT_SLOTS")
+            .env_remove("CARGO_TARGET_DIR");
         cmd
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -661,6 +662,18 @@ fn run_holds_slot_during_child() {
     assert_eq!(line.trim(), "ready");
     let file = File::open(f.gate().join("slot-0.lock")).expect("slot");
     assert!(file.try_lock().is_err());
+    let holder: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.gate().join("slot-0.lock")).unwrap()).unwrap();
+    assert_eq!(
+        holder["cwd"],
+        std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(holder.get("target").is_some());
     // A test run holds compiler.lock for the child's whole life, not just at the start.
     let compiler = File::open(f.gate().join("compiler.lock")).expect("compiler lock");
     assert!(compiler.try_lock().is_err());
@@ -668,4 +681,215 @@ fn run_holds_slot_during_child() {
     assert!(child.wait().expect("wait").success());
     file.try_lock().expect("released");
     compiler.try_lock().expect("compiler lock released");
+}
+
+#[test]
+fn cargo_identity_paths_options_and_targets() {
+    use claudecat::gate::classify_with_cwd;
+    let f = Fixture::new("0.5", 0);
+    let root = f.temp.path();
+    let project = root.join("x");
+    fs::create_dir(&project).unwrap();
+    let link = root.join("link");
+    symlink(&project, &link).unwrap();
+    let cases = [
+        "cd x && cargo test",
+        "cargo test --manifest-path x/Cargo.toml",
+        "cargo test --manifest-path=x/Cargo.toml",
+        "cargo -C x test",
+        "env -C x cargo test",
+        "env --chdir=x cargo test",
+        "RUST_TEST_THREADS=2 nice -n 15 env -C x cargo test 2>&1 | tail",
+        "cd x/../x && cargo +stable test",
+        "cd link && cargo test",
+        "cargo --config=net.retry=2 -C x test",
+        "cargo --config net.retry=2 -C x test",
+    ];
+    for command in cases {
+        let (kind, id) = classify_with_cwd(command, root);
+        assert_eq!(kind, Classification::Heavy(Kind::Test), "{command}");
+        let id = id.unwrap();
+        assert!(id.argv.iter().any(|arg| arg == "test"), "{command}");
+        assert_eq!(fs::canonicalize(&id.dir).unwrap(), project, "{command}");
+    }
+    let (_, tilde) = classify_with_cwd("cd ~/x/../x && cargo test", root);
+    assert_eq!(
+        tilde.unwrap().dir,
+        std::path::Path::new(&std::env::var("HOME").unwrap()).join("x")
+    );
+    let (_, a) = classify_with_cwd("CARGO_TARGET_DIR=/tmp/a cargo test", root);
+    let (_, b) = classify_with_cwd("CARGO_TARGET_DIR=/tmp/b cargo test", root);
+    assert_ne!(a.unwrap().target, b.unwrap().target);
+    let (_, override_target) = classify_with_cwd(
+        "CARGO_TARGET_DIR=/tmp/a cargo test --target-dir=/tmp/b",
+        root,
+    );
+    assert_eq!(
+        override_target.unwrap().target.unwrap(),
+        std::path::Path::new("/tmp/b")
+    );
+    let (_, separated_target) = classify_with_cwd("cargo test --target-dir /tmp/b", root);
+    assert_eq!(
+        separated_target.unwrap().target.unwrap(),
+        std::path::Path::new("/tmp/b")
+    );
+    let (_, manifest) = classify_with_cwd("cargo test --manifest-path=x/Cargo.toml", root);
+    assert_eq!(
+        manifest.unwrap().argv,
+        vec!["test", "--manifest-path=x/Cargo.toml"]
+    );
+    let (_, gradle) = classify_with_cwd("./gradlew test", root);
+    assert!(gradle.is_none());
+}
+
+fn hook_command(f: &Fixture, command: &str, cwd: &std::path::Path) -> Output {
+    let payload = serde_json::json!({"cwd":cwd,"tool_input":{"command":command}});
+    hook(f, &payload.to_string())
+}
+
+#[test]
+fn duplicate_cargo_process_cases() {
+    let cases: &[(&[&str], &str, Option<&str>, bool)] = &[
+        (&["cargo", "test"], "cargo test", Some(""), true),
+        (
+            &[
+                "/x/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+                "test",
+            ],
+            "cargo +stable test",
+            Some(""),
+            true,
+        ),
+        (&["cargo", "test"], "env -C /b cargo test", Some(""), false),
+        (
+            &["cargo", "test"],
+            "cargo test -- --nocapture",
+            Some(""),
+            false,
+        ),
+        (
+            &["cargo", "test"],
+            "cargo test",
+            Some("CARGO_TARGET_DIR=/tmp/other\0"),
+            false,
+        ),
+        (&["cargo", "test"], "cargo test", None, false),
+        (&["cargo-clippy", "test"], "cargo test", Some(""), false),
+        (&["rustc", "test"], "cargo test", Some(""), false),
+        (&["clippy-driver", "test"], "cargo test", Some(""), false),
+    ];
+    for (argv, command, environ, expected) in cases {
+        let f = Fixture::new("0.5", 0);
+        f.process(1001, argv[0].rsplit('/').next().unwrap(), argv, 1);
+        if let Some(value) = environ {
+            fs::write(f.proc().join("1001/environ"), value).unwrap();
+        }
+        let cwd = if command.contains("/b") {
+            std::path::Path::new("/a")
+        } else {
+            f.temp.path()
+        };
+        let out = hook_command(&f, command, cwd);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).starts_with("gate denied (duplicate)"),
+            *expected,
+            "{command} {argv:?} {environ:?}"
+        );
+        if *expected {
+            let line = String::from_utf8(out.stdout).unwrap();
+            assert!(line.starts_with(
+                "gate denied (duplicate) the same command is already running: pid=1001 "
+            ));
+            assert!(!line.contains("since="));
+            assert_eq!(line.lines().count(), 1);
+        }
+    }
+}
+
+#[test]
+fn duplicate_target_and_symlink_and_busy_precedence() {
+    let f = Fixture::new("7", 0);
+    let real = f.temp.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = f.temp.path().join("link");
+    symlink(&real, &link).unwrap();
+    f.process(1002, "cargo", &["cargo", "test"], 1);
+    fs::remove_file(f.proc().join("1002/cwd")).unwrap();
+    symlink(&real, f.proc().join("1002/cwd")).unwrap();
+    fs::write(f.proc().join("1002/environ"), "").unwrap();
+    let out = hook_command(&f, "cargo test", &link);
+    assert_eq!(code(&out), 75);
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("gate denied (duplicate)"));
+}
+
+#[test]
+fn duplicate_explicit_target_without_environ_and_different_cwd() {
+    let f = Fixture::new("0.5", 0);
+    f.process(
+        1003,
+        "cargo",
+        &["cargo", "test", "--target-dir=/tmp/g4-target"],
+        1,
+    );
+    let same = hook_command(&f, "cargo test --target-dir=/tmp/g4-target", f.temp.path());
+    assert_eq!(code(&same), 75);
+    assert!(String::from_utf8_lossy(&same.stdout).starts_with("gate denied (duplicate)"));
+    let different = hook_command(
+        &f,
+        "cargo test --target-dir=/tmp/g4-target",
+        &f.temp.path().join("elsewhere"),
+    );
+    assert_eq!(code(&different), 0);
+}
+
+#[test]
+fn duplicate_holder_and_old_holder() {
+    let f = Fixture::new("0.5", 0);
+    let _lock = hold(&f, "slot-0.lock");
+    let path = f.gate().join("slot-0.lock");
+    fs::write(
+        &path,
+        r#"{"pid":77,"kind":"test","command":["cargo","test"],"started_at":1}"#,
+    )
+    .unwrap();
+    let old = hook_command(&f, "cargo test", f.temp.path());
+    assert_eq!(code(&old), 0);
+    fs::write(&path, serde_json::json!({"pid":77,"kind":"test","command":["cargo","test"],"started_at":1,"cwd":f.temp.path(),"target":null}).to_string()).unwrap();
+    let new = hook_command(&f, "cargo test", f.temp.path());
+    assert_eq!(code(&new), 75);
+    let line = String::from_utf8(new.stdout).unwrap();
+    assert!(line.contains("pid=77 since="));
+    assert_eq!(line.lines().count(), 1);
+    let status: serde_json::Value =
+        serde_json::from_slice(&f.run(&["status", "--json"]).stdout).unwrap();
+    assert!(status["slots"][0]["holder"].get("cwd").is_none());
+    assert!(status["slots"][0]["holder"].get("target").is_none());
+}
+
+#[test]
+fn duplicate_inherited_target_environment() {
+    let f = Fixture::new("0.5", 0);
+    f.process(1004, "cargo", &["cargo", "test"], 1);
+    fs::write(
+        f.proc().join("1004/environ"),
+        b"CARGO_TARGET_DIR=/tmp/g4-shared\0",
+    )
+    .unwrap();
+    let payload = serde_json::json!({"cwd":f.temp.path(),"tool_input":{"command":"cargo test"}});
+    let mut child = f
+        .cmd(&["gate", "hook"])
+        .env("CARGO_TARGET_DIR", "/tmp/g4-shared")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(code(&out), 75);
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("gate denied (duplicate)"));
 }

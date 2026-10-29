@@ -27,6 +27,13 @@ pub enum Classification {
     Unparsed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub argv: Vec<String>,
+    pub dir: PathBuf,
+    pub target: Option<PathBuf>,
+}
+
 #[derive(Debug)]
 enum ShellToken {
     Word(String),
@@ -228,7 +235,7 @@ fn segment_kind(words: &[String]) -> Option<Kind> {
                     i += 1;
                 } else if matches!(words[i].as_str(), "-u" | "--unset" | "-C" | "--chdir") {
                     i += 2;
-                } else if words[i].starts_with('-') {
+                } else if words[i].starts_with("--chdir=") || words[i].starts_with('-') {
                     i += 1;
                 } else {
                     break;
@@ -246,7 +253,7 @@ fn segment_kind(words: &[String]) -> Option<Kind> {
                 if arg.starts_with('+') || arg.starts_with('-') {
                     let takes_value = matches!(
                         arg.as_str(),
-                        "-C" | "--config" | "--manifest-path" | "-Z" | "--color"
+                        "-C" | "--config" | "--manifest-path" | "--target-dir" | "-Z" | "--color"
                     );
                     i += 1 + usize::from(takes_value);
                 } else {
@@ -289,6 +296,135 @@ pub fn classify(command: &str) -> Classification {
     result
 }
 
+fn normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn resolved(base: &Path, value: &str) -> PathBuf {
+    let expanded = if value == "~" || value.starts_with("~/") {
+        env::var("HOME")
+            .map(|home| format!("{home}{}", &value[1..]))
+            .unwrap_or_else(|_| value.to_owned())
+    } else {
+        value.to_owned()
+    };
+    let path = Path::new(&expanded);
+    normalized(&if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    })
+}
+
+fn option_value<'a>(words: &'a [String], key: &str) -> Option<&'a str> {
+    words.iter().enumerate().find_map(|(i, word)| {
+        if word == key {
+            words.get(i + 1).map(String::as_str)
+        } else {
+            word.strip_prefix(key).and_then(|v| v.strip_prefix('='))
+        }
+    })
+}
+
+fn identity(words: &[String], base: &Path, inherited_target: Option<&str>) -> Option<Identity> {
+    let cargo = words.iter().position(|word| basename(word) == "cargo")?;
+    let prefix = &words[..cargo];
+    let env_dir = option_value(prefix, "-C").or_else(|| option_value(prefix, "--chdir"));
+    let cargo_words = &words[cargo + 1..];
+    let dir = normalized(base);
+    let dir = env_dir.map(|v| resolved(&dir, v)).unwrap_or(dir);
+    let dir = option_value(cargo_words, "-C")
+        .map(|v| resolved(&dir, v))
+        .unwrap_or(dir);
+    let dir = option_value(cargo_words, "--manifest-path")
+        .map(|v| resolved(&dir, v).parent().unwrap_or(&dir).to_path_buf())
+        .unwrap_or(dir);
+    let mut argv = Vec::new();
+    let mut i = 0;
+    while i < cargo_words.len() {
+        let word = &cargo_words[i];
+        if let Some(n) = redirection(word) {
+            i += n;
+            continue;
+        }
+        if i == 0 && word.starts_with('+') {
+            i += 1;
+            continue;
+        }
+        argv.push(word.clone());
+        i += 1;
+    }
+    let prefix_target = prefix
+        .iter()
+        .find_map(|word| word.strip_prefix("CARGO_TARGET_DIR="));
+    let target_value = option_value(cargo_words, "--target-dir")
+        .or(prefix_target)
+        .or(inherited_target);
+    let target = Some(
+        target_value
+            .map(|v| resolved(&dir, v))
+            .unwrap_or_else(|| dir.join("target")),
+    );
+    Some(Identity { argv, dir, target })
+}
+
+/// Classify a command and identify its selected heavy Cargo segment using the payload cwd.
+pub fn classify_with_cwd(command: &str, cwd: &Path) -> (Classification, Option<Identity>) {
+    let Some(tokens) = lex(command) else {
+        return (Classification::Unparsed, None);
+    };
+    let mut segment = Vec::new();
+    let mut selected = None;
+    let mut current_dir = if cwd.is_absolute() {
+        normalized(cwd)
+    } else {
+        env::current_dir()
+            .map(|base| normalized(&base.join(cwd)))
+            .unwrap_or_else(|_| normalized(cwd))
+    };
+    for token in tokens.iter().chain(std::iter::once(&ShellToken::Separator)) {
+        match token {
+            ShellToken::Word(word) => segment.push(word.clone()),
+            ShellToken::Separator => {
+                if let Some(kind) = segment_kind(&segment) {
+                    if selected
+                        .as_ref()
+                        .is_none_or(|(old, _)| *old != Kind::Test && kind == Kind::Test)
+                    {
+                        selected = Some((
+                            kind,
+                            identity(
+                                &segment,
+                                &current_dir,
+                                env::var("CARGO_TARGET_DIR").ok().as_deref(),
+                            ),
+                        ));
+                    }
+                }
+                if segment.first().is_some_and(|w| w == "cd") {
+                    if let Some(path) = segment.get(1) {
+                        current_dir = resolved(&current_dir, path);
+                    }
+                }
+                segment.clear();
+            }
+        }
+    }
+    selected.map_or((Classification::NotHeavy, None), |(kind, id)| {
+        (Classification::Heavy(kind), id)
+    })
+}
+
 impl Kind {
     fn as_str(self) -> &'static str {
         match self {
@@ -310,6 +446,10 @@ pub struct Holder {
     pub kind: String,
     pub command: Vec<String>,
     pub started_at: u64,
+    #[serde(default, skip_serializing)]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub target: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -474,9 +614,11 @@ struct ProcEntry {
     cmdline: Vec<String>,
     cwd: String,
     ppid: Option<u32>,
+    environ_target: Option<String>,
+    environ_readable: bool,
 }
 
-fn processes(root: &Path) -> io::Result<Vec<ProcEntry>> {
+fn processes(root: &Path, own_uid: u32, read_environ: bool) -> io::Result<Vec<ProcEntry>> {
     let mut found = Vec::new();
     for item in fs::read_dir(root)? {
         let item = item?;
@@ -495,7 +637,7 @@ fn processes(root: &Path) -> io::Result<Vec<ProcEntry>> {
             continue;
         };
         let cmd = fs::read(dir.join("cmdline")).unwrap_or_default();
-        let cmdline = cmd
+        let cmdline: Vec<String> = cmd
             .split(|b| *b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
@@ -508,6 +650,20 @@ fn processes(root: &Path) -> io::Result<Vec<ProcEntry>> {
                 .and_then(|(_, tail)| tail.split_whitespace().nth(1))
                 .and_then(|s| s.parse().ok())
         });
+        let environ = if read_environ
+            && uid == own_uid
+            && cmdline.first().is_some_and(|s| basename(s) == "cargo")
+        {
+            fs::read(dir.join("environ")).ok()
+        } else {
+            None
+        };
+        let environ_target = environ.as_ref().and_then(|bytes| {
+            bytes.split(|b| *b == 0).find_map(|item| {
+                item.strip_prefix(b"CARGO_TARGET_DIR=")
+                    .map(|v| String::from_utf8_lossy(v).into_owned())
+            })
+        });
         found.push(ProcEntry {
             uid,
             pid,
@@ -515,6 +671,8 @@ fn processes(root: &Path) -> io::Result<Vec<ProcEntry>> {
             cmdline,
             cwd,
             ppid,
+            environ_target,
+            environ_readable: environ.is_some(),
         });
     }
     found.sort_by_key(|p| p.pid);
@@ -605,8 +763,13 @@ fn brokers(processes: &[ProcEntry]) -> Vec<Broker> {
 }
 
 fn snapshot(cfg: &Config) -> io::Result<Snapshot> {
-    let (load_1m, swap_used_mb, mem_available_mb) = metrics(&cfg.proc_root)?;
-    let procs = processes(&cfg.proc_root)?;
+    snapshot_with_processes(cfg, false).map(|(snap, _)| snap)
+}
+
+fn snapshot_with_processes(
+    cfg: &Config,
+    read_environ: bool,
+) -> io::Result<(Snapshot, Vec<ProcEntry>)> {
     fs::create_dir_all(&cfg.gate_dir)?;
     // Our own uid, not the gate directory's owner: the directory can be shared with a group and
     // must not decide whose compilers count. CLAUDECAT_PROC_ROOT is the fixtures' fake proc, so
@@ -614,7 +777,9 @@ fn snapshot(cfg: &Config) -> io::Result<Snapshot> {
     let uid = fs::metadata("/proc/self")
         .map(|m| m.uid())
         .or_else(|_| fs::metadata(&cfg.gate_dir).map(|m| m.uid()))?;
-    Ok(Snapshot {
+    let procs = processes(&cfg.proc_root, uid, read_environ)?;
+    let (load_1m, swap_used_mb, mem_available_mb) = metrics(&cfg.proc_root)?;
+    let snap = Snapshot {
         load_1m,
         swap_used_mb,
         mem_available_mb,
@@ -622,7 +787,77 @@ fn snapshot(cfg: &Config) -> io::Result<Snapshot> {
         compiler_lock: compiler_lock(cfg)?,
         compiling: compiling(&procs, uid),
         orphan_brokers: brokers(&procs),
-    })
+    };
+    Ok((snap, procs))
+}
+
+fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) -> Option<String> {
+    let mut canonical_dir = None;
+    let holders = snap
+        .slots
+        .iter()
+        .filter(|s| s.occupied)
+        .filter_map(|s| s.holder.as_ref())
+        .chain(
+            snap.compiler_lock
+                .holder
+                .iter()
+                .filter(|_| snap.compiler_lock.occupied),
+        );
+    let candidates = holders.filter_map(|holder| {
+        let cwd = holder.cwd.as_ref()?;
+        let id = identity(&holder.command, Path::new(cwd), holder.target.as_deref())?;
+        Some((holder.pid, Some(holder.started_at), id))
+    });
+    let running = procs
+        .iter()
+        .filter(|p| p.uid == uid && p.cmdline.first().is_some_and(|s| basename(s) == "cargo"))
+        .filter_map(|p| {
+            if !p.environ_readable && option_value(&p.cmdline, "--target-dir").is_none() {
+                return None;
+            }
+            let words = &p.cmdline;
+            let id = identity(words, Path::new(&p.cwd), p.environ_target.as_deref())?;
+            Some((p.pid, None, id))
+        });
+    for (pid, since, candidate) in candidates.chain(running) {
+        if wanted.argv != candidate.argv {
+            continue;
+        }
+        let same_dir = wanted.dir == candidate.dir || {
+            let canonical = canonical_dir.get_or_insert_with(|| fs::canonicalize(&wanted.dir).ok());
+            canonical.as_ref() == Some(&candidate.dir)
+        };
+        if !same_dir {
+            continue;
+        }
+        let target = if wanted.dir != candidate.dir
+            && wanted.target.as_ref() == Some(&wanted.dir.join("target"))
+        {
+            canonical_dir
+                .as_ref()
+                .and_then(|p| p.as_ref())
+                .map(|p| p.join("target"))
+        } else {
+            wanted.target.clone()
+        };
+        if target != candidate.target {
+            continue;
+        }
+        let since = since
+            .map(|started| {
+                format!(
+                    " since={}s",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs().saturating_sub(started))
+                        .unwrap_or(0)
+                )
+            })
+            .unwrap_or_default();
+        return Some(format!("gate denied (duplicate) the same command is already running: pid={pid}{since} dir={} cmd=cargo {}. Its output is not visible to you; wait for it to finish, then run this once (the build will be warm). Do not poll with sleep in the foreground.", candidate.dir.display(), wanted.argv.join(" ")));
+    }
+    None
 }
 
 fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<String> {
@@ -701,7 +936,17 @@ fn warning(error: &io::Error) {
 fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
-    serde_json::to_writer(&mut *file, holder)?;
+    serde_json::to_writer(
+        &mut *file,
+        &serde_json::json!({
+            "pid": holder.pid,
+            "kind": holder.kind,
+            "command": holder.command,
+            "started_at": holder.started_at,
+            "cwd": holder.cwd,
+            "target": holder.target,
+        }),
+    )?;
     file.write_all(b"\n")?;
     file.flush()
 }
@@ -727,26 +972,40 @@ pub fn hook() -> i32 {
     if io::stdin().read_to_string(&mut payload).is_err() {
         return 0;
     }
-    let Some(command) = serde_json::from_str::<serde_json::Value>(&payload)
+    let Some((command, cwd)) = serde_json::from_str::<serde_json::Value>(&payload)
         .ok()
         .and_then(|v| {
-            v.pointer("/tool_input/command")?
-                .as_str()
-                .map(str::to_owned)
+            let command = v.pointer("/tool_input/command")?.as_str()?.to_owned();
+            let cwd = v
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .or_else(|| env::current_dir().ok())?;
+            Some((command, cwd))
         })
     else {
         return 0;
     };
-    let Classification::Heavy(kind) = classify(&command) else {
+    let (classification, identity) = classify_with_cwd(&command, &cwd);
+    let Classification::Heavy(kind) = classification else {
         return 0;
     };
-    let Ok((cfg, snap)) = config().and_then(|cfg| snapshot(&cfg).map(|snap| (cfg, snap))) else {
+    let Ok((cfg, snap, procs)) = config().and_then(|cfg| {
+        snapshot_with_processes(&cfg, true).map(|(snap, procs)| (cfg, snap, procs))
+    }) else {
         return 0;
     };
-    if let Some(reason) = deny_reason(&snap, &cfg, kind) {
+    let uid = fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .unwrap_or(u32::MAX);
+    let decision = identity
+        .as_ref()
+        .and_then(|id| duplicate(id, &snap, &procs, uid))
+        .or_else(|| deny_reason(&snap, &cfg, kind).map(|r| format!("{r} Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.")));
+    if let Some(reason) = decision {
         // One line, always: holder commands and compiler cwds are arbitrary bytes and may hold newlines.
         let reason = reason.replace(['\n', '\r'], " ");
-        let _ = writeln!(io::stdout(), "{reason} Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.");
+        let _ = writeln!(io::stdout(), "{reason}");
         75
     } else {
         0
@@ -837,6 +1096,11 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
+                    cwd: env::current_dir()
+                        .ok()
+                        .and_then(|p| fs::canonicalize(p).ok())
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    target: env::var("CARGO_TARGET_DIR").ok(),
                 };
                 if let Err(e) = write_holder(&mut file, &holder) {
                     warning(&e);
@@ -1042,4 +1306,41 @@ pub fn status(json: bool) -> i32 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+
+    #[test]
+    fn foreign_uid_cargo_is_not_a_duplicate() {
+        let id = Identity {
+            argv: vec!["test".into()],
+            dir: PathBuf::from("/tmp/g4-uid"),
+            target: Some(PathBuf::from("/tmp/g4-uid/target")),
+        };
+        let snap = Snapshot {
+            load_1m: 0.0,
+            swap_used_mb: 0,
+            mem_available_mb: 0,
+            slots: Vec::new(),
+            compiler_lock: CompilerLock {
+                holder: None,
+                occupied: false,
+            },
+            compiling: Vec::new(),
+            orphan_brokers: Vec::new(),
+        };
+        let process = ProcEntry {
+            uid: 5001,
+            pid: 123,
+            name: "cargo".into(),
+            cmdline: vec!["cargo".into(), "test".into()],
+            cwd: "/tmp/g4-uid".into(),
+            ppid: None,
+            environ_target: None,
+            environ_readable: true,
+        };
+        assert!(duplicate(&id, &snap, &[process], 5002).is_none());
+    }
 }
