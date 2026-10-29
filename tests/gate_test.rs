@@ -45,6 +45,7 @@ impl Fixture {
             .env_remove("CLAUDECAT_MAX_LOAD")
             .env_remove("CLAUDECAT_MAX_SWAP_MB")
             .env_remove("CLAUDECAT_SLOTS")
+            .env_remove("CLAUDECAT_GRADLE_SAMPLE_MS")
             .env_remove("CARGO_TARGET_DIR");
         cmd
     }
@@ -56,8 +57,17 @@ impl Fixture {
         fs::create_dir(&dir).expect("pid dir");
         fs::write(dir.join("comm"), format!("{name}\n")).expect("comm");
         fs::write(dir.join("cmdline"), args.join("\0") + "\0").expect("cmdline");
-        fs::write(dir.join("stat"), format!("{pid} ({name}) S {ppid} 0 0\n")).expect("stat");
+        self.stat(pid, name, ppid, 0, 0, 1);
         symlink(self.temp.path(), dir.join("cwd")).expect("cwd");
+    }
+    fn stat(&self, pid: u32, name: &str, ppid: u32, utime: u64, stime: u64, start: u64) {
+        let dir = self.proc().join(pid.to_string());
+        let contents = format!(
+            "{pid} ({name}) S {ppid} 0 0 0 0 0 0 0 0 0 {utime} {stime} 0 0 0 0 0 0 {start}\n"
+        );
+        let temporary = dir.join("stat.new");
+        fs::write(&temporary, contents).expect("stat");
+        fs::rename(temporary, dir.join("stat")).expect("replace stat");
     }
 }
 
@@ -569,9 +579,16 @@ fn status_ignores_broker_with_normal_parent() {
     assert_eq!(v["orphan_brokers"].as_array().expect("array").len(), 0);
 }
 
-#[test]
-fn gradle_worker_denies_test() {
-    let f = Fixture::new("0.5", 0);
+/// Ticks keep growing for 800 ms, twice the 400 ms sample the busy tests set, so the gate sees growth
+/// whenever its first sample lands -- a single rewrite after a fixed delay raced the child's startup.
+fn keep_busy(f: &Fixture) {
+    for ticks in 1..=16 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        f.stat(123, "java", 99, ticks, 3, 1);
+    }
+}
+
+fn gradle_worker(f: &Fixture) {
     f.process(
         123,
         "java",
@@ -581,7 +598,93 @@ fn gradle_worker_denies_test() {
         ],
         99,
     );
-    assert_eq!(code(&f.run(&["gate", "check", "--kind", "test"])), 75);
+}
+
+#[test]
+fn gradle_worker_denies_test() {
+    let f = Fixture::new("0.5", 0);
+    gradle_worker(&f);
+    std::thread::scope(|scope| {
+        scope.spawn(|| keep_busy(&f));
+        let output = f
+            .cmd(&["gate", "check", "--kind", "test"])
+            .env("CLAUDECAT_GRADLE_SAMPLE_MS", "400")
+            .output()
+            .expect("check");
+        assert_eq!(code(&output), 75);
+    });
+}
+
+#[test]
+fn idle_gradle_worker_is_allowed() {
+    let f = Fixture::new("0.5", 0);
+    gradle_worker(&f);
+    let output = f
+        .cmd(&["gate", "check", "--kind", "test"])
+        .env("CLAUDECAT_GRADLE_SAMPLE_MS", "1")
+        .output()
+        .expect("check");
+    assert_eq!(code(&output), 0);
+    let output = f
+        .cmd(&["status", "--json"])
+        .env("CLAUDECAT_GRADLE_SAMPLE_MS", "1")
+        .output()
+        .expect("status");
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(status["compiling"].as_array().expect("array").is_empty());
+}
+
+#[test]
+fn unreadable_gradle_stat_is_allowed() {
+    let f = Fixture::new("0.5", 0);
+    gradle_worker(&f);
+    fs::remove_file(f.proc().join("123/stat")).expect("remove stat");
+    let output = f
+        .cmd(&["gate", "check", "--kind", "test"])
+        .env("CLAUDECAT_GRADLE_SAMPLE_MS", "0")
+        .output()
+        .expect("check");
+    assert_eq!(code(&output), 0);
+}
+
+#[test]
+fn status_reports_busy_gradle_worker() {
+    let f = Fixture::new("0.5", 0);
+    gradle_worker(&f);
+    std::thread::scope(|scope| {
+        scope.spawn(|| keep_busy(&f));
+        let output = f
+            .cmd(&["status", "--json"])
+            .env("CLAUDECAT_GRADLE_SAMPLE_MS", "400")
+            .output()
+            .expect("status");
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(status["compiling"][0]["pid"], 123);
+    });
+}
+
+#[test]
+fn vanished_or_reused_gradle_worker_is_allowed() {
+    for reused in [false, true] {
+        let f = Fixture::new("0.5", 0);
+        gradle_worker(&f);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if reused {
+                    f.stat(123, "java", 99, 10, 0, 2);
+                } else {
+                    fs::remove_dir_all(f.proc().join("123")).expect("remove worker");
+                }
+            });
+            let output = f
+                .cmd(&["gate", "check", "--kind", "test"])
+                .env("CLAUDECAT_GRADLE_SAMPLE_MS", "400")
+                .output()
+                .expect("check");
+            assert_eq!(code(&output), 0);
+        });
+    }
 }
 
 #[test]
@@ -742,7 +845,7 @@ fn gradle_mentions_in_arguments_do_not_count_as_compiling() {
 #[test]
 fn idle_gradle_daemon_does_not_block_builds() {
     // The daemon stays resident for hours after a build; counting it refused every build/test
-    // until it timed out. Only a worker JVM means Gradle is compiling or testing right now.
+    // until it timed out. A daemon is not a worker candidate.
     let f = Fixture::new("0.5", 0);
     f.process(
         123,

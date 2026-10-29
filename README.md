@@ -24,7 +24,7 @@ agent 把重工跑得不擾民。
 - **負載與記憶體閘門**：重工開始前同時看 1 分鐘負載與 swap 已用量。`nice` 只讓得出 CPU、
   讓不出記憶體，所以負載不高時也可能卡，swap 要分開擋。起始門檻：負載 > 6、swap ≥ 1024 MB，
   都可用環境變數調整。
-- **不疊兩個完整編譯**：已經有人在跑 `rustc` 或 Gradle worker（`GradleWorkerMain`）時，新的 build／測試排隊，不疊上去。
+- **不疊兩個完整編譯**：已經有人在跑 `rustc`，或有 Gradle worker（`GradleWorkerMain`）正在吃 CPU 時，新的 build／測試排隊，不疊上去。建置結束後留著的閒置 worker 不算：gate 取樣兩次 CPU tick（預設間隔 100 ms，`CLAUDECAT_GRADLE_SAMPLE_MS` 可改，上限 1000 ms，即 hook-gate 時限的上限），沒有增長就放行；間隔必須小於 `cort hook-gate` 實際設定的時限（預設 200 ms），否則逾時放行，所有拒絕都會失效。
   閒置的 Gradle daemon 不算：它在建置後會常駐數小時。代價是沒經過 `gate run` 的 Gradle 純編譯
   （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
   `gate run --kind build|test` 另外持有一把 `compiler.lock`，蓋住 cargo 產生第一個 `rustc` 前的起動窗口。

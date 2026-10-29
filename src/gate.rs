@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_LOAD: f64 = 6.0;
 const DEFAULT_SWAP_MB: u64 = 1024;
@@ -714,15 +714,55 @@ fn processes(root: &Path, own_uid: u32, read_environ: bool) -> io::Result<Vec<Pr
 /// hours after a build (three by default) and is idle most of that time, so counting it refused
 /// every build/test until it timed out. A gated Gradle build is covered by `compiler.lock` instead.
 /// The JVM requirement and the dotted suffix keep `rg …GradleWorkerMain` and `tail -f` on a log --
-/// mentions, not compilers -- from blocking the gate.
+/// mentions, not compilers -- from blocking the gate. Workers outlive the build too (issue #1: an
+/// idle one denied every compile for three hours), so a worker is only a candidate; `compiling`
+/// counts it only if its CPU ticks grew across a short sample.
 fn is_gradle(p: &ProcEntry) -> bool {
     p.name == "java" && p.cmdline.iter().any(|a| a.ends_with(".GradleWorkerMain"))
 }
 
-fn compiling(processes: &[ProcEntry], uid: u32) -> Vec<Process> {
+fn cpu_sample(root: &Path, pid: u32) -> Option<(u64, u64)> {
+    let stat = fs::read_to_string(root.join(pid.to_string()).join("stat")).ok()?;
+    let (_, tail) = stat.rsplit_once(") ")?;
+    let fields: Vec<_> = tail.split_whitespace().collect();
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    let starttime = fields.get(19)?.parse().ok()?;
+    Some((utime.checked_add(stime)?, starttime))
+}
+
+fn compiling(processes: &[ProcEntry], uid: u32, root: &Path) -> Vec<Process> {
+    let workers: Vec<_> = processes
+        .iter()
+        .filter(|p| p.uid == uid && is_gradle(p))
+        .map(|p| (p.pid, cpu_sample(root, p.pid)))
+        .collect();
+    if !workers.is_empty() {
+        // The sample has to fit inside cort hook-gate's timeout (200 ms by default), which allows
+        // the command when it expires: a longer sleep would turn every deny reason into an allow
+        // whenever a worker exists. The cap is hook-gate's own maximum timeout. At 100 Hz ticks,
+        // 100 ms is ~10 ticks for one busy thread.
+        let millis = env::var("CLAUDECAT_GRADLE_SAMPLE_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(100)
+            .min(1000);
+        std::thread::sleep(Duration::from_millis(millis));
+    }
     processes
         .iter()
-        .filter(|p| p.uid == uid && (p.name == "rustc" || is_gradle(p)))
+        .filter(|p| {
+            p.uid == uid
+                && (p.name == "rustc"
+                    || workers.iter().any(|(pid, first)| {
+                        *pid == p.pid
+                            && first.zip(cpu_sample(root, *pid)).is_some_and(
+                                |((ticks, start), (later_ticks, later_start))| {
+                                    start == later_start && later_ticks > ticks
+                                },
+                            )
+                    }))
+        })
         .map(|p| Process {
             pid: p.pid,
             name: p.name.clone(),
@@ -792,13 +832,14 @@ fn brokers(processes: &[ProcEntry]) -> Vec<Broker> {
         .collect()
 }
 
-fn snapshot(cfg: &Config) -> io::Result<Snapshot> {
-    snapshot_with_processes(cfg, false).map(|(snap, _)| snap)
+fn snapshot(cfg: &Config, check_compilers: bool) -> io::Result<Snapshot> {
+    snapshot_with_processes(cfg, false, check_compilers).map(|(snap, _)| snap)
 }
 
 fn snapshot_with_processes(
     cfg: &Config,
     read_environ: bool,
+    check_compilers: bool,
 ) -> io::Result<(Snapshot, Vec<ProcEntry>)> {
     fs::create_dir_all(&cfg.gate_dir)?;
     // Our own uid, not the gate directory's owner: the directory can be shared with a group and
@@ -815,7 +856,11 @@ fn snapshot_with_processes(
         mem_available_mb,
         slots: slots(cfg)?,
         compiler_lock: compiler_lock(cfg)?,
-        compiling: compiling(&procs, uid),
+        compiling: if check_compilers {
+            compiling(&procs, uid, &cfg.proc_root)
+        } else {
+            Vec::new()
+        },
         orphan_brokers: brokers(&procs),
     };
     Ok((snap, procs))
@@ -1277,7 +1322,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 }
 
 pub fn check(kind: Kind) -> i32 {
-    match config().and_then(|cfg| snapshot(&cfg).map(|s| (cfg, s))) {
+    match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
         Ok((cfg, s)) => match deny_reason(&s, &cfg, kind) {
             Some((reason, _)) => {
                 let _ = writeln!(io::stderr(), "{reason}");
@@ -1320,7 +1365,8 @@ pub fn hook() -> i32 {
         return 0;
     };
     let Ok((cfg, snap, procs)) = config().and_then(|cfg| {
-        snapshot_with_processes(&cfg, true).map(|(snap, procs)| (cfg, snap, procs))
+        snapshot_with_processes(&cfg, true, kind.checks_compilers())
+            .map(|(snap, procs)| (cfg, snap, procs))
     }) else {
         return 0;
     };
@@ -1430,7 +1476,7 @@ pub fn install(install: bool) -> i32 {
 }
 
 pub fn run(kind: Kind, command: &[String]) -> i32 {
-    let result = config().and_then(|cfg| snapshot(&cfg).map(|s| (cfg, s)));
+    let result = config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s)));
     let (cfg, snap) = match result {
         Ok(pair) => pair,
         Err(e) => {
@@ -1575,7 +1621,7 @@ fn execute(command: &[String]) -> i32 {
 }
 
 pub fn status(json: bool) -> i32 {
-    let snap = match config().and_then(|cfg| snapshot(&cfg)) {
+    let snap = match config().and_then(|cfg| snapshot(&cfg, true)) {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(io::stderr(), "status warning: {e}");
