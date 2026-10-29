@@ -78,6 +78,15 @@ process group。`gate run` 會原樣回傳子程序的 exit code；子程序自�
 呼叫一次 `canonicalize`；無回應的網路檔案系統可能讓 hook 超過 cort 的 200 ms 時限而放行。
 duplicate 訊息的 `since` 只用於 `gate run` 持有者，不用於一般 Cargo 程序。
 
+被擋的重工會記在 `$CLAUDECAT_GATE_LOG`；未設定時依序使用
+`$XDG_STATE_HOME/claudecat/gate-denies.jsonl` 或 `$HOME/.local/state/claudecat/gate-denies.jsonl`。
+目錄權限為 `0700`、檔案為 `0600`。每列只含時間、session 與 Cargo 指令身分的短雜湊、子命令及原因；
+不記指令文字、路徑或原始 session id。Gradle 也會記 deny，但不計重試。相同 session 的 Cargo 指令
+反覆被擋時，hook 從第二次起提示重試次數；並行寫入與壓縮可能讓次數成為近似值。
+超過七天的列會在**下一次寫入或執行 `claudecat gate log`** 時清除；長時間沒有這兩種操作時舊列仍會留著。
+`claudecat gate log [--json] [--days N]`（預設七天）彙總各原因與子命令的 deny 次數、重試分布及放行前等待秒數。
+比對執行中 Cargo 指令時，若目錄位於無回應的網路檔案系統，目錄解析可能超過 cort 的 200 ms 時限而放行。
+
 安裝轉交需有 cort 的 `hook-gate` 子指令；`gate install` 與 `gate uninstall` 不直接修改 cort 設定檔。
 
 ## 不再提供的東西

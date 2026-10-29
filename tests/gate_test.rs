@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::process::{Command, Output, Stdio};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -37,6 +38,10 @@ impl Fixture {
         cmd.args(args)
             .env("CLAUDECAT_PROC_ROOT", self.proc())
             .env("CLAUDECAT_GATE_DIR", self.gate())
+            .env(
+                "CLAUDECAT_GATE_LOG",
+                self.temp.path().join("state/gate-denies.jsonl"),
+            )
             .env_remove("CLAUDECAT_MAX_LOAD")
             .env_remove("CLAUDECAT_MAX_SWAP_MB")
             .env_remove("CLAUDECAT_SLOTS")
@@ -133,6 +138,184 @@ fn hook(f: &Fixture, stdin: &str) -> Output {
         .write_all(stdin.as_bytes())
         .expect("payload");
     child.wait_with_output().expect("hook output")
+}
+
+fn logged_hook(f: &Fixture, session: Option<&str>, command: &str) -> Output {
+    let payload = serde_json::json!({"session_id":session,"cwd":f.temp.path(),"tool_input":{"command":command}});
+    hook(f, &payload.to_string())
+}
+
+fn log_path(f: &Fixture) -> std::path::PathBuf {
+    f.temp.path().join("state/gate-denies.jsonl")
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn deny_log_retries_sessions_reset_and_privacy() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("7", 0);
+    for (session, expected) in [
+        (Some("secret-session"), None),
+        (Some("secret-session"), Some("retry 2")),
+        (Some("secret-session"), Some("retry 3")),
+        (Some("other-session"), None),
+        (None, None),
+    ] {
+        let out = logged_hook(&f, session, "cargo test --secret-token=raw-secret");
+        assert_eq!(code(&out), 75);
+        let line = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(expected.map(|s| line.contains(s)), expected.map(|_| true));
+        if expected.is_none() {
+            assert!(!line.contains("retry 2"));
+        }
+        if expected == Some("retry 3") {
+            assert!(line.contains("Stop retrying"));
+        }
+    }
+    let path = log_path(&f);
+    assert_eq!(
+        fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let data = fs::read_to_string(&path).unwrap();
+    assert!(!data.contains("raw-secret"));
+    assert!(!data.contains("secret-session"));
+    assert!(!data.contains(f.temp.path().to_str().unwrap()));
+    assert_eq!(data.lines().count(), 5);
+    fs::write(f.proc().join("loadavg"), "0.5 0 0 1/1 1\n").unwrap();
+    assert_eq!(
+        code(&logged_hook(
+            &f,
+            Some("secret-session"),
+            "cargo test --secret-token=raw-secret"
+        )),
+        0
+    );
+    fs::write(f.proc().join("loadavg"), "7 0 0 1/1 1\n").unwrap();
+    let reset = logged_hook(
+        &f,
+        Some("secret-session"),
+        "cargo test --secret-token=raw-secret",
+    );
+    assert!(!String::from_utf8_lossy(&reset.stdout).contains("retry 2"));
+}
+
+#[test]
+fn deny_log_old_garbage_unwritable_and_gradle() {
+    let f = Fixture::new("7", 0);
+    assert_eq!(
+        code(&logged_hook(&f, Some("secret-session"), "cargo test")),
+        75
+    );
+    let first = fs::read_to_string(log_path(&f)).unwrap();
+    fs::write(log_path(&f), format!("{first}not json\n")).unwrap();
+    let counted = logged_hook(&f, Some("secret-session"), "cargo test");
+    assert!(String::from_utf8_lossy(&counted.stdout).contains("retry 2"));
+    let mut old: serde_json::Value = serde_json::from_str(first.trim()).unwrap();
+    old["ts"] = (now_secs() - 1801).into();
+    fs::write(log_path(&f), format!("{old}\nnot json\n")).unwrap();
+    let out = logged_hook(&f, Some("secret-session"), "cargo test");
+    assert_eq!(code(&out), 75);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("retry 2"));
+    let flagged = logged_hook(
+        &f,
+        Some("secret-session"),
+        "cargo --manifest-path=/secret/dir/Cargo.toml --color always test",
+    );
+    assert_eq!(code(&flagged), 75);
+    let data = fs::read_to_string(log_path(&f)).unwrap();
+    assert!(!data.contains("/secret/dir"));
+    let row: serde_json::Value = serde_json::from_str(data.lines().last().unwrap()).unwrap();
+    assert_eq!(row["sub"], "test");
+    let gradle = logged_hook(&f, Some("secret-session"), "./gradlew test");
+    assert_eq!(code(&gradle), 75);
+    assert!(!String::from_utf8_lossy(&gradle.stdout).contains("retry"));
+    let rows: Vec<serde_json::Value> = fs::read_to_string(log_path(&f))
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert_eq!(rows.last().unwrap()["id"], serde_json::Value::Null);
+    assert_eq!(rows.last().unwrap()["sub"], "gradle");
+    let gradle_again = logged_hook(&f, Some("secret-session"), "./gradlew test");
+    assert!(!String::from_utf8_lossy(&gradle_again.stdout).contains("retry"));
+    fs::remove_file(log_path(&f)).unwrap();
+    fs::create_dir(log_path(&f)).unwrap();
+    let denied = logged_hook(&f, Some("secret-session"), "cargo test");
+    assert_eq!(code(&denied), 75);
+    assert!(String::from_utf8_lossy(&denied.stdout).starts_with("gate denied"));
+}
+
+#[test]
+fn gate_log_aggregation_and_retention() {
+    let f = Fixture::new("7", 0);
+    let now = now_secs();
+    fs::create_dir_all(log_path(&f).parent().unwrap()).unwrap();
+    let old =
+        serde_json::json!({"ts":now-8*86400,"session":"a","id":"b","sub":"test","reason":"load"});
+    let deny =
+        serde_json::json!({"ts":now-10,"session":"a","id":"b","sub":"test","reason":"load,slots"});
+    let allow = serde_json::json!({"ts":now,"session":"a","id":"b","sub":"test","allowed":true});
+    fs::write(log_path(&f), format!("{old}\n{deny}\n{deny}\n{allow}\n")).unwrap();
+    let out = f.run(&["gate", "log", "--json"]);
+    assert_eq!(code(&out), 0);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["reasons"]["load"], 2);
+    assert_eq!(value["subs"]["test"], 2);
+    assert_eq!(value["retries"]["2"], 1);
+    assert_eq!(value["seconds_to_allow"]["p50"], 10);
+    assert!(!fs::read_to_string(log_path(&f))
+        .unwrap()
+        .contains(&old.to_string()));
+    let text = String::from_utf8(f.run(&["gate", "log"]).stdout).unwrap();
+    assert!(text.contains("load: 2"));
+    assert!(text.contains("p95=10"));
+}
+
+#[test]
+fn large_log_compacts_on_deny_and_allow() {
+    let f = Fixture::new("7", 0);
+    assert_eq!(
+        code(&logged_hook(&f, Some("large-session"), "cargo test")),
+        75
+    );
+    let row = fs::read_to_string(log_path(&f)).unwrap();
+    fs::write(log_path(&f), row.repeat(140 * 1024 / row.len() + 1)).unwrap();
+    let within_window = logged_hook(&f, Some("large-session"), "cargo test");
+    assert_eq!(code(&within_window), 75);
+    assert!(String::from_utf8_lossy(&within_window.stdout).contains("retry"));
+    fs::write(log_path(&f), row.repeat(1024 * 1024 / row.len() + 1)).unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        code(&logged_hook(&f, Some("large-session"), "cargo test")),
+        75
+    );
+    assert!(start.elapsed().as_millis() < 50);
+    assert!(fs::metadata(log_path(&f)).unwrap().len() <= 256 * 1024);
+    fs::write(log_path(&f), row.repeat(1024 * 1024 / row.len() + 1)).unwrap();
+    fs::write(f.proc().join("loadavg"), "0.5 0 0 1/1 1\n").unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        code(&logged_hook(&f, Some("large-session"), "cargo test")),
+        0
+    );
+    assert!(start.elapsed().as_millis() < 50);
+    assert!(fs::metadata(log_path(&f)).unwrap().len() <= 256 * 1024);
 }
 
 #[test]

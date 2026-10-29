@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -324,6 +326,24 @@ fn resolved(base: &Path, value: &str) -> PathBuf {
     } else {
         base.join(path)
     })
+}
+
+/// The Cargo subcommand of an identity's argv, skipping global flags and their values
+/// the way `segment_kind` does, so a flag value (a path) never stands in for it.
+fn cargo_subcommand(argv: &[String]) -> String {
+    let mut i = 0;
+    while let Some(arg) = argv.get(i) {
+        if arg.starts_with('-') {
+            let takes_value = matches!(
+                arg.as_str(),
+                "-C" | "--config" | "--manifest-path" | "--target-dir" | "-Z" | "--color"
+            );
+            i += 1 + usize::from(takes_value);
+        } else {
+            return arg.clone();
+        }
+    }
+    "cargo".into()
 }
 
 fn option_value<'a>(words: &'a [String], key: &str) -> Option<&'a str> {
@@ -860,7 +880,7 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
     None
 }
 
-fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<String> {
+fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<(String, Vec<&'static str>)> {
     let reasons = [
         (s.load_1m > cfg.max_load, "load"),
         (s.swap_used_mb >= cfg.max_swap_mb, "swap"),
@@ -914,7 +934,7 @@ fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<String> {
         None if s.compiler_lock.occupied => "unknown".into(),
         None => "none".into(),
     };
-    Some(format!(
+    let message = format!(
         "gate denied ({}) load={:.2}/{:.2} swap={}MB/{}MB slots={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
         failed.join(","),
         s.load_1m,
@@ -926,11 +946,302 @@ fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<String> {
         holders.join("; "),
         compiler_lock,
         compilers.join("; ")
-    ))
+    );
+    Some((message, failed))
 }
 
 fn warning(error: &io::Error) {
     let _ = writeln!(io::stderr(), "gate warning: {error}; allowing work");
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct GateLogRow {
+    ts: u64,
+    session: Option<String>,
+    id: Option<String>,
+    sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed: Option<bool>,
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn short_hash(bytes: impl AsRef<[u8]>) -> String {
+    let digest = Sha256::digest(bytes);
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn gate_log_path() -> io::Result<PathBuf> {
+    if let Some(path) = env::var_os("CLAUDECAT_GATE_LOG") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(root) = env::var_os("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(root).join("claudecat/gate-denies.jsonl"));
+    }
+    env::var_os("HOME")
+        .map(|root| PathBuf::from(root).join(".local/state/claudecat/gate-denies.jsonl"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no gate log directory"))
+}
+
+fn read_log(path: &Path) -> io::Result<Vec<GateLogRow>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(bytes
+        .split(|b| *b == b'\n')
+        .filter_map(|line| serde_json::from_slice::<GateLogRow>(line).ok())
+        .collect())
+}
+
+fn compact_log(path: &Path, now: u64) -> io::Result<()> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let old_first = {
+        use std::io::BufRead;
+        let mut line = Vec::new();
+        io::BufReader::new(File::open(path)?).read_until(b'\n', &mut line)?;
+        serde_json::from_slice::<GateLogRow>(&line)
+            .ok()
+            .is_some_and(|row| row.ts < now.saturating_sub(7 * 86400))
+    };
+    if metadata.len() <= 256 * 1024 && !old_first {
+        return Ok(());
+    }
+    let bytes = fs::read(path)?;
+    let mut kept = Vec::new();
+    let mut size = 0;
+    for line in bytes.split_inclusive(|b| *b == b'\n').rev() {
+        let Ok(row) = serde_json::from_slice::<GateLogRow>(line) else {
+            continue;
+        };
+        if row.ts < now.saturating_sub(7 * 86400) || row.ts > now {
+            continue;
+        }
+        if size + line.len() > 128 * 1024 {
+            break;
+        }
+        kept.push(line);
+        size += line.len();
+    }
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no log parent"))?;
+    for serial in 0..8 {
+        let temp = dir.join(format!(
+            ".gate-denies-{}-{now}-{serial}.tmp",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp);
+        let Ok(mut file) = file else {
+            if file
+                .err()
+                .is_some_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
+            {
+                continue;
+            }
+            return Err(io::Error::other("cannot create gate log temp file"));
+        };
+        let result = (|| -> io::Result<()> {
+            for line in kept.iter().rev() {
+                file.write_all(line)?;
+            }
+            file.flush()?;
+            fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "gate log temp files exist",
+    ))
+}
+
+fn append_log(path: &Path, row: &GateLogRow) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no log parent"))?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(dir)?;
+    let mut line = serde_json::to_vec(row)?;
+    line.push(b'\n');
+    if line.len() > 512 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gate log row too long",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&line)
+}
+
+fn active_denies(rows: &[GateLogRow], now: u64, session: &str, id: &str) -> Vec<u64> {
+    let mut denies = Vec::new();
+    for row in rows {
+        if row.session.as_deref() != Some(session) || row.id.as_deref() != Some(id) {
+            continue;
+        }
+        if row.allowed == Some(true) {
+            denies.clear();
+        } else if row.reason.is_some() && row.ts <= now && row.ts >= now.saturating_sub(1800) {
+            denies.push(row.ts);
+        }
+    }
+    denies
+}
+
+fn record_deny(
+    now: u64,
+    session: Option<&str>,
+    id: Option<&str>,
+    sub: &str,
+    reason: &str,
+) -> Option<(usize, u64)> {
+    let path = gate_log_path().ok()?;
+    compact_log(&path, now).ok()?;
+    let rows = read_log(&path).ok()?;
+    let prior = session
+        .zip(id)
+        .map(|(session, id)| active_denies(&rows, now, session, id));
+    append_log(
+        &path,
+        &GateLogRow {
+            ts: now,
+            session: session.map(str::to_owned),
+            id: id.map(str::to_owned),
+            sub: sub.to_owned(),
+            reason: Some(reason.to_owned()),
+            allowed: None,
+        },
+    )
+    .ok()?;
+    prior.map(|denies| (denies.len() + 1, denies.first().copied().unwrap_or(now)))
+}
+
+fn record_allow(now: u64, session: Option<&str>, id: Option<&str>, sub: &str) -> io::Result<()> {
+    let (Some(session), Some(id)) = (session, id) else {
+        return Ok(());
+    };
+    let path = gate_log_path()?;
+    let rows = read_log(&path)?;
+    if active_denies(&rows, now, session, id).is_empty() {
+        return Ok(());
+    }
+    compact_log(&path, now)?;
+    append_log(
+        &path,
+        &GateLogRow {
+            ts: now,
+            session: Some(session.to_owned()),
+            id: Some(id.to_owned()),
+            sub: sub.to_owned(),
+            reason: None,
+            allowed: Some(true),
+        },
+    )
+}
+
+pub fn log(json: bool, days: u32) -> i32 {
+    let result = (|| -> io::Result<serde_json::Value> {
+        let path = gate_log_path()?;
+        let now = unix_now();
+        compact_log(&path, now)?;
+        let rows = read_log(&path)?;
+        let mut reasons = BTreeMap::<String, u64>::new();
+        let mut subs = BTreeMap::<String, u64>::new();
+        let mut runs = BTreeMap::<(String, String), (u64, u64)>::new();
+        let mut distribution = [0_u64; 3];
+        let mut durations = Vec::<u64>::new();
+        for row in rows
+            .into_iter()
+            .filter(|row| row.ts >= now.saturating_sub(u64::from(days) * 86400) && row.ts <= now)
+        {
+            let key = row.session.zip(row.id);
+            if row.allowed == Some(true) {
+                if let Some((count, first)) = key.and_then(|key| runs.remove(&key)) {
+                    distribution[(count.saturating_sub(1).min(2)) as usize] += 1;
+                    durations.push(row.ts.saturating_sub(first));
+                }
+            } else if let Some(reason) = row.reason {
+                *subs.entry(row.sub).or_default() += 1;
+                for reason in reason.split(',').filter(|s| !s.is_empty()) {
+                    *reasons.entry(reason.to_owned()).or_default() += 1;
+                }
+                if let Some(key) = key {
+                    let run = runs.entry(key).or_insert((0, row.ts));
+                    run.0 += 1;
+                }
+            }
+        }
+        for (count, _) in runs.values() {
+            distribution[(count.saturating_sub(1).min(2)) as usize] += 1;
+        }
+        durations.sort_unstable();
+        let percentile = |p: usize| -> Option<u64> {
+            durations
+                .get(((durations.len() * p).div_ceil(100)).saturating_sub(1))
+                .copied()
+        };
+        Ok(
+            serde_json::json!({"reasons": reasons, "subs": subs, "retries": {"1":distribution[0],"2":distribution[1],"3+":distribution[2]}, "seconds_to_allow": {"p50":percentile(50),"p95":percentile(95)}}),
+        )
+    })();
+    match result {
+        Ok(value) => {
+            if json {
+                println!("{value}");
+            } else {
+                println!("Deny reasons:");
+                if let Some(map) = value["reasons"].as_object() {
+                    for (key, count) in map {
+                        println!("  {key}: {count}");
+                    }
+                }
+                println!("Deny subcommands:");
+                if let Some(map) = value["subs"].as_object() {
+                    for (key, count) in map {
+                        println!("  {key}: {count}");
+                    }
+                }
+                println!(
+                    "Retry runs: 1={} 2={} 3+={}",
+                    value["retries"]["1"], value["retries"]["2"], value["retries"]["3+"]
+                );
+                println!(
+                    "Seconds from first deny to allow: p50={} p95={}",
+                    value["seconds_to_allow"]["p50"], value["seconds_to_allow"]["p95"]
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("gate log: {e}");
+            1
+        }
+    }
 }
 
 fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
@@ -954,7 +1265,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 pub fn check(kind: Kind) -> i32 {
     match config().and_then(|cfg| snapshot(&cfg).map(|s| (cfg, s))) {
         Ok((cfg, s)) => match deny_reason(&s, &cfg, kind) {
-            Some(reason) => {
+            Some((reason, _)) => {
                 let _ = writeln!(io::stderr(), "{reason}");
                 75
             }
@@ -972,7 +1283,7 @@ pub fn hook() -> i32 {
     if io::stdin().read_to_string(&mut payload).is_err() {
         return 0;
     }
-    let Some((command, cwd)) = serde_json::from_str::<serde_json::Value>(&payload)
+    let Some((command, cwd, session_id)) = serde_json::from_str::<serde_json::Value>(&payload)
         .ok()
         .and_then(|v| {
             let command = v.pointer("/tool_input/command")?.as_str()?.to_owned();
@@ -981,7 +1292,11 @@ pub fn hook() -> i32 {
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .or_else(|| env::current_dir().ok())?;
-            Some((command, cwd))
+            let session_id = v
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            Some((command, cwd, session_id))
         })
     else {
         return 0;
@@ -998,16 +1313,52 @@ pub fn hook() -> i32 {
     let uid = fs::metadata("/proc/self")
         .map(|m| m.uid())
         .unwrap_or(u32::MAX);
-    let decision = identity
+    let duplicate_reason = identity
         .as_ref()
-        .and_then(|id| duplicate(id, &snap, &procs, uid))
-        .or_else(|| deny_reason(&snap, &cfg, kind).map(|r| format!("{r} Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.")));
+        .and_then(|id| duplicate(id, &snap, &procs, uid));
+    let (decision, keys) = if let Some(reason) = duplicate_reason {
+        (Some(reason), vec!["duplicate"])
+    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind) {
+        (Some(format!("{reason} Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.")), keys)
+    } else {
+        (None, Vec::new())
+    };
+    let session = session_id.as_deref().map(short_hash);
+    let id = identity
+        .as_ref()
+        .and_then(|id| serde_json::to_vec(&(&id.argv, &id.dir, &id.target)).ok())
+        .map(|bytes| short_hash(&bytes));
+    let sub = identity
+        .as_ref()
+        .map(|id| cargo_subcommand(&id.argv))
+        .unwrap_or_else(|| "gradle".into());
+    let now = unix_now();
     if let Some(reason) = decision {
+        let retry = record_deny(
+            now,
+            session.as_deref(),
+            id.as_deref(),
+            &sub,
+            &keys.join(","),
+        );
+        let reason = if let Some((count, first)) = retry.filter(|(count, _)| *count >= 2) {
+            let suffix = if count >= 3 {
+                " Stop retrying it: do other work or tell the user what is blocking it."
+            } else {
+                ""
+            };
+            format!("retry {count} of this command in this session; first denied {}s ago, still blocked. {reason}{suffix}", now.saturating_sub(first))
+        } else {
+            reason
+        };
         // One line, always: holder commands and compiler cwds are arbitrary bytes and may hold newlines.
         let reason = reason.replace(['\n', '\r'], " ");
         let _ = writeln!(io::stdout(), "{reason}");
         75
     } else {
+        if identity.is_some() && session.is_some() {
+            let _ = record_allow(now, session.as_deref(), id.as_deref(), &sub);
+        }
         0
     }
 }
@@ -1073,7 +1424,7 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
             return execute(command);
         }
     };
-    if let Some(reason) = deny_reason(&snap, &cfg, kind) {
+    if let Some((reason, _)) = deny_reason(&snap, &cfg, kind) {
         let _ = writeln!(io::stderr(), "{reason}");
         return 75;
     }

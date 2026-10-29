@@ -162,6 +162,13 @@ enum GateAction {
     },
     /// Check a Bash hook payload from stdin
     Hook,
+    /// Summarize gate deny history
+    Log {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+    },
     /// Register this executable with cort's hook gate
     Install,
     /// Remove cort's hook gate registration
@@ -292,6 +299,7 @@ fn main() {
             GateAction::Check { kind } => gate::check(kind),
             GateAction::Run { kind, command } => gate::run(kind, &command),
             GateAction::Hook => gate::hook(),
+            GateAction::Log { json, days } => gate::log(json, days),
             GateAction::Install => gate::install(true),
             GateAction::Uninstall => gate::install(false),
         }),
