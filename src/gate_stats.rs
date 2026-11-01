@@ -192,7 +192,7 @@ fn cargo_class(rest: &[String]) -> &'static str {
         } else {
             return match arg.as_str() {
                 "test" | "nextest" | "bench" => "test",
-                "build" | "check" | "clippy" | "doc" | "run" | "install" => "build",
+                "build" | "check" | "clippy" | "doc" | "run" => "build",
                 _ => "other",
             };
         }

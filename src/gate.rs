@@ -278,7 +278,7 @@ fn segment_kind(words: &[String]) -> Option<Kind> {
             }
             match words.get(i).map(String::as_str) {
                 Some("test" | "bench" | "nextest") => Some(Kind::Test),
-                Some("build" | "clippy" | "check" | "run" | "install" | "doc") => Some(Kind::Build),
+                Some("build" | "clippy" | "check" | "run" | "doc") => Some(Kind::Build),
                 _ => None,
             }
         }

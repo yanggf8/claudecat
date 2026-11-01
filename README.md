@@ -71,7 +71,7 @@ process group。`gate run` 會原樣回傳子程序的 exit code；子程序自�
 要排隊語意請先 `gate check`。
 
 `gate hook` 會辨識引號、跳脫字元、`#` 註解、開頭的重導向（`2>log cargo test`）與 shell 分段符號；各段略過前置變數設定、`nice`、`timeout`、
-`env`、`exec`、`command` 後，將 Cargo 的 build/test/clippy/check/bench/run/install/doc/nextest
+`env`、`exec`、`command` 後，將 Cargo 的 build/test/clippy/check/bench/run/doc/nextest
 和 Gradle 指令視為重工。多段中有 test、bench 或 nextest 時，以測試門檻判斷；`gate run` 那段
 已有自己的排隊機制，不再重複攔截。heredoc（`<<EOF` 到結束行）的內容是資料，不當成指令。無法解析的指令放行。已知漏網包括 `$(…)`、反引號、
 `bash -c`、`make`／`just` 包裹的指令，以及腳本檔內的重工。
@@ -102,7 +102,7 @@ deny 列另外帶 `mem_available_mb`、`psi_some_avg10`、`load_1m`（被擋當�
 `exit`，以及起跑與結束時的 `start`／`end`：`mem_available_mb`、`psi_some_avg10`、`load_1m`、`swap_used_mb`。
 不記指令文字。`class` 由 argv 推得（看穿 `sh -c`）：Gradle 的 test／check／`*Test`／`--tests` 為 `test`，
 `build`／`bootJar` 等為 `build`，`compile*`／`classes`／`assemble`／`jar` 為 `compile`（同時出現時 test > build > compile）；
-Cargo 的 test／nextest／bench 為 `test`，build／check／clippy／doc／run／install 為 `build`。取樣失敗一律略過，
+Cargo 的 test／nextest／bench 為 `test`，build／check／clippy／doc／run 為 `build`。取樣失敗一律略過，
 結束後最多多等 50 ms 收取樣緒。`RSS` 含共享頁，會略高於獨佔量。測試可用 `CLAUDECAT_USAGE_PID_ROOT` 讓取樣讀真的 `/proc`，
 閘門自己的數字仍讀 `CLAUDECAT_PROC_ROOT`。
 `claudecat gate usage [--json] [--days N]`（預設七天）依 (toolchain, class) 彙總次數、`peak_rss_mb` 的 p50／p90／max、

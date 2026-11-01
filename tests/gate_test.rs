@@ -118,6 +118,7 @@ fn classify_shell_commands() {
         ("git commit -m \"docs; cargo build; why\"", NotHeavy),
         ("echo \"unterminated", Unparsed),
         ("cargo fmt --all", NotHeavy),
+        ("cargo install --locked --path .", NotHeavy),
         (
             "timeout -s TERM 30s env A=b ./gradlew test",
             Heavy(Kind::Build),
