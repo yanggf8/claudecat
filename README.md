@@ -26,10 +26,11 @@ agent 把重工跑得不擾民。
   `/proc/pressure/memory` 的 `some avg10` > 10，或 MemAvailable < 1536 MB，任一成立就擋，
   都可用環境變數調整。kernel 沒有 PSI 時只看 MemAvailable。swap 已用量照樣顯示，但不再是擋下的
   理由：WSL2 上長駐程序的閒置分頁會一直留在 swap，已用量不會降，機器閒著也會被永遠擋住。
-- **不疊兩個完整編譯**：已經有人在跑 `rustc`，或有 Gradle worker（`GradleWorkerMain`）正在吃 CPU 時，新的 build／測試排隊，不疊上去。建置結束後留著的閒置 worker 不算：gate 取樣兩次 CPU tick（預設間隔 100 ms，`CLAUDECAT_GRADLE_SAMPLE_MS` 可改，上限 1000 ms，即 hook-gate 時限的上限），沒有增長就放行；間隔必須小於 `cort hook-gate` 實際設定的時限（預設 200 ms），否則逾時放行，所有拒絕都會失效。
+- **同一種編譯器不疊兩個**：已經有人在跑 `rustc`，新的 cargo build／測試排隊；有 Gradle worker（`GradleWorkerMain`）正在吃 CPU，新的 gradle build／測試排隊。cargo 與 gradle 互不互擋（只在記憶體不夠時由下面的預留擋）。指令認不出是哪一種（例如 `gate check --kind build`）時保守處理，兩種都算。建置結束後留著的閒置 worker 不算：gate 取樣兩次 CPU tick（預設間隔 100 ms，`CLAUDECAT_GRADLE_SAMPLE_MS` 可改，上限 1000 ms，即 hook-gate 時限的上限），沒有增長就放行；間隔必須小於 `cort hook-gate` 實際設定的時限（預設 200 ms），否則逾時放行，所有拒絕都會失效。
   閒置的 Gradle daemon 不算：它在建置後會常駐數小時。代價是沒經過 `gate run` 的 Gradle 純編譯
   （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
-  `gate run --kind build|test` 另外持有一把 `compiler.lock`，蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
+  `gate run --kind build|test` 另外持有每種編譯器各一把鎖（`compiler-cargo.lock`、`compiler-gradle.lock`，認不出就全持有），蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
+- **預留記憶體**：剛起動（預設 60 秒內，`CLAUDECAT_RESERVE_WARMUP_SECS`）的持有者還沒把記憶體用出來，gate 先替它預留估計值（gradle 3072 MB、cargo 1536 MB，`CLAUDECAT_RESERVE_GRADLE_MB`、`CLAUDECAT_RESERVE_CARGO_MB`）；`MemAvailable` 扣掉預留後不夠新指令的估計值就拒絕（`reserved`）。暖機後的實際用量已在 `MemAvailable` 裡，不再重複預留。
 - **名額是鎖，不是公告**：整台的重工名額（預設 3 個）用 `flock`，程序死掉時由 kernel 釋放，
   不會留下過期紀錄；鎖檔記著持有者的 pid 與指令，「誰在跑」就是從鎖算出來的。
 - **兩個入口，同一套門檻**：

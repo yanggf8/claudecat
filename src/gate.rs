@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -16,6 +16,10 @@ const DEFAULT_LOAD: f64 = 6.0;
 const DEFAULT_MEM_PRESSURE: f64 = 10.0;
 const DEFAULT_AVAILABLE_MB: u64 = 1536;
 const DEFAULT_SLOTS: usize = 3;
+// Estimated peak memory of a fresh build, reserved only while its holder is still warming up.
+const DEFAULT_RESERVE_GRADLE_MB: u64 = 3072;
+const DEFAULT_RESERVE_CARGO_MB: u64 = 1536;
+const DEFAULT_RESERVE_WARMUP_SECS: u64 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Kind {
@@ -308,6 +312,89 @@ pub fn classify(command: &str) -> Classification {
     result
 }
 
+/// The compiler family a command drives. Compilers of the same family exclude each other; two
+/// families only compete for memory, which the reservation covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Toolchain {
+    Cargo,
+    Gradle,
+}
+
+const TOOLCHAINS: [Toolchain; 2] = [Toolchain::Cargo, Toolchain::Gradle];
+
+impl Toolchain {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cargo => "cargo",
+            Self::Gradle => "gradle",
+        }
+    }
+
+    fn lock_name(self) -> String {
+        format!("compiler-{}.lock", self.as_str())
+    }
+
+    fn estimate_mb(self, cfg: &Config) -> u64 {
+        match self {
+            Self::Cargo => cfg.reserve_cargo_mb,
+            Self::Gradle => cfg.reserve_gradle_mb,
+        }
+    }
+}
+
+fn segment_toolchain(words: &[String]) -> Option<Toolchain> {
+    segment_kind(words)?;
+    Some(match basename(&words[command_index(words)]) {
+        "cargo" => Toolchain::Cargo,
+        _ => Toolchain::Gradle,
+    })
+}
+
+/// Toolchains of every heavy segment of a shell command, sorted; empty when none is recognised.
+fn command_toolchains(command: &str) -> Vec<Toolchain> {
+    let Some(tokens) = lex(command) else {
+        return Vec::new();
+    };
+    let mut segment = Vec::new();
+    let mut found = BTreeSet::new();
+    for token in tokens.iter().chain(std::iter::once(&ShellToken::Separator)) {
+        match token {
+            ShellToken::Word(word) => segment.push(word.clone()),
+            ShellToken::Separator => {
+                found.extend(segment_toolchain(&segment));
+                segment.clear();
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// Toolchains of an argv (a `gate run` command or a holder's), looking through `sh -c "..."`.
+fn argv_toolchains(argv: &[String]) -> Vec<Toolchain> {
+    if let Some(toolchain) = segment_toolchain(argv) {
+        return vec![toolchain];
+    }
+    let i = command_index(argv);
+    if argv
+        .get(i)
+        .is_some_and(|c| matches!(basename(c), "sh" | "bash" | "zsh"))
+    {
+        if let Some(script) = argv[i + 1..].iter().skip_while(|a| *a != "-c").nth(1) {
+            return command_toolchains(script);
+        }
+    }
+    Vec::new()
+}
+
+fn process_toolchain(p: &Process) -> Option<Toolchain> {
+    match p.name.as_str() {
+        "rustc" => Some(Toolchain::Cargo),
+        "java" => Some(Toolchain::Gradle),
+        _ => None,
+    }
+}
+
 fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -498,6 +585,13 @@ pub struct CompilerLock {
     pub occupied: bool,
 }
 
+#[derive(Serialize)]
+struct ToolchainLock {
+    toolchain: Toolchain,
+    holder: Option<Holder>,
+    occupied: bool,
+}
+
 #[derive(Serialize, Clone)]
 pub struct Process {
     pub pid: u32,
@@ -521,7 +615,9 @@ pub struct Snapshot {
     /// PSI `some avg10` from `pressure/memory`; None when the kernel has no PSI.
     pub mem_pressure_some_avg10: Option<f64>,
     pub slots: Vec<Slot>,
+    /// Summary of `compiler_locks` for older readers: occupied if any toolchain lock is.
     pub compiler_lock: CompilerLock,
+    compiler_locks: Vec<ToolchainLock>,
     pub compiling: Vec<Process>,
     pub orphan_brokers: Vec<Broker>,
 }
@@ -533,6 +629,9 @@ struct Config {
     max_mem_pressure: f64,
     min_available_mb: u64,
     slots: usize,
+    reserve_gradle_mb: u64,
+    reserve_cargo_mb: u64,
+    reserve_warmup_secs: u64,
 }
 
 fn positive_f64(key: &str, default: f64) -> f64 {
@@ -575,6 +674,12 @@ fn config() -> io::Result<Config> {
         max_mem_pressure: positive_f64("CLAUDECAT_MAX_MEM_PRESSURE", DEFAULT_MEM_PRESSURE),
         min_available_mb: positive_u64("CLAUDECAT_MIN_AVAILABLE_MB", DEFAULT_AVAILABLE_MB),
         slots,
+        reserve_gradle_mb: positive_u64("CLAUDECAT_RESERVE_GRADLE_MB", DEFAULT_RESERVE_GRADLE_MB),
+        reserve_cargo_mb: positive_u64("CLAUDECAT_RESERVE_CARGO_MB", DEFAULT_RESERVE_CARGO_MB),
+        reserve_warmup_secs: positive_u64(
+            "CLAUDECAT_RESERVE_WARMUP_SECS",
+            DEFAULT_RESERVE_WARMUP_SECS,
+        ),
     })
 }
 
@@ -612,6 +717,48 @@ fn mem_pressure(root: &Path) -> Option<f64> {
         .filter(|n| n.is_finite() && *n >= 0.0)
 }
 
+/// Memory held back for holders still starting up. A holder older than the warm-up window is
+/// already inside MemAvailable, so reserving it again would count it twice. A holder seen in both
+/// its slot and a compiler lock counts once.
+fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> BTreeMap<Toolchain, u64> {
+    let holders = s
+        .slots
+        .iter()
+        .filter(|slot| slot.occupied)
+        .filter_map(|slot| slot.holder.as_ref())
+        .chain(
+            s.compiler_locks
+                .iter()
+                .filter(|lock| lock.occupied)
+                .filter_map(|lock| lock.holder.as_ref()),
+        );
+    let mut seen = BTreeSet::new();
+    let mut table = BTreeMap::new();
+    for holder in holders {
+        if !seen.insert(holder.pid)
+            || now.saturating_sub(holder.started_at) >= cfg.reserve_warmup_secs
+        {
+            continue;
+        }
+        for toolchain in argv_toolchains(&holder.command) {
+            let slot = table.entry(toolchain).or_insert(0u64);
+            *slot = slot.saturating_add(toolchain.estimate_mb(cfg));
+        }
+    }
+    table
+}
+
+fn reserved_figure(table: &BTreeMap<Toolchain, u64>) -> String {
+    if table.is_empty() {
+        return "reserved=none".into();
+    }
+    let rows: Vec<_> = table
+        .iter()
+        .map(|(toolchain, mb)| format!("{}:{mb}MB", toolchain.as_str()))
+        .collect();
+    format!("reserved={}", rows.join(","))
+}
+
 /// Memory figures shared by every deny message, as key=value/limit.
 fn memory_figures(s: &Snapshot, cfg: &Config) -> String {
     let psi = match s.mem_pressure_some_avg10 {
@@ -619,8 +766,11 @@ fn memory_figures(s: &Snapshot, cfg: &Config) -> String {
         None => "n/a".into(),
     };
     format!(
-        "psi_some_avg10={psi} avail={}MB/{}MB swap={}MB",
-        s.mem_available_mb, cfg.min_available_mb, s.swap_used_mb
+        "psi_some_avg10={psi} avail={}MB/{}MB swap={}MB {}",
+        s.mem_available_mb,
+        cfg.min_available_mb,
+        s.swap_used_mb,
+        reserved_figure(&reserved(s, cfg, unix_now()))
     )
 }
 
@@ -665,9 +815,18 @@ fn slots(cfg: &Config) -> io::Result<Vec<Slot>> {
         .collect()
 }
 
-fn compiler_lock(cfg: &Config) -> io::Result<CompilerLock> {
-    let (occupied, holder) = probe_lock(&cfg.gate_dir.join("compiler.lock"))?;
-    Ok(CompilerLock { holder, occupied })
+fn compiler_locks(cfg: &Config) -> io::Result<Vec<ToolchainLock>> {
+    TOOLCHAINS
+        .iter()
+        .map(|&toolchain| {
+            let (occupied, holder) = probe_lock(&cfg.gate_dir.join(toolchain.lock_name()))?;
+            Ok(ToolchainLock {
+                toolchain,
+                holder,
+                occupied,
+            })
+        })
+        .collect()
 }
 
 struct ProcEntry {
@@ -745,7 +904,7 @@ fn processes(root: &Path, own_uid: u32, read_environ: bool) -> io::Result<Vec<Pr
 /// Gradle only counts while a test or compile worker JVM is running: its main class is an argument
 /// ending in `.GradleWorkerMain`. The daemon is deliberately not counted -- it stays resident for
 /// hours after a build (three by default) and is idle most of that time, so counting it refused
-/// every build/test until it timed out. A gated Gradle build is covered by `compiler.lock` instead.
+/// every build/test until it timed out. A gated Gradle build is covered by `compiler-gradle.lock` instead.
 /// The JVM requirement and the dotted suffix keep `rg …GradleWorkerMain` and `tail -f` on a log --
 /// mentions, not compilers -- from blocking the gate. Workers outlive the build too (issue #1: an
 /// idle one denied every compile for three hours), so a worker is only a candidate; `compiling`
@@ -883,13 +1042,19 @@ fn snapshot_with_processes(
         .or_else(|_| fs::metadata(&cfg.gate_dir).map(|m| m.uid()))?;
     let procs = processes(&cfg.proc_root, uid, read_environ)?;
     let (load_1m, swap_used_mb, mem_available_mb) = metrics(&cfg.proc_root)?;
+    let compiler_locks = compiler_locks(cfg)?;
+    let first_held = compiler_locks.iter().find(|lock| lock.occupied);
     let snap = Snapshot {
         load_1m,
         swap_used_mb,
         mem_available_mb,
         mem_pressure_some_avg10: mem_pressure(&cfg.proc_root),
         slots: slots(cfg)?,
-        compiler_lock: compiler_lock(cfg)?,
+        compiler_lock: CompilerLock {
+            holder: first_held.and_then(|lock| lock.holder.clone()),
+            occupied: first_held.is_some(),
+        },
+        compiler_locks,
         compiling: if check_compilers {
             compiling(&procs, uid, &cfg.proc_root)
         } else {
@@ -908,10 +1073,10 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
         .filter(|s| s.occupied)
         .filter_map(|s| s.holder.as_ref())
         .chain(
-            snap.compiler_lock
-                .holder
+            snap.compiler_locks
                 .iter()
-                .filter(|_| snap.compiler_lock.occupied),
+                .filter(|lock| lock.occupied)
+                .filter_map(|lock| lock.holder.as_ref()),
         );
     let candidates = holders.filter_map(|holder| {
         let cwd = holder.cwd.as_ref()?;
@@ -973,7 +1138,19 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
     None
 }
 
-fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<(String, Vec<&'static str>)> {
+/// `wanted` is the toolchains the command drives; empty means unknown, and then every toolchain's
+/// compilers and lock count against it and no reservation is checked.
+fn deny_reason(
+    s: &Snapshot,
+    cfg: &Config,
+    kind: Kind,
+    wanted: &[Toolchain],
+) -> Option<(String, Vec<&'static str>)> {
+    let counts = |t: Toolchain| wanted.is_empty() || wanted.contains(&t);
+    let table = reserved(s, cfg, unix_now());
+    let need = wanted
+        .iter()
+        .fold(0u64, |sum, t| sum.saturating_add(t.estimate_mb(cfg)));
     let reasons = [
         (s.load_1m > cfg.max_load, "load"),
         (
@@ -984,12 +1161,26 @@ fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<(String, Vec<&'
         ),
         (s.slots.iter().all(|slot| slot.occupied), "slots"),
         (
-            kind.checks_compilers() && !s.compiling.is_empty(),
+            kind.checks_compilers()
+                && s.compiling
+                    .iter()
+                    .any(|p| process_toolchain(p).is_none_or(counts)),
             "compiler",
         ),
         (
-            kind.checks_compilers() && s.compiler_lock.occupied,
+            kind.checks_compilers()
+                && s.compiler_locks
+                    .iter()
+                    .any(|lock| lock.occupied && counts(lock.toolchain)),
             "compiler-lock",
+        ),
+        (
+            kind.checks_compilers()
+                && need > 0
+                && s.mem_available_mb
+                    .saturating_sub(table.values().fold(0u64, |sum, mb| sum.saturating_add(*mb)))
+                    < need,
+            "reserved",
         ),
     ];
     let failed: Vec<_> = reasons
@@ -1021,16 +1212,26 @@ fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<(String, Vec<&'
         .iter()
         .map(|p| format!("pid={} name={} cwd={}", p.pid, p.name, p.cwd))
         .collect();
-    let compiler_lock = match &s.compiler_lock.holder {
-        Some(h) => format!(
-            "pid={} kind={} cmd={} since={}",
-            h.pid,
-            h.kind,
-            h.command.join(" "),
-            h.started_at
-        ),
-        None if s.compiler_lock.occupied => "unknown".into(),
-        None => "none".into(),
+    let compiler_locks: Vec<_> = s
+        .compiler_locks
+        .iter()
+        .filter(|lock| lock.occupied)
+        .map(|lock| match &lock.holder {
+            Some(h) => format!(
+                "{}: pid={} kind={} cmd={} since={}",
+                lock.toolchain.as_str(),
+                h.pid,
+                h.kind,
+                h.command.join(" "),
+                h.started_at
+            ),
+            None => format!("{}: unknown", lock.toolchain.as_str()),
+        })
+        .collect();
+    let compiler_lock = if compiler_locks.is_empty() {
+        "none".into()
+    } else {
+        compiler_locks.join("; ")
     };
     let message = format!(
         "gate denied ({}) load={:.2}/{:.2} {} slots={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
@@ -1361,7 +1562,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 
 pub fn check(kind: Kind) -> i32 {
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
-        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind) {
+        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, &[]) {
             Some((reason, _)) => {
                 let _ = writeln!(io::stderr(), "{reason}");
                 75
@@ -1399,6 +1600,7 @@ pub fn hook() -> i32 {
         return 0;
     };
     let (classification, identity) = classify_with_cwd(&command, &cwd);
+    let wanted = command_toolchains(&command);
     let Classification::Heavy(kind) = classification else {
         return 0;
     };
@@ -1416,12 +1618,16 @@ pub fn hook() -> i32 {
         .and_then(|id| duplicate(id, &snap, &procs, uid));
     let (decision, keys) = if let Some(reason) = duplicate_reason {
         (Some(reason), vec!["duplicate"])
-    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind) {
-        // Only slots and compilers have holders to wait for; load and memory deny with holders=[].
-        let wait = if keys
-            .iter()
-            .any(|key| matches!(*key, "slots" | "compiler" | "compiler-lock"))
-        {
+    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind, &wanted) {
+        // Only slots, compilers and reservations have holders to wait for; load and memory deny
+        // with holders=[].
+        // "reserved" has a holder to wait for only while the table is non-empty; otherwise
+        // MemAvailable alone is below the estimate.
+        let wait = if keys.iter().any(|key| match *key {
+            "slots" | "compiler" | "compiler-lock" => true,
+            "reserved" => !reserved(&snap, &cfg, unix_now()).is_empty(),
+            _ => false,
+        }) {
             "the holders above finish"
         } else {
             "load and memory pressure drop (figures above)"
@@ -1531,10 +1737,18 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
             return execute(command);
         }
     };
-    if let Some((reason, _)) = deny_reason(&snap, &cfg, kind) {
+    let wanted = argv_toolchains(command);
+    if let Some((reason, _)) = deny_reason(&snap, &cfg, kind, &wanted) {
         let _ = writeln!(io::stderr(), "{reason}");
         return 75;
     }
+    // Sorted, so two runs wanting both toolchains take the locks in the same order. An unknown
+    // toolchain holds them all, as the single lock used to.
+    let held: &[Toolchain] = if wanted.is_empty() {
+        &TOOLCHAINS
+    } else {
+        &wanted
+    };
     for index in 0..cfg.slots {
         let path = cfg.gate_dir.join(format!("slot-{index}.lock"));
         let mut file = match lock_file(&path) {
@@ -1566,47 +1780,52 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
                 }
                 // The slot alone cannot see the startup window before cargo spawns its first
                 // rustc, so build/test also holds a second lock for the whole child lifetime.
-                let mut compiler = None;
+                let mut compilers = Vec::new();
                 if kind.checks_compilers() {
-                    let mut lock = match lock_file(&cfg.gate_dir.join("compiler.lock")) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            warning(&e);
-                            return execute(command);
-                        }
-                    };
-                    match lock.try_lock() {
-                        Ok(()) => {
-                            if let Err(e) = write_holder(&mut lock, &holder) {
+                    for toolchain in held {
+                        let mut lock = match lock_file(&cfg.gate_dir.join(toolchain.lock_name())) {
+                            Ok(f) => f,
+                            Err(e) => {
                                 warning(&e);
+                                return execute(command);
                             }
-                            compiler = Some(lock);
-                        }
-                        Err(std::fs::TryLockError::WouldBlock) => {
-                            // Drop the slot before answering 75: the caller queued, so it must
-                            // not keep a place it will not use. Only a race reaches this arm --
-                            // someone took compiler.lock after the snapshot's pre-check -- so no
-                            // test drives it; keep the drop when touching this.
-                            drop(file);
-                            let mut data = String::new();
-                            let _ = lock.read_to_string(&mut data);
-                            let _ = writeln!(
-                                io::stderr(),
-                                "gate denied (compiler-lock) holder=[{}] load={:.2} {}",
-                                data.trim(),
-                                snap.load_1m,
-                                memory_figures(&snap, &cfg)
-                            );
-                            return 75;
-                        }
-                        Err(e) => {
-                            warning(&io::Error::other(e));
-                            return execute(command);
+                        };
+                        match lock.try_lock() {
+                            Ok(()) => {
+                                if let Err(e) = write_holder(&mut lock, &holder) {
+                                    warning(&e);
+                                }
+                                compilers.push(lock);
+                            }
+                            Err(std::fs::TryLockError::WouldBlock) => {
+                                // Drop the slot and the locks taken so far before answering 75:
+                                // the caller queued, so it must not keep a place it will not use.
+                                // Only a race reaches this arm -- someone took the lock after the
+                                // snapshot's pre-check -- so no test drives it; keep the drop
+                                // when touching this.
+                                drop(compilers);
+                                drop(file);
+                                let mut data = String::new();
+                                let _ = lock.read_to_string(&mut data);
+                                let _ = writeln!(
+                                    io::stderr(),
+                                    "gate denied (compiler-lock) toolchain={} holder=[{}] load={:.2} {}",
+                                    toolchain.as_str(),
+                                    data.trim(),
+                                    snap.load_1m,
+                                    memory_figures(&snap, &cfg)
+                                );
+                                return 75;
+                            }
+                            Err(e) => {
+                                warning(&io::Error::other(e));
+                                return execute(command);
+                            }
                         }
                     }
                 }
                 let exit = execute(command);
-                drop(compiler);
+                drop(compilers);
                 drop(file);
                 return exit;
             }
@@ -1719,23 +1938,36 @@ pub fn status(json: bool) -> i32 {
                 }
             }
         }
-        match &snap.compiler_lock.holder {
-            Some(h) => {
-                let _ = writeln!(
-                    io::stdout(),
-                    "compiler lock: pid={} kind={} cmd={} since={}",
-                    h.pid,
-                    h.kind,
-                    h.command.join(" "),
-                    h.started_at
-                );
+        for lock in snap.compiler_locks.iter().filter(|lock| lock.occupied) {
+            let name = lock.toolchain.as_str();
+            match &lock.holder {
+                Some(h) => {
+                    let _ = writeln!(
+                        io::stdout(),
+                        "compiler lock ({name}): pid={} kind={} cmd={} since={}",
+                        h.pid,
+                        h.kind,
+                        h.command.join(" "),
+                        h.started_at
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        io::stdout(),
+                        "compiler lock ({name}): occupied (unknown holder)"
+                    );
+                }
             }
-            None if snap.compiler_lock.occupied => {
-                let _ = writeln!(io::stdout(), "compiler lock: occupied (unknown holder)");
-            }
-            None => {
-                let _ = writeln!(io::stdout(), "compiler lock: empty");
-            }
+        }
+        if !snap.compiler_lock.occupied {
+            let _ = writeln!(io::stdout(), "compiler lock: empty");
+        }
+        if let Ok(cfg) = config() {
+            let _ = writeln!(
+                io::stdout(),
+                "{}",
+                reserved_figure(&reserved(&snap, &cfg, unix_now()))
+            );
         }
         for p in &snap.compiling {
             let _ = writeln!(
@@ -1789,6 +2021,7 @@ mod duplicate_tests {
                 holder: None,
                 occupied: false,
             },
+            compiler_locks: Vec::new(),
             compiling: Vec::new(),
             orphan_brokers: Vec::new(),
         };

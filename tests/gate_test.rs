@@ -63,6 +63,9 @@ impl Fixture {
             .env_remove("CLAUDECAT_MAX_MEM_PRESSURE")
             .env_remove("CLAUDECAT_MIN_AVAILABLE_MB")
             .env_remove("CLAUDECAT_SLOTS")
+            .env_remove("CLAUDECAT_RESERVE_GRADLE_MB")
+            .env_remove("CLAUDECAT_RESERVE_CARGO_MB")
+            .env_remove("CLAUDECAT_RESERVE_WARMUP_SECS")
             .env_remove("CLAUDECAT_GRADLE_SAMPLE_MS")
             .env_remove("CARGO_TARGET_DIR");
         cmd
@@ -552,7 +555,8 @@ fn hook_memory_only_deny_does_not_wait_for_holders() {
     let denied = hook(&f, r#"{"tool_input":{"command":"cargo test"}}"#);
     assert_eq!(code(&denied), 75);
     let line = String::from_utf8(denied.stdout).unwrap();
-    assert!(line.starts_with("gate denied (memory) "), "{line}");
+    // 512MB is also below cargo's reservation estimate, so `reserved` fires beside `memory`.
+    assert!(line.starts_with("gate denied (memory,reserved) "), "{line}");
     assert!(line.contains("slots=0/3 holders=[]"), "{line}");
     assert!(line.ends_with("Denied, not queued: nothing will run this command later. Retry it after load and memory pressure drop (figures above); do not poll with sleep in the foreground.\n"), "{line}");
     assert!(!line.contains("holders above"), "{line}");
@@ -950,7 +954,7 @@ fn hold(f: &Fixture, name: &str) -> File {
 #[test]
 fn compiler_lock_denies_build_and_test_but_not_e2e() {
     let f = Fixture::new("0.5", 0);
-    let _lock = hold(&f, "compiler.lock");
+    let _lock = hold(&f, "compiler-cargo.lock");
     assert_eq!(code(&f.run(&["gate", "check", "--kind", "build"])), 75);
     assert_eq!(code(&f.run(&["gate", "check", "--kind", "test"])), 75);
     assert_eq!(code(&f.run(&["gate", "check", "--kind", "e2e"])), 0);
@@ -959,7 +963,7 @@ fn compiler_lock_denies_build_and_test_but_not_e2e() {
 #[test]
 fn run_denies_when_compiler_lock_held_and_releases_slot() {
     let f = Fixture::new("0.5", 0);
-    let _lock = hold(&f, "compiler.lock");
+    let _lock = hold(&f, "compiler-cargo.lock");
     let marker = f.temp.path().join("marker");
     let o = f
         .cmd(&[
@@ -986,7 +990,8 @@ fn run_releases_compiler_lock_after_child() {
         code(&f.run(&["gate", "run", "--kind", "test", "--", "true"])),
         0
     );
-    let file = File::open(f.gate().join("compiler.lock")).expect("compiler.lock exists");
+    let file =
+        File::open(f.gate().join("compiler-cargo.lock")).expect("compiler-cargo.lock exists");
     file.try_lock().expect("compiler lock released");
 }
 
@@ -994,7 +999,7 @@ fn run_releases_compiler_lock_after_child() {
 fn status_reports_locked_compiler_lock_holder() {
     let f = Fixture::new("0.5", 0);
     fs::create_dir(f.gate()).expect("gate");
-    let path = f.gate().join("compiler.lock");
+    let path = f.gate().join("compiler-cargo.lock");
     fs::write(
         &path,
         "{\"pid\":77,\"kind\":\"build\",\"command\":[\"cargo\",\"build\"],\"started_at\":11}\n",
@@ -1089,7 +1094,7 @@ fn locks_are_not_inherited_by_grandchildren() {
         .status()
         .expect("run");
     assert_eq!(status.code(), Some(0));
-    for name in ["slot-0.lock", "compiler.lock"] {
+    for name in ["slot-0.lock", "compiler-cargo.lock", "compiler-gradle.lock"] {
         let file = File::open(f.gate().join(name)).expect(name);
         file.try_lock()
             .expect("lock must be free when gate run returns");
@@ -1148,12 +1153,16 @@ fn run_holds_slot_during_child() {
     );
     assert!(holder.get("target").is_some());
     // A test run holds compiler.lock for the child's whole life, not just at the start.
-    let compiler = File::open(f.gate().join("compiler.lock")).expect("compiler lock");
+    // The script names no toolchain, so it holds them all.
+    let compiler = File::open(f.gate().join("compiler-cargo.lock")).expect("compiler lock");
     assert!(compiler.try_lock().is_err());
+    let gradle = File::open(f.gate().join("compiler-gradle.lock")).expect("gradle lock");
+    assert!(gradle.try_lock().is_err());
     drop(child.stdin.take());
     assert!(child.wait().expect("wait").success());
     file.try_lock().expect("released");
     compiler.try_lock().expect("compiler lock released");
+    gradle.try_lock().expect("gradle lock released");
 }
 
 #[test]
@@ -1397,4 +1406,159 @@ fn duplicate_identity_uses_the_executed_word() {
     let wrapped = hook_command(&f, "env -u cargo cargo test", f.temp.path());
     assert_eq!(code(&wrapped), 75);
     assert!(String::from_utf8_lossy(&wrapped.stdout).contains("pid=1006"));
+}
+
+/// Hold a lock file the way `gate run` does: locked, with the holder JSON inside.
+fn hold_holder(f: &Fixture, name: &str, pid: u32, command: &[&str], started_at: u64) -> File {
+    let file = hold(f, name);
+    fs::write(
+        f.gate().join(name),
+        serde_json::json!({"pid":pid,"kind":"build","command":command,"started_at":started_at})
+            .to_string(),
+    )
+    .expect("holder");
+    file
+}
+
+fn deny_line(o: &Output) -> String {
+    assert_eq!(code(o), 75, "{}", String::from_utf8_lossy(&o.stdout));
+    String::from_utf8(o.stdout.clone()).unwrap()
+}
+
+#[test]
+fn cross_toolchain_does_not_deny_when_memory_is_ample() {
+    let f = Fixture::new("0.5", 0);
+    let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], 1);
+    assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 0);
+    let line = deny_line(&hook_command(&f, "./gradlew test", f.temp.path()));
+    assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
+    assert!(line.contains("gradle: pid=77"), "{line}");
+    assert!(line.contains("holders above"), "{line}");
+    assert_eq!(line.lines().count(), 1);
+    // A running rustc counts against cargo only.
+    let g = Fixture::new("0.5", 0);
+    g.process(123, "rustc", &["rustc", "main.rs"], 99);
+    assert_eq!(code(&hook_command(&g, "./gradlew test", g.temp.path())), 0);
+    let line = deny_line(&hook_command(&g, "cargo build", g.temp.path()));
+    assert!(line.starts_with("gate denied (compiler) "), "{line}");
+}
+
+#[test]
+fn run_takes_only_the_wanted_toolchain_lock() {
+    let f = Fixture::new("0.5", 0);
+    let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], 1);
+    let o = f.run(&[
+        "gate", "run", "--kind", "test", "--", "cargo", "test", "--help",
+    ]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    let _cargo = hold_holder(&f, "compiler-cargo.lock", 78, &["cargo", "test"], 1);
+    let o = f.run(&[
+        "gate", "run", "--kind", "test", "--", "cargo", "test", "--help",
+    ]);
+    assert_eq!(code(&o), 75);
+    let slot = File::open(f.gate().join("slot-0.lock")).expect("slot file");
+    slot.try_lock().expect("slot released on denial");
+}
+
+#[test]
+fn reservation_denies_while_holder_warms_up_and_not_after() {
+    let f = Fixture::new("0.5", 0);
+    let now = now_secs();
+    // 4000MB available, gradle reserves 3072MB: 928MB left, cargo needs 1536MB.
+    let _slot = hold_holder(&f, "slot-0.lock", 77, &["./gradlew", "test"], now);
+    let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], now);
+    let line = deny_line(&hook_command(&f, "cargo test", f.temp.path()));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    // One holder in two locks reserves once.
+    assert!(line.contains("reserved=gradle:3072MB "), "{line}");
+    assert!(line.contains("holders above"), "{line}");
+    assert_eq!(line.lines().count(), 1);
+
+    let old = Fixture::new("0.5", 0);
+    let _slot = hold_holder(&old, "slot-0.lock", 77, &["./gradlew", "test"], now - 120);
+    let _gradle = hold_holder(
+        &old,
+        "compiler-gradle.lock",
+        77,
+        &["./gradlew", "test"],
+        now - 120,
+    );
+    assert_eq!(code(&hook_command(&old, "cargo test", old.temp.path())), 0);
+    let status = String::from_utf8(old.run(&["status"]).stdout).unwrap();
+    assert!(status.contains("reserved=none"), "{status}");
+    let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
+    assert!(status.contains("reserved=gradle:3072MB"), "{status}");
+}
+
+#[test]
+fn unknown_wanted_toolchain_is_conservative() {
+    let f = Fixture::new("0.5", 0);
+    let now = now_secs();
+    f.meminfo(2000 * 1024, 0);
+    let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], now);
+    // `gate check` names no command: any toolchain's lock counts, and no reservation is checked.
+    let o = f.run(&["gate", "check", "--kind", "build"]);
+    assert_eq!(code(&o), 75);
+    let line = String::from_utf8(o.stderr).unwrap();
+    assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
+    let clear = Fixture::new("0.5", 0);
+    clear.meminfo(2000 * 1024, 0);
+    assert_eq!(code(&clear.run(&["gate", "check", "--kind", "build"])), 0);
+    // A fresh holder alone reserves memory only against a known toolchain.
+    let o = clear.run(&["status"]);
+    assert!(String::from_utf8(o.stdout)
+        .unwrap()
+        .contains("reserved=none"));
+}
+
+#[test]
+fn compound_command_checks_both_toolchains() {
+    let compound = "cargo build && ./gradlew test";
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(8000 * 1024, 0);
+    let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], 1);
+    let line = deny_line(&hook_command(&f, compound, f.temp.path()));
+    assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
+    let g = Fixture::new("0.5", 0);
+    g.meminfo(8000 * 1024, 0);
+    let _cargo = hold_holder(&g, "compiler-cargo.lock", 78, &["cargo", "test"], 1);
+    let line = deny_line(&hook_command(&g, compound, g.temp.path()));
+    assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
+    // Both estimates add up: 1536 + 3072 > 4000MB available, with nothing held.
+    let h = Fixture::new("0.5", 0);
+    let line = deny_line(&hook_command(&h, compound, h.temp.path()));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    assert!(line.contains("reserved=none"), "{line}");
+    assert_eq!(code(&hook_command(&h, "cargo build", h.temp.path())), 0);
+}
+
+#[test]
+fn huge_reservation_estimates_saturate_instead_of_wrapping() {
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(8000 * 1024, 0);
+    let payload = serde_json::json!({
+        "cwd": f.temp.path(),
+        "tool_input": {"command": "cargo build && ./gradlew test"},
+    })
+    .to_string();
+    // u64::MAX + 2 wraps to 1, which would let the command through.
+    let mut child = f
+        .cmd(&["gate", "hook"])
+        .env("CLAUDECAT_RESERVE_CARGO_MB", u64::MAX.to_string())
+        .env("CLAUDECAT_RESERVE_GRADLE_MB", "2")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("hook");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .expect("payload");
+    let out = child.wait_with_output().expect("hook output");
+    assert_eq!(code(&out), 75, "{}", String::from_utf8_lossy(&out.stdout));
+    let line = String::from_utf8(out.stdout).unwrap();
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
 }
