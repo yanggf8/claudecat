@@ -31,6 +31,7 @@ agent 把重工跑得不擾民。
   （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
   `gate run --kind build|test` 另外持有每種編譯器各一把鎖（`compiler-cargo.lock`、`compiler-gradle.lock`；認不出的指令如 `make`、`just` 全持有，`npm`／`npx`／`pnpm`／`yarn`／`node`／`vitest`／`jest`／`playwright`／`pytest`／`python` 這類執行器不持有也不被編譯鎖擋，只佔 slot 並受負載與記憶體檢查），蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
 - **預留記憶體**：剛起動（預設 60 秒內，`CLAUDECAT_RESERVE_WARMUP_SECS`）的持有者還沒把記憶體用出來，gate 先替它預留估計值（gradle 3072 MB、cargo 1536 MB，`CLAUDECAT_RESERVE_GRADLE_MB`、`CLAUDECAT_RESERVE_CARGO_MB`）；`MemAvailable` 扣掉預留後不夠新指令的估計值就拒絕（`reserved`）。暖機後的實際用量已在 `MemAvailable` 裡，不再重複預留。
+- **hook 放行紀錄**：`gate hook` 放行的建置／測試指令是由 Claude 直接執行，不會登記持有者，所以 hook 在放行時會在 gate 目錄的 `admitted.jsonl` 追加一行 `{ts, session, toolchains}`（不含指令文字），在同一個暖機視窗內與持有者一樣按 toolchain 計入預留（`reserved=` 與 `status` 都會顯示），讓同一輪同時發出的 `cargo test` 與 `./gradlew test` 不會都通過、也讓直接執行的 Gradle 暖機期可見。超過暖機視窗的列忽略並在下次寫入時清除，最多保留 64 列。檢查與寫入由 `admission.lock` 序列化（等候上限約 50 ms）；鎖逾時或任何 I/O 錯誤一律放行且不記錄。被拒絕的指令、`gate check`、`gate run`（已登記持有者）都不寫入。同一個 session 對同一 toolchain 的新紀錄會取代舊紀錄（循序執行的指令不會累積預留；不同 session、不同 toolchain 各自保留）；時間戳在未來的列與同列重複的 toolchain 一律忽略或只算一次。取捨：hook 放行後實際沒執行的指令，其預留會留到暖機視窗結束。
 - **名額是鎖，不是公告**：整台的重工名額（預設 3 個）用 `flock`，程序死掉時由 kernel 釋放，
   不會留下過期紀錄；鎖檔記著持有者的 pid 與指令，「誰在跑」就是從鎖算出來的。
 - **兩個入口，同一套門檻**：

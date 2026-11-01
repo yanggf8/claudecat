@@ -314,7 +314,7 @@ pub fn classify(command: &str) -> Classification {
 
 /// The compiler family a command drives. Compilers of the same family exclude each other; two
 /// families only compete for memory, which the reservation covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Toolchain {
     Cargo,
@@ -641,6 +641,9 @@ pub struct Snapshot {
     compiler_locks: Vec<ToolchainLock>,
     pub compiling: Vec<Process>,
     pub orphan_brokers: Vec<Broker>,
+    /// Recent hook admissions (see `Admission`); counted by `reserved` like warming-up holders.
+    #[serde(skip)]
+    admissions: Vec<Admission>,
 }
 
 struct Config {
@@ -766,7 +769,114 @@ fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> BTreeMap<Toolchain, u64> {
             *slot = slot.saturating_add(toolchain.estimate_mb(cfg));
         }
     }
+    for admission in &s.admissions {
+        if now.saturating_sub(admission.ts) >= cfg.reserve_warmup_secs {
+            continue;
+        }
+        for toolchain in &admission.toolchains {
+            let slot = table.entry(*toolchain).or_insert(0u64);
+            *slot = slot.saturating_add(toolchain.estimate_mb(cfg));
+        }
+    }
     table
+}
+
+/// A command the PreToolUse hook allowed. Claude runs it directly, so it registers no holder;
+/// until the warm-up window passes the row stands in for one. No command text is stored.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Admission {
+    ts: u64,
+    session: Option<String>,
+    toolchains: Vec<Toolchain>,
+}
+
+const ADMISSION_FILE: &str = "admitted.jsonl";
+const ADMISSION_LOCK: &str = "admission.lock";
+const ADMISSION_MAX_ROWS: usize = 64;
+const ADMISSION_LOCK_BUDGET: Duration = Duration::from_millis(50);
+const ADMISSION_CLOCK_SLACK_SECS: u64 = 5;
+
+/// Admissions younger than the warm-up window; unparsable lines are skipped.
+fn read_admissions(dir: &Path, now: u64, warmup: u64) -> io::Result<Vec<Admission>> {
+    let text = match fs::read_to_string(dir.join(ADMISSION_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Admission>(line).ok())
+        // A row stamped in the future (clock step, hand edit) would otherwise stay "fresh"
+        // until the clock catches up.
+        .filter(|a| a.ts <= now.saturating_add(ADMISSION_CLOCK_SLACK_SECS))
+        .filter(|a| now.saturating_sub(a.ts) < warmup)
+        .map(|mut a| {
+            a.toolchains.sort();
+            a.toolchains.dedup();
+            a
+        })
+        .collect())
+}
+
+/// Exclusive hold on `admission.lock`, serializing "check the table, then record" between hooks.
+struct AdmissionGuard {
+    dir: PathBuf,
+    _lock: File,
+}
+
+impl AdmissionGuard {
+    /// None on timeout or any I/O error: a broken cache must never decide an outcome, so callers
+    /// fail open and just skip recording. (Fresh rows read without the lock are still real
+    /// reservations and keep counting; only the atomic check-then-record is lost.)
+    fn acquire(dir: &Path) -> Option<Self> {
+        let lock = lock_file(&dir.join(ADMISSION_LOCK)).ok()?;
+        let start = std::time::Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => {
+                    return Some(Self {
+                        dir: dir.to_owned(),
+                        _lock: lock,
+                    })
+                }
+                Err(std::fs::TryLockError::WouldBlock)
+                    if start.elapsed() < ADMISSION_LOCK_BUDGET =>
+                {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Append `row` after pruning rows older than the warm-up window, keeping the newest 64.
+    fn admit(&self, row: Admission, now: u64, warmup: u64) -> io::Result<()> {
+        let mut rows = read_admissions(&self.dir, now, warmup)?;
+        // Commands of one session normally run one after another, so a new admission replaces
+        // that session's earlier one for the same toolchain: the earlier command has most likely
+        // finished and its memory is already inside MemAvailable. Without this, a few quick
+        // `cargo check` runs would add up to a reservation that denies on an idle machine.
+        for old in rows.iter_mut().filter(|old| old.session == row.session) {
+            old.toolchains.retain(|t| !row.toolchains.contains(t));
+        }
+        rows.retain(|old| !old.toolchains.is_empty());
+        rows.push(row);
+        let skip = rows.len().saturating_sub(ADMISSION_MAX_ROWS);
+        let mut data = Vec::new();
+        for row in &rows[skip..] {
+            serde_json::to_writer(&mut data, row)?;
+            data.push(b'\n');
+        }
+        let tmp = self.dir.join(format!("{ADMISSION_FILE}.tmp"));
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(&data)?;
+        fs::rename(&tmp, self.dir.join(ADMISSION_FILE))
+    }
 }
 
 fn reserved_figure(table: &BTreeMap<Toolchain, u64>) -> String {
@@ -1082,6 +1192,8 @@ fn snapshot_with_processes(
             Vec::new()
         },
         orphan_brokers: brokers(&procs),
+        admissions: read_admissions(&cfg.gate_dir, unix_now(), cfg.reserve_warmup_secs)
+            .unwrap_or_default(),
     };
     Ok((snap, procs))
 }
@@ -1630,7 +1742,7 @@ pub fn hook() -> i32 {
     let Classification::Heavy(kind) = classification else {
         return 0;
     };
-    let Ok((cfg, snap, procs)) = config().and_then(|cfg| {
+    let Ok((cfg, mut snap, procs)) = config().and_then(|cfg| {
         snapshot_with_processes(&cfg, true, kind.checks_compilers())
             .map(|(snap, procs)| (cfg, snap, procs))
     }) else {
@@ -1642,6 +1754,20 @@ pub fn hook() -> i32 {
     let duplicate_reason = identity
         .as_ref()
         .and_then(|id| duplicate(id, &snap, &procs, uid));
+    let session = session_id.as_deref().map(short_hash);
+    // The snapshot above was taken without any lock (the Gradle CPU sample sleeps). Only the
+    // check-then-record step is serialized, so a concurrent hook sees this one's admission.
+    let record_admission =
+        duplicate_reason.is_none() && kind.checks_compilers() && !wanted.is_empty();
+    let guard = if record_admission {
+        AdmissionGuard::acquire(&cfg.gate_dir).and_then(|guard| {
+            snap.admissions =
+                read_admissions(&cfg.gate_dir, unix_now(), cfg.reserve_warmup_secs).ok()?;
+            Some(guard)
+        })
+    } else {
+        None
+    };
     let (decision, keys) = if let Some(reason) = duplicate_reason {
         (Some(reason), vec!["duplicate"])
     } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind, &wanted) {
@@ -1649,12 +1775,18 @@ pub fn hook() -> i32 {
         // with holders=[].
         // "reserved" has a holder to wait for only while the table is non-empty; otherwise
         // MemAvailable alone is below the estimate.
-        let wait = if keys.iter().any(|key| match *key {
-            "slots" | "compiler" | "compiler-lock" => true,
-            "reserved" => !reserved(&snap, &cfg, unix_now()).is_empty(),
-            _ => false,
-        }) {
+        let has_holders = snap.slots.iter().any(|slot| slot.occupied)
+            || snap.compiler_locks.iter().any(|lock| lock.occupied);
+        let wait = if keys
+            .iter()
+            .any(|key| matches!(*key, "slots" | "compiler" | "compiler-lock"))
+            || (keys.contains(&"reserved")
+                && has_holders
+                && !reserved(&snap, &cfg, unix_now()).is_empty())
+        {
             "the holders above finish"
+        } else if keys.contains(&"reserved") && !reserved(&snap, &cfg, unix_now()).is_empty() {
+            "the reservation warm-up passes (reserved= above)"
         } else {
             "load and memory pressure drop (figures above)"
         };
@@ -1662,7 +1794,18 @@ pub fn hook() -> i32 {
     } else {
         (None, Vec::new())
     };
-    let session = session_id.as_deref().map(short_hash);
+    if let (None, Some(guard)) = (&decision, &guard) {
+        let _ = guard.admit(
+            Admission {
+                ts: unix_now(),
+                session: session.clone(),
+                toolchains: wanted.clone(),
+            },
+            unix_now(),
+            cfg.reserve_warmup_secs,
+        );
+    }
+    drop(guard);
     let id = identity
         .as_ref()
         .and_then(|id| serde_json::to_vec(&(&id.argv, &id.dir, &id.target)).ok())
@@ -2065,6 +2208,7 @@ mod duplicate_tests {
             compiler_locks: Vec::new(),
             compiling: Vec::new(),
             orphan_brokers: Vec::new(),
+            admissions: Vec::new(),
         };
         let process = ProcEntry {
             uid: 5001,

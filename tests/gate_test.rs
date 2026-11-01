@@ -339,6 +339,8 @@ fn large_log_compacts_on_deny_and_allow() {
         (0..3)
             .map(|_| {
                 fs::write(log_path(&f), row.repeat(rows)).unwrap();
+                // Each allowed hook admits cargo; start every run from an empty reservation.
+                let _ = fs::remove_file(f.gate().join("admitted.jsonl"));
                 let start = Instant::now();
                 assert_eq!(
                     code(&logged_hook(&f, Some("large-session"), "cargo test")),
@@ -1439,6 +1441,8 @@ fn cross_toolchain_does_not_deny_when_memory_is_ample() {
     let f = Fixture::new("0.5", 0);
     let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], 1);
     assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 0);
+    // The allowed cargo hook admitted a reservation; drop it so only the lock is under test.
+    fs::remove_file(f.gate().join("admitted.jsonl")).unwrap();
     let line = deny_line(&hook_command(&f, "./gradlew test", f.temp.path()));
     assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
     assert!(line.contains("gradle: pid=77"), "{line}");
@@ -1448,6 +1452,7 @@ fn cross_toolchain_does_not_deny_when_memory_is_ample() {
     let g = Fixture::new("0.5", 0);
     g.process(123, "rustc", &["rustc", "main.rs"], 99);
     assert_eq!(code(&hook_command(&g, "./gradlew test", g.temp.path())), 0);
+    fs::remove_file(g.gate().join("admitted.jsonl")).unwrap();
     let line = deny_line(&hook_command(&g, "cargo build", g.temp.path()));
     assert!(line.starts_with("gate denied (compiler) "), "{line}");
 }
@@ -1492,9 +1497,9 @@ fn reservation_denies_while_holder_warms_up_and_not_after() {
         &["./gradlew", "test"],
         now - 120,
     );
-    assert_eq!(code(&hook_command(&old, "cargo test", old.temp.path())), 0);
     let status = String::from_utf8(old.run(&["status"]).stdout).unwrap();
     assert!(status.contains("reserved=none"), "{status}");
+    assert_eq!(code(&hook_command(&old, "cargo test", old.temp.path())), 0);
     let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
     assert!(status.contains("reserved=gradle:3072MB"), "{status}");
 }
@@ -1586,4 +1591,198 @@ fn run_of_a_test_runner_ignores_compiler_locks_but_unknown_commands_do_not() {
     let o = f.run(&["gate", "run", "--kind", "test", "--", "true"]);
     assert_eq!(code(&o), 75);
     assert!(String::from_utf8_lossy(&o.stderr).starts_with("gate denied (compiler-lock) "));
+}
+
+fn admissions_path(f: &Fixture) -> std::path::PathBuf {
+    f.gate().join("admitted.jsonl")
+}
+
+fn admission_rows(f: &Fixture) -> Vec<serde_json::Value> {
+    fs::read_to_string(admissions_path(f))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("admission row"))
+        .collect()
+}
+
+#[test]
+fn hook_admission_reserves_memory_until_warmup_passes() {
+    let f = Fixture::new("0.5", 0);
+    // 4000MB available: gradle's 3072MB leaves 928MB, below cargo's 1536MB.
+    assert_eq!(code(&hook_command(&f, "./gradlew test", f.temp.path())), 0);
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["toolchains"], serde_json::json!(["gradle"]));
+    assert!(rows[0]["session"].is_null());
+    assert_eq!(rows[0].as_object().unwrap().len(), 3, "no command text");
+    let line = deny_line(&hook_command(&f, "cargo test", f.temp.path()));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    assert!(line.contains("reserved=gradle:3072MB "), "{line}");
+    // No slot or lock holder exists, only the admission: wait for the warm-up, not for holders.
+    assert!(!line.contains("holders above"), "{line}");
+    assert!(line.contains("reservation warm-up passes"), "{line}");
+    assert_eq!(line.lines().count(), 1);
+    let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
+    assert!(status.contains("reserved=gradle:3072MB"), "{status}");
+    // The denied cargo hook wrote nothing.
+    assert_eq!(admission_rows(&f).len(), 1);
+
+    // Backdate the row beyond the 60s warm-up: it no longer reserves.
+    let mut row = rows[0].clone();
+    row["ts"] = serde_json::json!(now_secs() - 120);
+    fs::write(admissions_path(&f), format!("{row}\n")).unwrap();
+    let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
+    assert!(status.contains("reserved=none"), "{status}");
+    assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 0);
+    // The stale row was pruned when the new one was written.
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["toolchains"], serde_json::json!(["cargo"]));
+}
+
+#[test]
+fn concurrent_hooks_admit_only_what_fits() {
+    let f = Fixture::new("0.5", 0);
+    let payload =
+        serde_json::json!({"cwd": f.temp.path(), "tool_input": {"command": "./gradlew test"}})
+            .to_string();
+    let children: Vec<_> = (0..6)
+        .map(|_| {
+            let mut child = f
+                .cmd(&["gate", "hook"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("hook");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            child
+        })
+        .collect();
+    let outs: Vec<_> = children
+        .into_iter()
+        .map(|c| c.wait_with_output().unwrap())
+        .collect();
+    let allowed = outs.iter().filter(|o| code(o) == 0).count();
+    assert_eq!(
+        allowed,
+        1,
+        "{:?}",
+        outs.iter().map(code).collect::<Vec<_>>()
+    );
+    for o in outs.iter().filter(|o| code(o) != 0) {
+        assert_eq!(code(o), 75);
+        assert!(String::from_utf8_lossy(&o.stdout).starts_with("gate denied (reserved) "));
+    }
+    assert_eq!(admission_rows(&f).len(), 1);
+}
+
+#[test]
+fn admission_cache_failures_fail_open() {
+    // admitted.jsonl is a directory: it cannot be read or replaced.
+    let f = Fixture::new("0.5", 0);
+    fs::create_dir_all(admissions_path(&f)).unwrap();
+    let o = hook_command(&f, "./gradlew test", f.temp.path());
+    assert_eq!(code(&o), 0);
+    assert!(o.stdout.is_empty() && o.stderr.is_empty());
+    assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 0);
+    // A denial still comes from the snapshot alone.
+    f.meminfo(512 * 1024, 0);
+    let line = deny_line(&hook_command(&f, "cargo test", f.temp.path()));
+    assert!(line.starts_with("gate denied (memory,reserved) "), "{line}");
+
+    // admission.lock is unusable too.
+    let g = Fixture::new("0.5", 0);
+    fs::create_dir_all(g.gate().join("admission.lock")).unwrap();
+    let o = hook_command(&g, "./gradlew test", g.temp.path());
+    assert_eq!(code(&o), 0);
+    assert!(o.stdout.is_empty() && o.stderr.is_empty());
+    assert!(!admissions_path(&g).exists());
+}
+
+#[test]
+fn only_allowed_compiler_hooks_are_admitted() {
+    let f = Fixture::new("0.5", 0);
+    assert_eq!(code(&f.run(&["gate", "check", "--kind", "build"])), 0);
+    assert_eq!(code(&hook_command(&f, "echo hi", f.temp.path())), 0);
+    assert_eq!(
+        code(&hook_command(
+            &f,
+            "claudecat gate run --kind test -- cargo test",
+            f.temp.path()
+        )),
+        0
+    );
+    assert!(!admissions_path(&f).exists());
+    // A denied hook records nothing.
+    f.meminfo(512 * 1024, 0);
+    assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 75);
+    assert!(!admissions_path(&f).exists());
+}
+
+#[test]
+fn admission_rows_are_capped() {
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(1_000_000 * 1024, 0);
+    fs::create_dir_all(f.gate()).unwrap();
+    let ts = now_secs();
+    let rows: String = (0..70)
+        .map(|_| format!("{{\"ts\":{ts},\"session\":null,\"toolchains\":[\"cargo\"]}}\n"))
+        .collect();
+    fs::write(admissions_path(&f), rows).unwrap();
+    assert_eq!(code(&hook_command(&f, "./gradlew test", f.temp.path())), 0);
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 64);
+    assert_eq!(rows[63]["toolchains"], serde_json::json!(["gradle"]));
+}
+
+#[test]
+fn sequential_commands_of_one_session_do_not_accumulate_reservations() {
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(5000 * 1024, 0);
+    // Four quick cargo runs of one session within the warm-up window: 4 x 1536MB would deny the
+    // last on an idle 5000MB machine if every admission piled up.
+    for _ in 0..4 {
+        let o = logged_hook(&f, Some("sess-a"), "cargo test");
+        assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stdout));
+    }
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    // Another session's cargo run is a different command and keeps its own reservation.
+    f.meminfo(9000 * 1024, 0);
+    assert_eq!(code(&logged_hook(&f, Some("sess-b"), "cargo test")), 0);
+    assert_eq!(admission_rows(&f).len(), 2);
+    // A different toolchain of the same session is kept too.
+    assert_eq!(code(&logged_hook(&f, Some("sess-a"), "./gradlew test")), 0);
+    assert_eq!(admission_rows(&f).len(), 3);
+}
+
+#[test]
+fn future_or_duplicated_admission_rows_cannot_reserve_forever() {
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(4000 * 1024, 0);
+    let future = serde_json::json!({
+        "ts": now_secs() + 3600,
+        "session": null,
+        "toolchains": ["gradle"],
+    });
+    fs::create_dir_all(f.gate()).unwrap();
+    fs::write(admissions_path(&f), format!("{future}\n")).unwrap();
+    let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
+    assert!(status.contains("reserved=none"), "{status}");
+    assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 0);
+    // A duplicated toolchain in one row counts once.
+    let dup = serde_json::json!({
+        "ts": now_secs(),
+        "session": null,
+        "toolchains": ["cargo", "cargo"],
+    });
+    fs::write(admissions_path(&f), format!("{dup}\n")).unwrap();
+    let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
+    assert!(status.contains("reserved=cargo:1536MB"), "{status}");
 }
