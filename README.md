@@ -21,9 +21,11 @@ agent 把重工跑得不擾民。
 
 ## 管理
 
-- **負載與記憶體閘門**：重工開始前同時看 1 分鐘負載與 swap 已用量。`nice` 只讓得出 CPU、
-  讓不出記憶體，所以負載不高時也可能卡，swap 要分開擋。起始門檻：負載 > 6、swap ≥ 1024 MB，
-  都可用環境變數調整。
+- **負載與記憶體閘門**：重工開始前同時看 1 分鐘負載與當下的記憶體壓力。`nice` 只讓得出 CPU、
+  讓不出記憶體，所以負載不高時也可能卡，記憶體要分開擋。起始門檻：負載 > 6；記憶體看
+  `/proc/pressure/memory` 的 `some avg10` > 10，或 MemAvailable < 1536 MB，任一成立就擋，
+  都可用環境變數調整。kernel 沒有 PSI 時只看 MemAvailable。swap 已用量照樣顯示，但不再是擋下的
+  理由：WSL2 上長駐程序的閒置分頁會一直留在 swap，已用量不會降，機器閒著也會被永遠擋住。
 - **不疊兩個完整編譯**：已經有人在跑 `rustc`，或有 Gradle worker（`GradleWorkerMain`）正在吃 CPU 時，新的 build／測試排隊，不疊上去。建置結束後留著的閒置 worker 不算：gate 取樣兩次 CPU tick（預設間隔 100 ms，`CLAUDECAT_GRADLE_SAMPLE_MS` 可改，上限 1000 ms，即 hook-gate 時限的上限），沒有增長就放行；間隔必須小於 `cort hook-gate` 實際設定的時限（預設 200 ms），否則逾時放行，所有拒絕都會失效。
   閒置的 Gradle daemon 不算：它在建置後會常駐數小時。代價是沒經過 `gate run` 的 Gradle 純編譯
   （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
@@ -38,7 +40,7 @@ agent 把重工跑得不擾民。
 
 ## 輔助
 
-- 被擋下時說清楚在等什麼：現在的負載與 swap、誰占著名額、哪些編譯程序在跑、從什麼時候開始。
+- 被擋下時說清楚在等什麼：現在的負載、記憶體壓力（PSI、MemAvailable）與 swap、誰占著名額、哪些編譯程序在跑、從什麼時候開始。
 - 以低優先序（`nice`）執行重工，使用者的終端機保持順暢。
 - 一個指令看整台機器的現況，人和 agent 看到的是同一份；包括 Codex 工作結束後留下來的孤兒
   `app-server-broker`／`codex app-server`（每組約 45 MB，不會自己結束），以及它們屬於哪個工作目錄。
@@ -52,12 +54,12 @@ agent 把重工跑得不擾民。
 |---|---|---|
 | `claudecat gate check [--kind build\|test\|e2e\|other]` | 腳本與 shell 問「現在能不能開工」 | exit 0 可以；**exit 75**（EX_TEMPFAIL）＝排隊，原因印在 stderr |
 | `claudecat gate run [--kind …] -- <cmd>` | 拿名額、以 `nice` 執行、結束時釋放 | 指令本身的 exit code；拿不到名額回 75 |
-| `claudecat status [--json]` | 整台現況：負載、swap、名額持有者、編譯程序、孤兒 Codex broker | 只回報 |
+| `claudecat status [--json]` | 整台現況：負載、記憶體壓力（PSI、MemAvailable）、swap、名額持有者、編譯程序、孤兒 Codex broker | 只回報 |
 | `claudecat gate hook` | 由 cort 轉交 Bash payload，從 stdin 讀 `tool_input.command` | 重工被擋時 stdout 一行原因與重試指示、exit 75；其他情況安靜放行 |
 | `claudecat gate install` | 透過 `cort hook-gate set` 安裝目前的 ClaudeCat | 原樣顯示 cort 輸出與 exit code |
 | `claudecat gate uninstall` | 透過 `cort hook-gate clear` 移除轉交 | 原樣顯示 cort 輸出與 exit code |
 
-門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_SWAP_MB`、`CLAUDECAT_SLOTS` 覆寫（不是正數就用預設）；
+門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_MEM_PRESSURE`、`CLAUDECAT_MIN_AVAILABLE_MB`、`CLAUDECAT_SLOTS` 覆寫（不是正數就用預設）；
 名額目錄是 `CLAUDECAT_GATE_DIR`，否則 `$XDG_RUNTIME_DIR/claudecat/gate`，再否則
 `/tmp/claudecat-<uid>/gate`。`gate check` 只回答「現在能不能開工」，不占名額；要讓名額真正反映
 誰在跑，重工本身要經 `gate run` 執行。

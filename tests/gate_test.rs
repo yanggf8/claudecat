@@ -16,15 +16,32 @@ impl Fixture {
         let proc = temp.path().join("proc");
         fs::create_dir(&proc).expect("proc");
         fs::write(proc.join("loadavg"), format!("{load} 0 0 1/1 1\n")).expect("loadavg");
+        let f = Self { temp };
+        f.meminfo(4096000, swap_used_kb);
+        f
+    }
+
+    fn meminfo(&self, available_kb: u64, swap_used_kb: u64) {
         fs::write(
-            proc.join("meminfo"),
+            self.proc().join("meminfo"),
             format!(
-                "MemAvailable: 4096000 kB\nSwapTotal: 2097152 kB\nSwapFree: {} kB\n",
+                "MemAvailable: {available_kb} kB\nSwapTotal: 2097152 kB\nSwapFree: {} kB\n",
                 2097152 - swap_used_kb
             ),
         )
         .expect("meminfo");
-        Self { temp }
+    }
+
+    fn pressure(&self, some_avg10: &str) {
+        let dir = self.proc().join("pressure");
+        fs::create_dir_all(&dir).expect("pressure dir");
+        fs::write(
+            dir.join("memory"),
+            format!(
+                "some avg10={some_avg10} avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n"
+            ),
+        )
+        .expect("pressure");
     }
 
     fn proc(&self) -> std::path::PathBuf {
@@ -43,7 +60,8 @@ impl Fixture {
                 self.temp.path().join("state/gate-denies.jsonl"),
             )
             .env_remove("CLAUDECAT_MAX_LOAD")
-            .env_remove("CLAUDECAT_MAX_SWAP_MB")
+            .env_remove("CLAUDECAT_MAX_MEM_PRESSURE")
+            .env_remove("CLAUDECAT_MIN_AVAILABLE_MB")
             .env_remove("CLAUDECAT_SLOTS")
             .env_remove("CLAUDECAT_GRADLE_SAMPLE_MS")
             .env_remove("CARGO_TARGET_DIR");
@@ -342,9 +360,15 @@ fn hook_allows_and_denies_with_one_stdout_line() {
     assert_eq!(code(&denied), 75);
     let line = String::from_utf8(denied.stdout).unwrap();
     assert!(line.starts_with("gate denied"));
-    assert!(line.ends_with("Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.\n"));
+    assert!(line.ends_with("Denied, not queued: nothing will run this command later. Retry it after load and memory pressure drop (figures above); do not poll with sleep in the foreground.\n"));
     assert_eq!(line.lines().count(), 1);
     assert!(denied.stderr.is_empty());
+    busy.process(123, "rustc", &["rustc", "main.rs"], 99);
+    let compiling = hook(&busy, r#"{"tool_input":{"command":"cargo test"}}"#);
+    assert_eq!(code(&compiling), 75);
+    let line = String::from_utf8(compiling.stdout).unwrap();
+    assert!(line.starts_with("gate denied (load,compiler) "), "{line}");
+    assert!(line.ends_with("Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.\n"), "{line}");
     let light = hook(&busy, r#"{"tool_input":{"command":"cargo fmt --all"}}"#);
     assert_eq!(code(&light), 0);
     assert!(light.stdout.is_empty());
@@ -424,11 +448,165 @@ fn load_over_limit_denies() {
 }
 
 #[test]
-fn swap_at_limit_denies() {
-    let f = Fixture::new("0.5", 1024 * 1024);
+fn high_swap_without_pressure_allows() {
+    // WSL2 keeps idle pages in swap forever: swap used alone must not deny.
+    let f = Fixture::new("0.5", 1141 * 1024);
+    f.pressure("0.02");
+    let o = f.run(&["gate", "check"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(o.stderr.is_empty());
+}
+
+#[test]
+fn memory_pressure_over_limit_denies() {
+    let f = Fixture::new("0.5", 0);
+    f.pressure("10.01");
     let o = f.run(&["gate", "check"]);
     assert_eq!(code(&o), 75);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("swap"));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.starts_with("gate denied (memory) "), "{stderr}");
+    assert!(
+        stderr.contains("psi_some_avg10=10.01/10.00 avail=4000MB/1536MB swap=0MB"),
+        "{stderr}"
+    );
+    f.pressure("10.00");
+    assert_eq!(code(&f.run(&["gate", "check"])), 0);
+}
+
+#[test]
+fn low_mem_available_denies() {
+    let f = Fixture::new("0.5", 0);
+    f.pressure("0.00");
+    f.meminfo(1535 * 1024, 0);
+    let o = f.run(&["gate", "check"]);
+    assert_eq!(code(&o), 75);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.starts_with("gate denied (memory) "), "{stderr}");
+    assert!(stderr.contains("avail=1535MB/1536MB"), "{stderr}");
+    f.meminfo(1536 * 1024, 0);
+    assert_eq!(code(&f.run(&["gate", "check"])), 0);
+}
+
+#[test]
+fn missing_pressure_file_checks_mem_available_only() {
+    let f = Fixture::new("0.5", 0);
+    assert!(!f.proc().join("pressure/memory").exists());
+    let o = f.run(&["gate", "check"]);
+    assert_eq!(code(&o), 0);
+    assert!(
+        o.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    f.meminfo(512 * 1024, 0);
+    let o = f.run(&["gate", "check"]);
+    assert_eq!(code(&o), 75);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!stderr.contains("warning"), "{stderr}");
+    assert!(stderr.starts_with("gate denied (memory) "), "{stderr}");
+    assert!(
+        stderr.contains("psi_some_avg10=n/a avail=512MB/1536MB"),
+        "{stderr}"
+    );
+    let status = f.run(&["status", "--json"]);
+    assert_eq!(code(&status), 0);
+    let v: serde_json::Value = serde_json::from_slice(&status.stdout).expect("json");
+    assert!(v["mem_pressure_some_avg10"].is_null());
+    assert_eq!(v["mem_available_mb"], 512);
+}
+
+#[test]
+fn unparsable_pressure_file_checks_mem_available_only() {
+    let f = Fixture::new("0.5", 0);
+    f.pressure("garbage");
+    assert_mem_available_only(&f);
+}
+
+#[test]
+fn unreadable_pressure_file_checks_mem_available_only() {
+    // A directory where the file should be makes read_to_string fail, like a psi=0 kernel.
+    let f = Fixture::new("0.5", 0);
+    fs::create_dir_all(f.proc().join("pressure/memory")).expect("pressure dir");
+    assert_mem_available_only(&f);
+}
+
+/// PSI is unusable: allow on plenty of MemAvailable, deny on low, never fall back to a warning.
+fn assert_mem_available_only(f: &Fixture) {
+    let o = f.run(&["gate", "check"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(o.stderr.is_empty());
+    f.meminfo(512 * 1024, 0);
+    let o = f.run(&["gate", "check"]);
+    assert_eq!(code(&o), 75);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.starts_with("gate denied (memory) "), "{stderr}");
+    assert!(stderr.contains("psi_some_avg10=n/a"), "{stderr}");
+    assert!(!stderr.contains("gate warning"), "{stderr}");
+}
+
+#[test]
+fn hook_memory_only_deny_does_not_wait_for_holders() {
+    let f = Fixture::new("0.5", 0);
+    f.pressure("0.00");
+    f.meminfo(512 * 1024, 0);
+    let denied = hook(&f, r#"{"tool_input":{"command":"cargo test"}}"#);
+    assert_eq!(code(&denied), 75);
+    let line = String::from_utf8(denied.stdout).unwrap();
+    assert!(line.starts_with("gate denied (memory) "), "{line}");
+    assert!(line.contains("slots=0/3 holders=[]"), "{line}");
+    assert!(line.ends_with("Denied, not queued: nothing will run this command later. Retry it after load and memory pressure drop (figures above); do not poll with sleep in the foreground.\n"), "{line}");
+    assert!(!line.contains("holders above"), "{line}");
+    assert_eq!(line.lines().count(), 1);
+}
+
+#[test]
+fn memory_thresholds_follow_env() {
+    let f = Fixture::new("0.5", 0);
+    f.pressure("5.00");
+    f.meminfo(2048 * 1024, 0);
+    assert_eq!(code(&f.run(&["gate", "check"])), 0);
+    let o = f
+        .cmd(&["gate", "check"])
+        .env("CLAUDECAT_MAX_MEM_PRESSURE", "4.5")
+        .output()
+        .expect("check");
+    assert_eq!(code(&o), 75);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("psi_some_avg10=5.00/4.50"));
+    let o = f
+        .cmd(&["gate", "check"])
+        .env("CLAUDECAT_MIN_AVAILABLE_MB", "4096")
+        .output()
+        .expect("check");
+    assert_eq!(code(&o), 75);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("avail=2048MB/4096MB"));
+    f.pressure("20.00");
+    f.meminfo(512 * 1024, 0);
+    let o = f
+        .cmd(&["gate", "check"])
+        .env("CLAUDECAT_MAX_MEM_PRESSURE", "25")
+        .env("CLAUDECAT_MIN_AVAILABLE_MB", "256")
+        .output()
+        .expect("check");
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+#[test]
+fn status_reports_memory_pressure() {
+    let f = Fixture::new("0.5", 1141 * 1024);
+    f.pressure("0.02");
+    let o = f.run(&["status"]);
+    assert_eq!(code(&o), 0);
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        stdout.starts_with(
+            "load 1m: 0.50; PSI memory some avg10: 0.02; MemAvailable: 4000 MB; swap used: 1141 MB\n"
+        ),
+        "{stdout}"
+    );
+    let o = f.run(&["status", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("json");
+    assert_eq!(v["mem_pressure_some_avg10"], 0.02);
+    assert_eq!(v["swap_used_mb"], 1141);
 }
 
 #[test]
@@ -454,20 +632,26 @@ fn invalid_thresholds_use_defaults() {
     let o = f
         .cmd(&["gate", "check"])
         .env("CLAUDECAT_MAX_LOAD", "0")
-        .env("CLAUDECAT_MAX_SWAP_MB", "garbage")
+        .env("CLAUDECAT_MAX_MEM_PRESSURE", "garbage")
+        .env("CLAUDECAT_MIN_AVAILABLE_MB", "-1")
         .env("CLAUDECAT_SLOTS", "0")
         .output()
         .expect("check");
     assert_eq!(code(&o), 75);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("6.00"));
-    let f = Fixture::new("0.5", 1024 * 1024);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.contains("6.00"), "{stderr}");
+    assert!(stderr.contains("avail=4000MB/1536MB"), "{stderr}");
+    let f = Fixture::new("0.5", 0);
+    f.pressure("10.01");
     let o = f
         .cmd(&["gate", "check"])
         .env("CLAUDECAT_MAX_LOAD", "garbage")
-        .env("CLAUDECAT_MAX_SWAP_MB", "0")
+        .env("CLAUDECAT_MAX_MEM_PRESSURE", "0")
+        .env("CLAUDECAT_MIN_AVAILABLE_MB", "0")
         .output()
         .expect("check");
     assert_eq!(code(&o), 75);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("psi_some_avg10=10.01/10.00"));
 }
 
 #[test]

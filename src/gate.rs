@@ -11,7 +11,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_LOAD: f64 = 6.0;
-const DEFAULT_SWAP_MB: u64 = 1024;
+// Memory is judged by current pressure, not swap used: on WSL2 idle pages of long-lived
+// processes stay in swap forever, so swap used never drops even on an idle machine.
+const DEFAULT_MEM_PRESSURE: f64 = 10.0;
+const DEFAULT_AVAILABLE_MB: u64 = 1536;
 const DEFAULT_SLOTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -515,6 +518,8 @@ pub struct Snapshot {
     pub load_1m: f64,
     pub swap_used_mb: u64,
     pub mem_available_mb: u64,
+    /// PSI `some avg10` from `pressure/memory`; None when the kernel has no PSI.
+    pub mem_pressure_some_avg10: Option<f64>,
     pub slots: Vec<Slot>,
     pub compiler_lock: CompilerLock,
     pub compiling: Vec<Process>,
@@ -525,7 +530,8 @@ struct Config {
     proc_root: PathBuf,
     gate_dir: PathBuf,
     max_load: f64,
-    max_swap_mb: u64,
+    max_mem_pressure: f64,
+    min_available_mb: u64,
     slots: usize,
 }
 
@@ -566,7 +572,8 @@ fn config() -> io::Result<Config> {
             .unwrap_or_else(|| PathBuf::from("/proc")),
         gate_dir,
         max_load: positive_f64("CLAUDECAT_MAX_LOAD", DEFAULT_LOAD),
-        max_swap_mb: positive_u64("CLAUDECAT_MAX_SWAP_MB", DEFAULT_SWAP_MB),
+        max_mem_pressure: positive_f64("CLAUDECAT_MAX_MEM_PRESSURE", DEFAULT_MEM_PRESSURE),
+        min_available_mb: positive_u64("CLAUDECAT_MIN_AVAILABLE_MB", DEFAULT_AVAILABLE_MB),
         slots,
     })
 }
@@ -589,6 +596,32 @@ fn metrics(root: &Path) -> io::Result<(f64, u64, u64)> {
     let swap = field("SwapTotal:")?.saturating_sub(field("SwapFree:")?) / 1024;
     let available = field("MemAvailable:")? / 1024;
     Ok((load, swap, available))
+}
+
+/// PSI is optional: a kernel without CONFIG_PSI has no file, and one booted with psi=0 fails the
+/// read. Either way the gate falls back to MemAvailable alone instead of failing open.
+fn mem_pressure(root: &Path) -> Option<f64> {
+    fs::read_to_string(root.join("pressure/memory"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("some "))?
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("avg10="))?
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+/// Memory figures shared by every deny message, as key=value/limit.
+fn memory_figures(s: &Snapshot, cfg: &Config) -> String {
+    let psi = match s.mem_pressure_some_avg10 {
+        Some(psi) => format!("{psi:.2}/{:.2}", cfg.max_mem_pressure),
+        None => "n/a".into(),
+    };
+    format!(
+        "psi_some_avg10={psi} avail={}MB/{}MB swap={}MB",
+        s.mem_available_mb, cfg.min_available_mb, s.swap_used_mb
+    )
 }
 
 fn lock_file(path: &Path) -> io::Result<File> {
@@ -854,6 +887,7 @@ fn snapshot_with_processes(
         load_1m,
         swap_used_mb,
         mem_available_mb,
+        mem_pressure_some_avg10: mem_pressure(&cfg.proc_root),
         slots: slots(cfg)?,
         compiler_lock: compiler_lock(cfg)?,
         compiling: if check_compilers {
@@ -942,7 +976,12 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
 fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<(String, Vec<&'static str>)> {
     let reasons = [
         (s.load_1m > cfg.max_load, "load"),
-        (s.swap_used_mb >= cfg.max_swap_mb, "swap"),
+        (
+            s.mem_pressure_some_avg10
+                .is_some_and(|psi| psi > cfg.max_mem_pressure)
+                || s.mem_available_mb < cfg.min_available_mb,
+            "memory",
+        ),
         (s.slots.iter().all(|slot| slot.occupied), "slots"),
         (
             kind.checks_compilers() && !s.compiling.is_empty(),
@@ -994,12 +1033,11 @@ fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind) -> Option<(String, Vec<&'
         None => "none".into(),
     };
     let message = format!(
-        "gate denied ({}) load={:.2}/{:.2} swap={}MB/{}MB slots={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
+        "gate denied ({}) load={:.2}/{:.2} {} slots={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
         failed.join(","),
         s.load_1m,
         cfg.max_load,
-        s.swap_used_mb,
-        cfg.max_swap_mb,
+        memory_figures(s, cfg),
         holders.len(),
         cfg.slots,
         holders.join("; "),
@@ -1379,7 +1417,16 @@ pub fn hook() -> i32 {
     let (decision, keys) = if let Some(reason) = duplicate_reason {
         (Some(reason), vec!["duplicate"])
     } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind) {
-        (Some(format!("{reason} Denied, not queued: nothing will run this command later. Retry it after the holders above finish; do not poll with sleep in the foreground.")), keys)
+        // Only slots and compilers have holders to wait for; load and memory deny with holders=[].
+        let wait = if keys
+            .iter()
+            .any(|key| matches!(*key, "slots" | "compiler" | "compiler-lock"))
+        {
+            "the holders above finish"
+        } else {
+            "load and memory pressure drop (figures above)"
+        };
+        (Some(format!("{reason} Denied, not queued: nothing will run this command later. Retry it after {wait}; do not poll with sleep in the foreground.")), keys)
     } else {
         (None, Vec::new())
     };
@@ -1545,10 +1592,10 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
                             let _ = lock.read_to_string(&mut data);
                             let _ = writeln!(
                                 io::stderr(),
-                                "gate denied (compiler-lock) holder=[{}] load={:.2} swap={}MB",
+                                "gate denied (compiler-lock) holder=[{}] load={:.2} {}",
                                 data.trim(),
                                 snap.load_1m,
-                                snap.swap_used_mb
+                                memory_figures(&snap, &cfg)
                             );
                             return 75;
                         }
@@ -1572,9 +1619,9 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     }
     let _ = writeln!(
         io::stderr(),
-        "gate denied (slots) load={:.2} swap={}MB slots={}/{} holders=[{}] compiling=[{}]",
+        "gate denied (slots) load={:.2} {} slots={}/{} holders=[{}] compiling=[{}]",
         snap.load_1m,
-        snap.swap_used_mb,
+        memory_figures(&snap, &cfg),
         cfg.slots,
         cfg.slots,
         snap.slots
@@ -1640,10 +1687,12 @@ pub fn status(json: bool) -> i32 {
     } else {
         let _ = writeln!(
             io::stdout(),
-            "load 1m: {:.2}; swap used: {} MB; MemAvailable: {} MB",
+            "load 1m: {:.2}; PSI memory some avg10: {}; MemAvailable: {} MB; swap used: {} MB",
             snap.load_1m,
-            snap.swap_used_mb,
-            snap.mem_available_mb
+            snap.mem_pressure_some_avg10
+                .map_or_else(|| "n/a".into(), |psi| format!("{psi:.2}")),
+            snap.mem_available_mb,
+            snap.swap_used_mb
         );
         for slot in &snap.slots {
             match &slot.holder {
@@ -1734,6 +1783,7 @@ mod duplicate_tests {
             load_1m: 0.0,
             swap_used_mb: 0,
             mem_available_mb: 0,
+            mem_pressure_some_avg10: None,
             slots: Vec::new(),
             compiler_lock: CompilerLock {
                 holder: None,
