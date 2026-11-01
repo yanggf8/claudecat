@@ -29,7 +29,7 @@ agent 把重工跑得不擾民。
 - **同一種編譯器不疊兩個**：已經有人在跑 `rustc`，新的 cargo build／測試排隊；有 Gradle worker（`GradleWorkerMain`）正在吃 CPU，新的 gradle build／測試排隊。cargo 與 gradle 互不互擋（只在記憶體不夠時由下面的預留擋）。指令認不出是哪一種（例如 `gate check --kind build`）時保守處理，兩種都算。建置結束後留著的閒置 worker 不算：gate 取樣兩次 CPU tick（預設間隔 100 ms，`CLAUDECAT_GRADLE_SAMPLE_MS` 可改，上限 1000 ms，即 hook-gate 時限的上限），沒有增長就放行；間隔必須小於 `cort hook-gate` 實際設定的時限（預設 200 ms），否則逾時放行，所有拒絕都會失效。
   閒置的 Gradle daemon 不算：它在建置後會常駐數小時。代價是沒經過 `gate run` 的 Gradle 純編譯
   （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
-  `gate run --kind build|test` 另外持有每種編譯器各一把鎖（`compiler-cargo.lock`、`compiler-gradle.lock`，認不出就全持有），蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
+  `gate run --kind build|test` 另外持有每種編譯器各一把鎖（`compiler-cargo.lock`、`compiler-gradle.lock`；認不出的指令如 `make`、`just` 全持有，`npm`／`npx`／`pnpm`／`yarn`／`node`／`vitest`／`jest`／`playwright`／`pytest`／`python` 這類執行器不持有也不被編譯鎖擋，只佔 slot 並受負載與記憶體檢查），蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
 - **預留記憶體**：剛起動（預設 60 秒內，`CLAUDECAT_RESERVE_WARMUP_SECS`）的持有者還沒把記憶體用出來，gate 先替它預留估計值（gradle 3072 MB、cargo 1536 MB，`CLAUDECAT_RESERVE_GRADLE_MB`、`CLAUDECAT_RESERVE_CARGO_MB`）；`MemAvailable` 扣掉預留後不夠新指令的估計值就拒絕（`reserved`）。暖機後的實際用量已在 `MemAvailable` 裡，不再重複預留。
 - **名額是鎖，不是公告**：整台的重工名額（預設 3 個）用 `flock`，程序死掉時由 kernel 釋放，
   不會留下過期紀錄；鎖檔記著持有者的 pid 與指令，「誰在跑」就是從鎖算出來的。
@@ -56,6 +56,7 @@ agent 把重工跑得不擾民。
 | `claudecat gate check [--kind build\|test\|e2e\|other]` | 腳本與 shell 問「現在能不能開工」 | exit 0 可以；**exit 75**（EX_TEMPFAIL）＝排隊，原因印在 stderr |
 | `claudecat gate run [--kind …] -- <cmd>` | 拿名額、以 `nice` 執行、結束時釋放 | 指令本身的 exit code；拿不到名額回 75 |
 | `claudecat status [--json]` | 整台現況：負載、記憶體壓力（PSI、MemAvailable）、swap、名額持有者、編譯程序、孤兒 Codex broker | 只回報 |
+| `claudecat gate usage [--json] [--days N]` | 彙總 `gate run` 的實測用量，供校準預留記憶體與門檻 | 無記錄時輸出空表、exit 0 |
 | `claudecat gate hook` | 由 cort 轉交 Bash payload，從 stdin 讀 `tool_input.command` | 重工被擋時 stdout 一行原因與重試指示、exit 75；其他情況安靜放行 |
 | `claudecat gate install` | 透過 `cort hook-gate set` 安裝目前的 ClaudeCat | 原樣顯示 cort 輸出與 exit code |
 | `claudecat gate uninstall` | 透過 `cort hook-gate clear` 移除轉交 | 原樣顯示 cort 輸出與 exit code |
@@ -89,6 +90,23 @@ duplicate 訊息的 `since` 只用於 `gate run` 持有者，不用於一般 Car
 超過七天的列會在**下一次寫入或執行 `claudecat gate log`** 時清除；長時間沒有這兩種操作時舊列仍會留著。
 `claudecat gate log [--json] [--days N]`（預設七天）彙總各原因與子命令的 deny 次數、重試分布及放行前等待秒數。
 比對執行中 Cargo 指令時，若目錄位於無回應的網路檔案系統，目錄解析可能超過 cort 的 200 ms 時限而放行。
+
+deny 列另外帶 `mem_available_mb`、`psi_some_avg10`、`load_1m`（被擋當下的數字；舊列沒有這幾欄，仍可讀），
+供日後校準門檻。
+
+`gate run` 結束時還會往 `$CLAUDECAT_GATE_USAGE_LOG`（未設定時與 deny 記錄同目錄的 `gate-usage.jsonl`）
+追加一列用量，同樣 `0600`、七天清除。取樣執行緒每 `CLAUDECAT_USAGE_SAMPLE_MS`（預設 2000）毫秒走一次
+子程序樹（由 `/proc` 的 ppid 往下），加總 `VmRSS` 取峰值；起跑初期會以 50 ms 起倍增的間隔多取幾次，
+短工作也有讀數。每列欄位：`ts`、`session`（目前恆為 null）、`toolchain`（`cargo`|`gradle`|`unknown`）、
+`class`（`test`|`build`|`compile`|`other`）、`kind`、`wall_secs`、`peak_rss_mb`、`gradle_family_rss_mb`（僅 Gradle：另含已脫離行程樹的 Gradle daemon／worker／Kotlin daemon，同使用者所有 Gradle JVM 的峰值總和）、`cpu_secs`（含已回收的子孫行程）、
+`exit`，以及起跑與結束時的 `start`／`end`：`mem_available_mb`、`psi_some_avg10`、`load_1m`、`swap_used_mb`。
+不記指令文字。`class` 由 argv 推得（看穿 `sh -c`）：Gradle 的 test／check／`*Test`／`--tests` 為 `test`，
+`build`／`bootJar` 等為 `build`，`compile*`／`classes`／`assemble`／`jar` 為 `compile`（同時出現時 test > build > compile）；
+Cargo 的 test／nextest／bench 為 `test`，build／check／clippy／doc／run／install 為 `build`。取樣失敗一律略過，
+結束後最多多等 50 ms 收取樣緒。`RSS` 含共享頁，會略高於獨佔量。測試可用 `CLAUDECAT_USAGE_PID_ROOT` 讓取樣讀真的 `/proc`，
+閘門自己的數字仍讀 `CLAUDECAT_PROC_ROOT`。
+`claudecat gate usage [--json] [--days N]`（預設七天）依 (toolchain, class) 彙總次數、`peak_rss_mb` 的 p50／p90／max、
+`wall_secs` 的 p50／p90 與 `cpu_secs` 平均。
 
 安裝轉交需有 cort 的 `hook-gate` 子指令；`gate install` 與 `gate uninstall` 不直接修改 cort 設定檔。
 

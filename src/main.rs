@@ -169,6 +169,13 @@ enum GateAction {
         #[arg(long, default_value_t = 7)]
         days: u32,
     },
+    /// Summarize gate run resource usage (peak RSS, wall and CPU time per toolchain and task class)
+    Usage {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+    },
     /// Register this executable with cort's hook gate
     Install,
     /// Remove cort's hook gate registration
@@ -300,6 +307,7 @@ fn main() {
             GateAction::Run { kind, command } => gate::run(kind, &command),
             GateAction::Hook => gate::hook(),
             GateAction::Log { json, days } => gate::log(json, days),
+            GateAction::Usage { json, days } => claudecat::gate_stats::usage(json, days),
             GateAction::Install => gate::install(true),
             GateAction::Uninstall => gate::install(false),
         }),

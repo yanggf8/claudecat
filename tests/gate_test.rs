@@ -1562,3 +1562,19 @@ fn huge_reservation_estimates_saturate_instead_of_wrapping() {
     let line = String::from_utf8(out.stdout).unwrap();
     assert!(line.starts_with("gate denied (reserved) "), "{line}");
 }
+
+#[test]
+fn run_of_a_test_runner_ignores_compiler_locks_but_unknown_commands_do_not() {
+    let f = Fixture::new("0.5", 0);
+    let _cargo = hold_holder(&f, "compiler-cargo.lock", 77, &["cargo", "test"], 1);
+    let _gradle = hold_holder(&f, "compiler-gradle.lock", 78, &["./gradlew", "test"], 1);
+    // python3 stands in for npx/vitest: a runner that drives neither toolchain.
+    let o = f.run(&[
+        "gate", "run", "--kind", "test", "--", "python3", "-c", "pass",
+    ]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    // `true` could be a wrapper around anything, so it still queues behind both locks.
+    let o = f.run(&["gate", "run", "--kind", "test", "--", "true"]);
+    assert_eq!(code(&o), 75);
+    assert!(String::from_utf8_lossy(&o.stderr).starts_with("gate denied (compiler-lock) "));
+}

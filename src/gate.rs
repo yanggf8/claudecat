@@ -387,6 +387,27 @@ fn argv_toolchains(argv: &[String]) -> Vec<Toolchain> {
     Vec::new()
 }
 
+/// Test runners that are known not to drive cargo or Gradle. Anything else unrecognised (`make`,
+/// `just`, a shell script) may, so it keeps holding every toolchain lock.
+fn runs_no_compiler(argv: &[String]) -> bool {
+    argv.get(command_index(argv)).is_some_and(|c| {
+        matches!(
+            basename(c),
+            "npx"
+                | "npm"
+                | "pnpm"
+                | "yarn"
+                | "node"
+                | "vitest"
+                | "jest"
+                | "playwright"
+                | "pytest"
+                | "python"
+                | "python3"
+        )
+    })
+}
+
 fn process_toolchain(p: &Process) -> Option<Toolchain> {
     match p.name.as_str() {
         "rustc" => Some(Toolchain::Cargo),
@@ -683,7 +704,7 @@ fn config() -> io::Result<Config> {
     })
 }
 
-fn metrics(root: &Path) -> io::Result<(f64, u64, u64)> {
+pub(crate) fn metrics(root: &Path) -> io::Result<(f64, u64, u64)> {
     let load = fs::read_to_string(root.join("loadavg"))?
         .split_whitespace()
         .next()
@@ -705,7 +726,7 @@ fn metrics(root: &Path) -> io::Result<(f64, u64, u64)> {
 
 /// PSI is optional: a kernel without CONFIG_PSI has no file, and one booted with psi=0 fails the
 /// read. Either way the gate falls back to MemAvailable alone instead of failing open.
-fn mem_pressure(root: &Path) -> Option<f64> {
+pub(crate) fn mem_pressure(root: &Path) -> Option<f64> {
     fs::read_to_string(root.join("pressure/memory"))
         .ok()?
         .lines()
@@ -1262,9 +1283,11 @@ struct GateLogRow {
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allowed: Option<bool>,
+    #[serde(flatten)]
+    ctx: crate::gate_stats::DenyContext,
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1276,7 +1299,7 @@ fn short_hash(bytes: impl AsRef<[u8]>) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn gate_log_path() -> io::Result<PathBuf> {
+pub(crate) fn gate_log_path() -> io::Result<PathBuf> {
     if let Some(path) = env::var_os("CLAUDECAT_GATE_LOG") {
         return Ok(PathBuf::from(path));
     }
@@ -1300,7 +1323,7 @@ fn read_log(path: &Path) -> io::Result<Vec<GateLogRow>> {
         .collect())
 }
 
-fn compact_log(path: &Path, now: u64) -> io::Result<()> {
+pub(crate) fn compact_log(path: &Path, now: u64) -> io::Result<()> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1310,7 +1333,7 @@ fn compact_log(path: &Path, now: u64) -> io::Result<()> {
         use std::io::BufRead;
         let mut line = Vec::new();
         io::BufReader::new(File::open(path)?).read_until(b'\n', &mut line)?;
-        serde_json::from_slice::<GateLogRow>(&line)
+        serde_json::from_slice::<crate::gate_stats::LogTs>(&line)
             .ok()
             .is_some_and(|row| row.ts < now.saturating_sub(7 * 86400))
     };
@@ -1321,7 +1344,7 @@ fn compact_log(path: &Path, now: u64) -> io::Result<()> {
     let mut kept = Vec::new();
     let mut size = 0;
     for line in bytes.split_inclusive(|b| *b == b'\n').rev() {
-        let Ok(row) = serde_json::from_slice::<GateLogRow>(line) else {
+        let Ok(row) = serde_json::from_slice::<crate::gate_stats::LogTs>(line) else {
             continue;
         };
         if row.ts < now.saturating_sub(7 * 86400) || row.ts > now {
@@ -1373,7 +1396,7 @@ fn compact_log(path: &Path, now: u64) -> io::Result<()> {
     ))
 }
 
-fn append_log(path: &Path, row: &GateLogRow) -> io::Result<()> {
+pub(crate) fn append_log<T: Serialize>(path: &Path, row: &T) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no log parent"))?;
@@ -1382,7 +1405,7 @@ fn append_log(path: &Path, row: &GateLogRow) -> io::Result<()> {
     builder.create(dir)?;
     let mut line = serde_json::to_vec(row)?;
     line.push(b'\n');
-    if line.len() > 512 {
+    if line.len() > 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "gate log row too long",
@@ -1417,6 +1440,7 @@ fn record_deny(
     id: Option<&str>,
     sub: &str,
     reason: &str,
+    ctx: crate::gate_stats::DenyContext,
 ) -> Option<(usize, u64)> {
     let path = gate_log_path().ok()?;
     compact_log(&path, now).ok()?;
@@ -1433,6 +1457,7 @@ fn record_deny(
             sub: sub.to_owned(),
             reason: Some(reason.to_owned()),
             allowed: None,
+            ctx,
         },
     )
     .ok()?;
@@ -1458,6 +1483,7 @@ fn record_allow(now: u64, session: Option<&str>, id: Option<&str>, sub: &str) ->
             sub: sub.to_owned(),
             reason: None,
             allowed: Some(true),
+            ctx: Default::default(),
         },
     )
 }
@@ -1653,6 +1679,11 @@ pub fn hook() -> i32 {
             id.as_deref(),
             &sub,
             &keys.join(","),
+            crate::gate_stats::DenyContext::new(
+                snap.mem_available_mb,
+                snap.mem_pressure_some_avg10,
+                snap.load_1m,
+            ),
         );
         let reason = if let Some((count, first)) = retry.filter(|(count, _)| *count >= 2) {
             let suffix = if count >= 3 {
@@ -1738,16 +1769,26 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
         }
     };
     let wanted = argv_toolchains(command);
-    if let Some((reason, _)) = deny_reason(&snap, &cfg, kind, &wanted) {
+    // A JS or Python test runner is no compiler: it needs a slot and the load/memory checks, but
+    // neither toolchain lock nor the compiler checks, so it never queues behind (or blocks) a
+    // cargo or Gradle build.
+    let check_kind = if runs_no_compiler(command) {
+        Kind::Other
+    } else {
+        kind
+    };
+    if let Some((reason, _)) = deny_reason(&snap, &cfg, check_kind, &wanted) {
         let _ = writeln!(io::stderr(), "{reason}");
         return 75;
     }
     // Sorted, so two runs wanting both toolchains take the locks in the same order. An unknown
     // toolchain holds them all, as the single lock used to.
-    let held: &[Toolchain] = if wanted.is_empty() {
-        &TOOLCHAINS
-    } else {
+    let held: &[Toolchain] = if !wanted.is_empty() {
         &wanted
+    } else if check_kind == Kind::Other {
+        &[]
+    } else {
+        &TOOLCHAINS
     };
     for index in 0..cfg.slots {
         let path = cfg.gate_dir.join(format!("slot-{index}.lock"));
@@ -1824,7 +1865,7 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
                         }
                     }
                 }
-                let exit = execute(command);
+                let exit = crate::gate_stats::run_measured(kind.as_str(), command, &cfg.proc_root);
                 drop(compilers);
                 drop(file);
                 return exit;
