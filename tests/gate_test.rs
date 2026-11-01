@@ -331,13 +331,14 @@ fn large_log_compacts_on_deny_and_allow() {
     let within_window = logged_hook(&f, Some("large-session"), "cargo test");
     assert_eq!(code(&within_window), 75);
     assert!(String::from_utf8_lossy(&within_window.stdout).contains("retry"));
-    // Best of three refilled runs: one slow process start on a loaded runner is noise,
-    // three in a row is the full-file read this guards against.
-    for (load, expected) in [("7", 75), ("0.5", 0)] {
+    // Best of three refilled runs, judged against the same hook on a one-row log measured right
+    // beside it: process start-up and a busy runner inflate both alike, so only the extra cost of
+    // reading the whole 1 MB file (what compaction must not do) can push the difference over.
+    let fastest_of_three = |rows: usize, load: &str, expected: i32| {
         fs::write(f.proc().join("loadavg"), format!("{load} 0 0 1/1 1\n")).unwrap();
-        let fastest = (0..3)
+        (0..3)
             .map(|_| {
-                fs::write(log_path(&f), row.repeat(1024 * 1024 / row.len() + 1)).unwrap();
+                fs::write(log_path(&f), row.repeat(rows)).unwrap();
                 let start = Instant::now();
                 assert_eq!(
                     code(&logged_hook(&f, Some("large-session"), "cargo test")),
@@ -348,8 +349,15 @@ fn large_log_compacts_on_deny_and_allow() {
                 elapsed
             })
             .min()
-            .unwrap();
-        assert!(fastest < 50, "fastest of three took {fastest} ms");
+            .unwrap()
+    };
+    for (load, expected) in [("7", 75), ("0.5", 0)] {
+        let baseline = fastest_of_three(1, load, expected);
+        let fastest = fastest_of_three(1024 * 1024 / row.len() + 1, load, expected);
+        assert!(
+            fastest <= baseline + 40,
+            "1 MB log took {fastest} ms vs {baseline} ms for a one-row log"
+        );
     }
 }
 
