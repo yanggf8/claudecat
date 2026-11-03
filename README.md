@@ -22,18 +22,21 @@ agent 把重工跑得不擾民。
 ## 管理
 
 - **負載與記憶體閘門**：重工開始前同時看 1 分鐘負載與當下的記憶體壓力。`nice` 只讓得出 CPU、
-  讓不出記憶體，所以負載不高時也可能卡，記憶體要分開擋。起始門檻：負載 > 6；記憶體看
+  讓不出記憶體，所以負載不高時也可能卡，記憶體要分開擋。起始門檻：負載 > CPU 數（NUC 的 6 顆即 6）；記憶體看
   `/proc/pressure/memory` 的 `some avg10` > 10，或 MemAvailable < 1536 MB，任一成立就擋，
   都可用環境變數調整。kernel 沒有 PSI 時只看 MemAvailable。swap 已用量照樣顯示，但不再是擋下的
   理由：WSL2 上長駐程序的閒置分頁會一直留在 swap，已用量不會降，機器閒著也會被永遠擋住。
 - **同一種編譯器不疊兩個**：已經有人在跑 `rustc`，新的 cargo build／測試排隊；有 Gradle worker（`GradleWorkerMain`）正在吃 CPU，新的 gradle build／測試排隊。cargo 與 gradle 互不互擋（只在記憶體不夠時由下面的預留擋）。指令認不出是哪一種（例如 `gate check --kind build`）時保守處理，兩種都算。建置結束後留著的閒置 worker 不算：gate 取樣兩次 CPU tick（預設間隔 100 ms，`CLAUDECAT_GRADLE_SAMPLE_MS` 可改，上限 1000 ms，即 hook-gate 時限的上限），沒有增長就放行；間隔必須小於 `cort hook-gate` 實際設定的時限（預設 200 ms），否則逾時放行，所有拒絕都會失效。
   閒置的 Gradle daemon 不算：它在建置後會常駐數小時。代價是沒經過 `gate run` 的 Gradle 純編譯
   （Java 在 daemon 裡編，不開 worker）偵測不到；要擋它，Gradle 建置就要經 `gate run --kind build`。
-  `gate run --kind build|test` 另外持有每種編譯器各一把鎖（`compiler-cargo.lock`、`compiler-gradle.lock`；認不出的指令如 `make`、`just` 全持有，`npm`／`npx`／`pnpm`／`yarn`／`node`／`vitest`／`jest`／`playwright`／`pytest`／`python` 這類執行器不持有也不被編譯鎖擋，只佔 slot 並受負載與記憶體檢查），蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
+  `gate run --kind build|test` 另外持有每種編譯器各一把鎖（`compiler-cargo.lock`、`compiler-gradle.lock`；認不出的指令如 `make`、`just` 全持有，`npm`／`npx`／`pnpm`／`yarn`／`node`／`vitest`／`jest`／`playwright`／`pytest`／`python` 這類執行器不持有也不被編譯鎖擋，只佔建置名額並受負載與記憶體檢查），蓋住 cargo 產生第一個 `rustc` 前的起動窗口。
 - **預留記憶體**：剛起動（預設 60 秒內，`CLAUDECAT_RESERVE_WARMUP_SECS`）的持有者還沒把記憶體用出來，gate 先替它預留估計值（gradle 3072 MB、cargo 1536 MB，`CLAUDECAT_RESERVE_GRADLE_MB`、`CLAUDECAT_RESERVE_CARGO_MB`）；`MemAvailable` 扣掉預留後不夠新指令的估計值就拒絕（`reserved`）。暖機後的實際用量已在 `MemAvailable` 裡，不再重複預留。
 - **hook 放行紀錄**：`gate hook` 放行的建置／測試指令是由 Claude 直接執行，不會登記持有者，所以 hook 在放行時會在 gate 目錄的 `admitted.jsonl` 追加一行 `{ts, session, toolchains}`（不含指令文字），在同一個暖機視窗內與持有者一樣按 toolchain 計入預留（`reserved=` 與 `status` 都會顯示），讓同一輪同時發出的 `cargo test` 與 `./gradlew test` 不會都通過、也讓直接執行的 Gradle 暖機期可見。超過暖機視窗的列忽略並在下次寫入時清除，最多保留 64 列。檢查與寫入由 `admission.lock` 序列化（等候上限約 50 ms）；鎖逾時或任何 I/O 錯誤一律放行且不記錄。被拒絕的指令、`gate check`、`gate run`（已登記持有者）都不寫入。同一個 session 對同一 toolchain 的新紀錄會取代舊紀錄（循序執行的指令不會累積預留；不同 session、不同 toolchain 各自保留）；時間戳在未來的列與同列重複的 toolchain 一律忽略或只算一次。取捨：hook 放行後實際沒執行的指令，其預留會留到暖機視窗結束。
-- **名額是鎖，不是公告**：整台的重工名額（預設 3 個）用 `flock`，程序死掉時由 kernel 釋放，
+- **名額是鎖，不是公告**：整台的重工名額用 `flock`，程序死掉時由 kernel 釋放，
   不會留下過期紀錄；鎖檔記著持有者的 pid 與指令，「誰在跑」就是從鎖算出來的。
+- **名額依本機資源**：建置名額（`slot-N.lock`）= min(CPU 數／2, MemTotal／最大工具鏈預估)，
+  `--kind other` 另一池（`other-N.lock`）= CPU 數，互不占用：長時間掛著、幾乎不吃資源的 LLM 包裝器
+  不會擋建置。2026-11-03 實測：gpu 8／16、NUC 3／6、Thinkpade15 6／16（受記憶體限制）。
 - **兩個入口，同一套門檻**：
   - shell 與派工腳本呼叫 `claudecat gate check`，用 exit code 回答；
   - agent 直接下的指令，經 cort 的 `PreToolUse` hook 轉交過來。Claude Code、Codex、Kimi 三邊都裝了
