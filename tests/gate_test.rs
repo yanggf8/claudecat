@@ -63,6 +63,7 @@ impl Fixture {
             .env_remove("CLAUDECAT_MAX_MEM_PRESSURE")
             .env_remove("CLAUDECAT_MIN_AVAILABLE_MB")
             .env_remove("CLAUDECAT_SLOTS")
+            .env_remove("CLAUDECAT_OTHER_SLOTS")
             .env_remove("CLAUDECAT_RESERVE_GRADLE_MB")
             .env_remove("CLAUDECAT_RESERVE_CARGO_MB")
             .env_remove("CLAUDECAT_RESERVE_WARMUP_SECS")
@@ -699,6 +700,8 @@ fn occupied_slots_deny_run_without_executing() {
         .cmd(&[
             "gate",
             "run",
+            "--kind",
+            "e2e",
             "--",
             "touch",
             marker.to_str().expect("marker path"),
@@ -715,7 +718,8 @@ fn run_returns_child_codes_and_releases_slot() {
     let f = Fixture::new("0.5", 0);
     assert_eq!(code(&f.run(&["gate", "run", "--", "true"])), 0);
     assert_eq!(code(&f.run(&["gate", "run", "--", "false"])), 1);
-    let file = File::open(f.gate().join("slot-0.lock")).expect("slot file");
+    // The default kind is other, so the slot comes from the other pool.
+    let file = File::open(f.gate().join("other-0.lock")).expect("slot file");
     file.try_lock().expect("released lock");
 }
 
@@ -1785,4 +1789,92 @@ fn future_or_duplicated_admission_rows_cannot_reserve_forever() {
     fs::write(admissions_path(&f), format!("{dup}\n")).unwrap();
     let status = String::from_utf8(f.run(&["status"]).stdout).unwrap();
     assert!(status.contains("reserved=cargo:1536MB"), "{status}");
+}
+
+impl Fixture {
+    fn machine(&self, cpus: usize, mem_total_kb: u64) {
+        let cpuinfo: String = (0..cpus)
+            .map(|i| format!("processor\t: {i}\nmodel name\t: test\n\n"))
+            .collect();
+        fs::write(self.proc().join("cpuinfo"), cpuinfo).expect("cpuinfo");
+        let meminfo = fs::read_to_string(self.proc().join("meminfo")).expect("meminfo");
+        fs::write(
+            self.proc().join("meminfo"),
+            format!("MemTotal: {mem_total_kb} kB\n{meminfo}"),
+        )
+        .expect("meminfo");
+    }
+}
+
+#[test]
+fn limits_follow_the_machine() {
+    // 16 CPUs, 32 GB: slots = min(16/2, 32000/3072) = 8, other = 16, load = 12.
+    let f = Fixture::new("0.5", 0);
+    f.machine(16, 32_768_000);
+    let v: serde_json::Value =
+        serde_json::from_slice(&f.run(&["status", "--json"]).stdout).expect("json");
+    assert_eq!(v["limits"]["slots"], 8);
+    assert_eq!(v["limits"]["other_slots"], 16);
+    assert_eq!(v["limits"]["max_load"], 12.0);
+    assert_eq!(v["slots"].as_array().unwrap().len(), 8);
+    // Memory caps slots: 8 CPUs, 8 GB -> min(4, 8000/3072=2) = 2; load 6 as before.
+    let f = Fixture::new("6.5", 0);
+    f.machine(8, 8_192_000);
+    let v: serde_json::Value =
+        serde_json::from_slice(&f.run(&["status", "--json"]).stdout).expect("json");
+    assert_eq!(v["limits"]["slots"], 2);
+    assert_eq!(v["limits"]["max_load"], 6.0);
+    let text = String::from_utf8(f.run(&["status"]).stdout).unwrap();
+    assert!(
+        text.contains("slots=2 [min(cpus 8/2=4, MemTotal 8000MB/3072MB=2)]"),
+        "{text}"
+    );
+    assert_eq!(code(&f.run(&["gate", "check"])), 75);
+    // Load scales with CPUs: 6.5 is under 12 on a 16-CPU machine.
+    let f = Fixture::new("6.5", 0);
+    f.machine(16, 32_768_000);
+    assert_eq!(code(&f.run(&["gate", "check", "--kind", "build"])), 0);
+}
+
+#[test]
+fn environment_overrides_derived_limits() {
+    let f = Fixture::new("0.5", 0);
+    f.machine(16, 32_768_000);
+    let o = f
+        .cmd(&["status", "--json"])
+        .env("CLAUDECAT_SLOTS", "5")
+        .env("CLAUDECAT_OTHER_SLOTS", "2")
+        .env("CLAUDECAT_MAX_LOAD", "3")
+        .output()
+        .expect("status");
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("json");
+    assert_eq!(v["limits"]["slots"], 5);
+    assert_eq!(v["limits"]["slots_basis"], "CLAUDECAT_SLOTS");
+    assert_eq!(v["limits"]["other_slots"], 2);
+    assert_eq!(v["limits"]["max_load"], 3.0);
+}
+
+#[test]
+fn other_kind_has_its_own_pool() {
+    let f = Fixture::new("0.5", 0);
+    // Full build/test pool (3 without cpuinfo): other still runs, build does not.
+    let _build: Vec<_> = (0..3)
+        .map(|i| hold(&f, &format!("slot-{i}.lock")))
+        .collect();
+    assert_eq!(code(&f.run(&["gate", "check", "--kind", "other"])), 0);
+    assert_eq!(code(&f.run(&["gate", "check", "--kind", "build"])), 75);
+    assert_eq!(code(&f.run(&["gate", "run", "--", "true"])), 0);
+    // Full other pool: other is denied, test is not blocked by it.
+    let f = Fixture::new("0.5", 0);
+    let _other: Vec<_> = (0..3)
+        .map(|i| hold(&f, &format!("other-{i}.lock")))
+        .collect();
+    let o = f.run(&["gate", "check", "--kind", "other"]);
+    assert_eq!(code(&o), 75);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("other_slots=3/3"));
+    assert_eq!(code(&f.run(&["gate", "check", "--kind", "test"])), 0);
+    let marker = f.temp.path().join("marker");
+    let o = f.run(&["gate", "run", "--", "touch", marker.to_str().unwrap()]);
+    assert_eq!(code(&o), 75);
+    assert!(!marker.exists());
 }

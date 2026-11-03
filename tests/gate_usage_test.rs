@@ -44,7 +44,8 @@ impl Fixture {
             .env_remove("CLAUDECAT_MAX_LOAD")
             .env_remove("CLAUDECAT_MAX_MEM_PRESSURE")
             .env_remove("CLAUDECAT_MIN_AVAILABLE_MB")
-            .env_remove("CLAUDECAT_SLOTS");
+            .env_remove("CLAUDECAT_SLOTS")
+            .env_remove("CLAUDECAT_OTHER_SLOTS");
         cmd
     }
 

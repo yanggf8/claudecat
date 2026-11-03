@@ -62,7 +62,12 @@ agent 把重工跑得不擾民。
 | `claudecat gate install` | 透過 `cort hook-gate set` 安裝目前的 ClaudeCat | 原樣顯示 cort 輸出與 exit code |
 | `claudecat gate uninstall` | 透過 `cort hook-gate clear` 移除轉交 | 原樣顯示 cort 輸出與 exit code |
 
-門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_MEM_PRESSURE`、`CLAUDECAT_MIN_AVAILABLE_MB`、`CLAUDECAT_SLOTS` 覆寫（不是正數就用預設）；
+名額與負載門檻依本機資源推得（`claudecat status` 的 `limits:` 一行列出數值與依據）：
+build／test／e2e 名額 = min(CPU 數／2, MemTotal／最大工具鏈預估)；`--kind other`（LLM 包裝器、腳本，
+也是 `gate check`／`gate run` 的預設 kind）另用一池 `other-N.lock`，大小 = CPU 數，不占建置名額；
+負載上限 = CPU 數 × 0.75（8 核即舊值 6）。讀不到 cpuinfo／MemTotal 時退回 3 個名額、負載 6。
+門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_MEM_PRESSURE`、`CLAUDECAT_MIN_AVAILABLE_MB`、`CLAUDECAT_SLOTS`、
+`CLAUDECAT_OTHER_SLOTS` 覆寫（不是正數就用推得值或預設）；
 名額目錄是 `CLAUDECAT_GATE_DIR`，否則 `$XDG_RUNTIME_DIR/claudecat/gate`，再否則
 `/tmp/claudecat-<uid>/gate`。`gate check` 只回答「現在能不能開工」，不占名額；要讓名額真正反映
 誰在跑，重工本身要經 `gate run` 執行。

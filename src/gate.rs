@@ -10,12 +10,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// Fallbacks for a proc root that lacks cpuinfo or MemTotal; a real /proc always has both, and
+// then the limits come from the machine (see `Limits`).
 const DEFAULT_LOAD: f64 = 6.0;
 // Memory is judged by current pressure, not swap used: on WSL2 idle pages of long-lived
 // processes stay in swap forever, so swap used never drops even on an idle machine.
 const DEFAULT_MEM_PRESSURE: f64 = 10.0;
 const DEFAULT_AVAILABLE_MB: u64 = 1536;
 const DEFAULT_SLOTS: usize = 3;
+// Load average allowed per CPU: 0.75 x 8 CPUs reproduces the fleet's long-standing 6.
+const LOAD_PER_CPU: f64 = 0.75;
 // Estimated peak memory of a fresh build, reserved only while its holder is still warming up.
 const DEFAULT_RESERVE_GRADLE_MB: u64 = 3072;
 const DEFAULT_RESERVE_CARGO_MB: u64 = 1536;
@@ -636,6 +640,10 @@ pub struct Snapshot {
     /// PSI `some avg10` from `pressure/memory`; None when the kernel has no PSI.
     pub mem_pressure_some_avg10: Option<f64>,
     pub slots: Vec<Slot>,
+    /// Pool for `--kind other` (LLM wrappers, scripts): separate from the build/test slots so a
+    /// long, nearly idle wrapper never blocks a build.
+    pub other_slots: Vec<Slot>,
+    pub limits: Limits,
     /// Summary of `compiler_locks` for older readers: occupied if any toolchain lock is.
     pub compiler_lock: CompilerLock,
     compiler_locks: Vec<ToolchainLock>,
@@ -646,6 +654,19 @@ pub struct Snapshot {
     admissions: Vec<Admission>,
 }
 
+/// The machine's resources and the limits derived from them, with where each limit came from.
+#[derive(Serialize, Clone, Debug)]
+pub struct Limits {
+    pub cpus: Option<usize>,
+    pub mem_total_mb: Option<u64>,
+    pub slots: usize,
+    pub slots_basis: String,
+    pub other_slots: usize,
+    pub other_slots_basis: String,
+    pub max_load: f64,
+    pub max_load_basis: String,
+}
+
 struct Config {
     proc_root: PathBuf,
     gate_dir: PathBuf,
@@ -653,6 +674,8 @@ struct Config {
     max_mem_pressure: f64,
     min_available_mb: u64,
     slots: usize,
+    other_slots: usize,
+    limits: Limits,
     reserve_gradle_mb: u64,
     reserve_cargo_mb: u64,
     reserve_warmup_secs: u64,
@@ -674,12 +697,101 @@ fn positive_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn config() -> io::Result<Config> {
-    let slots = env::var("CLAUDECAT_SLOTS")
+fn positive_usize(key: &str) -> Option<usize> {
+    env::var(key)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_SLOTS);
+}
+
+/// Logical CPUs listed in `cpuinfo`; None when the proc root has no such file.
+fn cpus(root: &Path) -> Option<usize> {
+    let n = fs::read_to_string(root.join("cpuinfo"))
+        .ok()?
+        .lines()
+        .filter(|line| {
+            line.split(':')
+                .next()
+                .is_some_and(|key| key.trim() == "processor")
+        })
+        .count();
+    (n > 0).then_some(n)
+}
+
+fn mem_total_mb(root: &Path) -> Option<u64> {
+    fs::read_to_string(root.join("meminfo"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()
+        .map(|kb| kb / 1024)
+}
+
+/// Build/test slots: one per two CPUs, and no more than MemTotal holds of the largest toolchain
+/// estimate. Other slots: one per CPU. Load: `LOAD_PER_CPU` per CPU. Environment variables win.
+fn limits(root: &Path, per_slot_mb: u64) -> Limits {
+    let cpus = cpus(root);
+    let mem_total_mb = mem_total_mb(root);
+    let (slots, slots_basis) = if let Some(n) = positive_usize("CLAUDECAT_SLOTS") {
+        (n, "CLAUDECAT_SLOTS".to_owned())
+    } else {
+        match (cpus, mem_total_mb) {
+            (Some(c), Some(m)) => {
+                let by_cpu = (c / 2).max(1);
+                let by_mem = usize::try_from(m / per_slot_mb.max(1))
+                    .unwrap_or(usize::MAX)
+                    .max(1);
+                (
+                    by_cpu.min(by_mem),
+                    format!("min(cpus {c}/2={by_cpu}, MemTotal {m}MB/{per_slot_mb}MB={by_mem})"),
+                )
+            }
+            (Some(c), None) => ((c / 2).max(1), format!("cpus {c}/2")),
+            _ => (DEFAULT_SLOTS, "default (cpus unknown)".to_owned()),
+        }
+    };
+    let (other_slots, other_slots_basis) = if let Some(n) = positive_usize("CLAUDECAT_OTHER_SLOTS")
+    {
+        (n, "CLAUDECAT_OTHER_SLOTS".to_owned())
+    } else if let Some(c) = cpus {
+        (c, format!("cpus {c}"))
+    } else {
+        (DEFAULT_SLOTS, "default (cpus unknown)".to_owned())
+    };
+    let env_load = env::var("CLAUDECAT_MAX_LOAD")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0);
+    #[allow(clippy::cast_precision_loss)]
+    let (max_load, max_load_basis) = if let Some(n) = env_load {
+        (n, "CLAUDECAT_MAX_LOAD".to_owned())
+    } else if let Some(c) = cpus {
+        (c as f64 * LOAD_PER_CPU, format!("cpus {c}x{LOAD_PER_CPU}"))
+    } else {
+        (DEFAULT_LOAD, "default (cpus unknown)".to_owned())
+    };
+    Limits {
+        cpus,
+        mem_total_mb,
+        slots,
+        slots_basis,
+        other_slots,
+        other_slots_basis,
+        max_load,
+        max_load_basis,
+    }
+}
+
+fn config() -> io::Result<Config> {
+    let proc_root = env::var_os("CLAUDECAT_PROC_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/proc"));
+    let reserve_gradle_mb = positive_u64("CLAUDECAT_RESERVE_GRADLE_MB", DEFAULT_RESERVE_GRADLE_MB);
+    let reserve_cargo_mb = positive_u64("CLAUDECAT_RESERVE_CARGO_MB", DEFAULT_RESERVE_CARGO_MB);
+    let limits = limits(&proc_root, reserve_gradle_mb.max(reserve_cargo_mb));
     let gate_dir = if let Some(dir) = env::var_os("CLAUDECAT_GATE_DIR") {
         PathBuf::from(dir)
     } else if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
@@ -690,16 +802,16 @@ fn config() -> io::Result<Config> {
         PathBuf::from(format!("/tmp/claudecat-{uid}/gate"))
     };
     Ok(Config {
-        proc_root: env::var_os("CLAUDECAT_PROC_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/proc")),
+        proc_root,
         gate_dir,
-        max_load: positive_f64("CLAUDECAT_MAX_LOAD", DEFAULT_LOAD),
+        max_load: limits.max_load,
         max_mem_pressure: positive_f64("CLAUDECAT_MAX_MEM_PRESSURE", DEFAULT_MEM_PRESSURE),
         min_available_mb: positive_u64("CLAUDECAT_MIN_AVAILABLE_MB", DEFAULT_AVAILABLE_MB),
-        slots,
-        reserve_gradle_mb: positive_u64("CLAUDECAT_RESERVE_GRADLE_MB", DEFAULT_RESERVE_GRADLE_MB),
-        reserve_cargo_mb: positive_u64("CLAUDECAT_RESERVE_CARGO_MB", DEFAULT_RESERVE_CARGO_MB),
+        slots: limits.slots,
+        other_slots: limits.other_slots,
+        limits,
+        reserve_gradle_mb,
+        reserve_cargo_mb,
         reserve_warmup_secs: positive_u64(
             "CLAUDECAT_RESERVE_WARMUP_SECS",
             DEFAULT_RESERVE_WARMUP_SECS,
@@ -932,11 +1044,21 @@ fn probe_lock(path: &Path) -> io::Result<(bool, Option<Holder>)> {
     }
 }
 
-fn slots(cfg: &Config) -> io::Result<Vec<Slot>> {
+/// Lock-file prefix and size of the pool a kind takes its slot from.
+fn pool(cfg: &Config, kind: Kind) -> (&'static str, usize) {
+    if kind == Kind::Other {
+        ("other", cfg.other_slots)
+    } else {
+        ("slot", cfg.slots)
+    }
+}
+
+fn slots(cfg: &Config, prefix: &str, count: usize) -> io::Result<Vec<Slot>> {
     fs::create_dir_all(&cfg.gate_dir)?;
-    (0..cfg.slots)
+    (0..count)
         .map(|index| {
-            let (occupied, holder) = probe_lock(&cfg.gate_dir.join(format!("slot-{index}.lock")))?;
+            let (occupied, holder) =
+                probe_lock(&cfg.gate_dir.join(format!("{prefix}-{index}.lock")))?;
             Ok(Slot {
                 index,
                 holder,
@@ -1180,7 +1302,9 @@ fn snapshot_with_processes(
         swap_used_mb,
         mem_available_mb,
         mem_pressure_some_avg10: mem_pressure(&cfg.proc_root),
-        slots: slots(cfg)?,
+        slots: slots(cfg, "slot", cfg.slots)?,
+        other_slots: slots(cfg, "other", cfg.other_slots)?,
+        limits: cfg.limits.clone(),
         compiler_lock: CompilerLock {
             holder: first_held.and_then(|lock| lock.holder.clone()),
             occupied: first_held.is_some(),
@@ -1203,6 +1327,7 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
     let holders = snap
         .slots
         .iter()
+        .chain(&snap.other_slots)
         .filter(|s| s.occupied)
         .filter_map(|s| s.holder.as_ref())
         .chain(
@@ -1271,14 +1396,28 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
     None
 }
 
+impl Snapshot {
+    fn pool(&self, kind: Kind) -> &[Slot] {
+        if kind == Kind::Other {
+            &self.other_slots
+        } else {
+            &self.slots
+        }
+    }
+}
+
 /// `wanted` is the toolchains the command drives; empty means unknown, and then every toolchain's
-/// compilers and lock count against it and no reservation is checked.
+/// compilers and lock count against it and no reservation is checked. `pool_kind` picks the slot
+/// pool (the declared kind); `kind` picks the checks (a JS test runner is checked as Other).
 fn deny_reason(
     s: &Snapshot,
     cfg: &Config,
     kind: Kind,
+    pool_kind: Kind,
     wanted: &[Toolchain],
 ) -> Option<(String, Vec<&'static str>)> {
+    let (prefix, total) = pool(cfg, pool_kind);
+    let pool_slots = s.pool(pool_kind);
     let counts = |t: Toolchain| wanted.is_empty() || wanted.contains(&t);
     let table = reserved(s, cfg, unix_now());
     let need = wanted
@@ -1292,7 +1431,7 @@ fn deny_reason(
                 || s.mem_available_mb < cfg.min_available_mb,
             "memory",
         ),
-        (s.slots.iter().all(|slot| slot.occupied), "slots"),
+        (pool_slots.iter().all(|slot| slot.occupied), "slots"),
         (
             kind.checks_compilers()
                 && s.compiling
@@ -1324,20 +1463,19 @@ fn deny_reason(
     if failed.is_empty() {
         return None;
     }
-    let holders: Vec<_> = s
-        .slots
+    let holders: Vec<_> = pool_slots
         .iter()
         .filter(|slot| slot.occupied)
         .map(|slot| match &slot.holder {
             Some(h) => format!(
-                "slot-{} pid={} kind={} cmd={} since={}",
+                "{prefix}-{} pid={} kind={} cmd={} since={}",
                 slot.index,
                 h.pid,
                 h.kind,
                 h.command.join(" "),
                 h.started_at
             ),
-            None => format!("slot-{} unknown", slot.index),
+            None => format!("{prefix}-{} unknown", slot.index),
         })
         .collect();
     let compilers: Vec<_> = s
@@ -1367,13 +1505,14 @@ fn deny_reason(
         compiler_locks.join("; ")
     };
     let message = format!(
-        "gate denied ({}) load={:.2}/{:.2} {} slots={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
+        "gate denied ({}) load={:.2}/{:.2} {} {}={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
         failed.join(","),
         s.load_1m,
         cfg.max_load,
         memory_figures(s, cfg),
+        if prefix == "slot" { "slots" } else { "other_slots" },
         holders.len(),
-        cfg.slots,
+        total,
         holders.join("; "),
         compiler_lock,
         compilers.join("; ")
@@ -1700,7 +1839,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 
 pub fn check(kind: Kind) -> i32 {
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
-        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, &[]) {
+        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, kind, &[]) {
             Some((reason, _)) => {
                 let _ = writeln!(io::stderr(), "{reason}");
                 75
@@ -1770,7 +1909,7 @@ pub fn hook() -> i32 {
     };
     let (decision, keys) = if let Some(reason) = duplicate_reason {
         (Some(reason), vec!["duplicate"])
-    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind, &wanted) {
+    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind, kind, &wanted) {
         // Only slots, compilers and reservations have holders to wait for; load and memory deny
         // with holders=[].
         // "reserved" has a holder to wait for only while the table is non-empty; otherwise
@@ -1920,7 +2059,7 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     } else {
         kind
     };
-    if let Some((reason, _)) = deny_reason(&snap, &cfg, check_kind, &wanted) {
+    if let Some((reason, _)) = deny_reason(&snap, &cfg, check_kind, kind, &wanted) {
         let _ = writeln!(io::stderr(), "{reason}");
         return 75;
     }
@@ -1933,8 +2072,9 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     } else {
         &TOOLCHAINS
     };
-    for index in 0..cfg.slots {
-        let path = cfg.gate_dir.join(format!("slot-{index}.lock"));
+    let (prefix, total) = pool(&cfg, kind);
+    for index in 0..total {
+        let path = cfg.gate_dir.join(format!("{prefix}-{index}.lock"));
         let mut file = match lock_file(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -2022,12 +2162,17 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     }
     let _ = writeln!(
         io::stderr(),
-        "gate denied (slots) load={:.2} {} slots={}/{} holders=[{}] compiling=[{}]",
+        "gate denied (slots) load={:.2} {} {}={}/{} holders=[{}] compiling=[{}]",
         snap.load_1m,
         memory_figures(&snap, &cfg),
-        cfg.slots,
-        cfg.slots,
-        snap.slots
+        if prefix == "slot" {
+            "slots"
+        } else {
+            "other_slots"
+        },
+        total,
+        total,
+        snap.pool(kind)
             .iter()
             .filter_map(|s| s.holder.as_ref().map(|h| format!(
                 "pid={} kind={} cmd={}",
@@ -2097,12 +2242,34 @@ pub fn status(json: bool) -> i32 {
             snap.mem_available_mb,
             snap.swap_used_mb
         );
-        for slot in &snap.slots {
+        let l = &snap.limits;
+        let _ = writeln!(
+            io::stdout(),
+            "limits: cpus={} MemTotal={}; slots={} [{}]; other_slots={} [{}]; max_load={:.2} [{}]",
+            l.cpus.map_or_else(|| "?".into(), |c| c.to_string()),
+            l.mem_total_mb
+                .map_or_else(|| "?".into(), |m| format!("{m}MB")),
+            l.slots,
+            l.slots_basis,
+            l.other_slots,
+            l.other_slots_basis,
+            l.max_load,
+            l.max_load_basis
+        );
+        let pools = snap
+            .slots
+            .iter()
+            .map(|slot| ("slot", slot))
+            .chain(snap.other_slots.iter().map(|slot| ("other", slot)));
+        for (prefix, slot) in pools {
+            if prefix == "other" && !slot.occupied {
+                continue;
+            }
             match &slot.holder {
                 Some(h) => {
                     let _ = writeln!(
                         io::stdout(),
-                        "slot-{}: pid={} kind={} cmd={} since={}",
+                        "{prefix}-{}: pid={} kind={} cmd={} since={}",
                         slot.index,
                         h.pid,
                         h.kind,
@@ -2113,7 +2280,7 @@ pub fn status(json: bool) -> i32 {
                 None if slot.occupied => {
                     let _ = writeln!(
                         io::stdout(),
-                        "slot-{}: occupied (unknown holder)",
+                        "{prefix}-{}: occupied (unknown holder)",
                         slot.index
                     );
                 }
@@ -2201,6 +2368,17 @@ mod duplicate_tests {
             mem_available_mb: 0,
             mem_pressure_some_avg10: None,
             slots: Vec::new(),
+            other_slots: Vec::new(),
+            limits: Limits {
+                cpus: None,
+                mem_total_mb: None,
+                slots: 0,
+                slots_basis: String::new(),
+                other_slots: 0,
+                other_slots_basis: String::new(),
+                max_load: 0.0,
+                max_load_basis: String::new(),
+            },
             compiler_lock: CompilerLock {
                 holder: None,
                 occupied: false,
