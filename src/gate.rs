@@ -18,8 +18,9 @@ const DEFAULT_LOAD: f64 = 6.0;
 const DEFAULT_MEM_PRESSURE: f64 = 10.0;
 const DEFAULT_AVAILABLE_MB: u64 = 1536;
 const DEFAULT_SLOTS: usize = 3;
-// Load average allowed per CPU: 0.75 x 8 CPUs reproduces the fleet's long-standing 6.
-const LOAD_PER_CPU: f64 = 0.75;
+// Load average allowed per CPU: the fleet's long-standing 6 was tuned on the NUC, whose WSL
+// exposes 6 CPUs, so 1.0 per CPU keeps it there.
+const LOAD_PER_CPU: f64 = 1.0;
 // Estimated peak memory of a fresh build, reserved only while its holder is still warming up.
 const DEFAULT_RESERVE_GRADLE_MB: u64 = 3072;
 const DEFAULT_RESERVE_CARGO_MB: u64 = 1536;

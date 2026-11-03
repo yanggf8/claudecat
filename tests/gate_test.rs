@@ -1808,29 +1808,29 @@ impl Fixture {
 
 #[test]
 fn limits_follow_the_machine() {
-    // 16 CPUs, 32 GB: slots = min(16/2, 32000/3072) = 8, other = 16, load = 12.
+    // 16 CPUs, 32 GB: slots = min(16/2, 32000/3072) = 8, other = 16, load = 16.
     let f = Fixture::new("0.5", 0);
     f.machine(16, 32_768_000);
     let v: serde_json::Value =
         serde_json::from_slice(&f.run(&["status", "--json"]).stdout).expect("json");
     assert_eq!(v["limits"]["slots"], 8);
     assert_eq!(v["limits"]["other_slots"], 16);
-    assert_eq!(v["limits"]["max_load"], 12.0);
+    assert_eq!(v["limits"]["max_load"], 16.0);
     assert_eq!(v["slots"].as_array().unwrap().len(), 8);
-    // Memory caps slots: 8 CPUs, 8 GB -> min(4, 8000/3072=2) = 2; load 6 as before.
+    // Memory caps slots: 6 CPUs, 8 GB -> min(3, 8000/3072=2) = 2; load 6 as before.
     let f = Fixture::new("6.5", 0);
-    f.machine(8, 8_192_000);
+    f.machine(6, 8_192_000);
     let v: serde_json::Value =
         serde_json::from_slice(&f.run(&["status", "--json"]).stdout).expect("json");
     assert_eq!(v["limits"]["slots"], 2);
     assert_eq!(v["limits"]["max_load"], 6.0);
     let text = String::from_utf8(f.run(&["status"]).stdout).unwrap();
     assert!(
-        text.contains("slots=2 [min(cpus 8/2=4, MemTotal 8000MB/3072MB=2)]"),
+        text.contains("slots=2 [min(cpus 6/2=3, MemTotal 8000MB/3072MB=2)]"),
         "{text}"
     );
     assert_eq!(code(&f.run(&["gate", "check"])), 75);
-    // Load scales with CPUs: 6.5 is under 12 on a 16-CPU machine.
+    // Load scales with CPUs: 6.5 is under 16 on a 16-CPU machine.
     let f = Fixture::new("6.5", 0);
     f.machine(16, 32_768_000);
     assert_eq!(code(&f.run(&["gate", "check", "--kind", "build"])), 0);

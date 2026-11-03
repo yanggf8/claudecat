@@ -65,7 +65,7 @@ agent 把重工跑得不擾民。
 名額與負載門檻依本機資源推得（`claudecat status` 的 `limits:` 一行列出數值與依據）：
 build／test／e2e 名額 = min(CPU 數／2, MemTotal／最大工具鏈預估)；`--kind other`（LLM 包裝器、腳本，
 也是 `gate check`／`gate run` 的預設 kind）另用一池 `other-N.lock`，大小 = CPU 數，不占建置名額；
-負載上限 = CPU 數 × 0.75（8 核即舊值 6）。讀不到 cpuinfo／MemTotal 時退回 3 個名額、負載 6。
+負載上限 = CPU 數 × 1.0（NUC 的 WSL 是 6 顆，即舊值 6）。讀不到 cpuinfo／MemTotal 時退回 3 個名額、負載 6。
 門檻用 `CLAUDECAT_MAX_LOAD`、`CLAUDECAT_MAX_MEM_PRESSURE`、`CLAUDECAT_MIN_AVAILABLE_MB`、`CLAUDECAT_SLOTS`、
 `CLAUDECAT_OTHER_SLOTS` 覆寫（不是正數就用推得值或預設）；
 名額目錄是 `CLAUDECAT_GATE_DIR`，否則 `$XDG_RUNTIME_DIR/claudecat/gate`，再否則
