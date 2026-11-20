@@ -177,8 +177,14 @@ pub fn args_env(pid: u32) -> Option<(Vec<String>, Vec<u8>)> {
         return None;
     }
     buf.truncate(size);
-    let argc = usize::try_from(i32::from_ne_bytes(buf[..4].try_into().ok()?)).ok()?;
-    let mut rest = &buf[4..];
+    parse_procargs(&buf)
+}
+
+/// KERN_PROCARGS2 的版面：argc（4 位元組）、exec 路徑、補齊用的 NUL、argv、environ。
+/// 不信任長度：任何一段短少都回 None，不切片越界（核心回的長度不足時 gate 不能崩）。
+fn parse_procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<u8>)> {
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    let mut rest = buf.get(4..)?;
     // 跳過 exec 路徑與它後面補齊用的 NUL。
     let skip = rest.iter().position(|b| *b == 0)?;
     rest = &rest[skip..];
@@ -209,6 +215,28 @@ pub fn cpu_sample(pid: u32) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn procargs_short_or_malformed_buffers_are_none_not_panics() {
+        for buf in [
+            &b""[..],
+            &b"\x01"[..],
+            &b"\x01\x00\x00"[..],
+            &b"\x01\x00\x00\x00"[..],
+            &b"\x01\x00\x00\x00/bin/x"[..],
+        ] {
+            assert!(parse_procargs(buf).is_none(), "{buf:?}");
+        }
+    }
+
+    #[test]
+    fn procargs_layout() {
+        let mut buf = 2i32.to_ne_bytes().to_vec();
+        buf.extend_from_slice(b"/bin/node\0\0\0node\0app.mjs\0PATH=/bin\0HOME=/h\0\0junk");
+        let (argv, env) = parse_procargs(&buf).expect("parsed");
+        assert_eq!(argv, ["node", "app.mjs"]);
+        assert_eq!(env, b"PATH=/bin\0HOME=/h\0");
+    }
 
     #[test]
     fn reads_this_machine() {
