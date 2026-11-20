@@ -329,6 +329,15 @@ enum Toolchain {
 const TOOLCHAINS: [Toolchain; 2] = [Toolchain::Cargo, Toolchain::Gradle];
 
 impl Toolchain {
+    /// Whether two runs of this family exclude each other. Gradle is gated on resources alone
+    /// (load, PSI, available memory and the per-build reservation): user 2026-11-20 「能先直接放寬
+    /// gradle,我也說過用資源判定呀」. A `./gradlew test` spends most of its life running test JVMs,
+    /// not compiling, so one exclusive lock held for the whole run starved urgent builds while the
+    /// machine sat at load 3/16 with 25 GB free.
+    fn exclusive(self) -> bool {
+        matches!(self, Self::Cargo)
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Cargo => "cargo",
@@ -1523,16 +1532,16 @@ fn deny_reason(
         (pool_slots.iter().all(|slot| slot.occupied), "slots"),
         (
             kind.checks_compilers()
-                && s.compiling
-                    .iter()
-                    .any(|p| process_toolchain(p).is_none_or(counts)),
+                && s.compiling.iter().any(|p| {
+                    process_toolchain(p).is_none_or(|t| t.exclusive() && counts(t))
+                }),
             "compiler",
         ),
         (
             kind.checks_compilers()
                 && s.compiler_locks
                     .iter()
-                    .any(|lock| lock.occupied && counts(lock.toolchain)),
+                    .any(|lock| lock.occupied && lock.toolchain.exclusive() && counts(lock.toolchain)),
             "compiler-lock",
         ),
         (
@@ -2212,7 +2221,7 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
                 // rustc, so build/test also holds a second lock for the whole child lifetime.
                 let mut compilers = Vec::new();
                 if kind.checks_compilers() {
-                    for toolchain in held {
+                    for toolchain in held.iter().filter(|t| t.exclusive()) {
                         let mut lock = match lock_file(&cfg.gate_dir.join(toolchain.lock_name())) {
                             Ok(f) => f,
                             Err(e) => {

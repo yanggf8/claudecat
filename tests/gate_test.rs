@@ -812,17 +812,21 @@ fn gradle_worker(f: &Fixture) {
 }
 
 #[test]
-fn gradle_worker_denies_test() {
+/// Gradle is gated on resources alone (user 2026-11-20): a busy worker of another build does
+/// not deny build or test while load and memory allow it.
+fn gradle_worker_does_not_deny_build_or_test() {
     let f = Fixture::new("0.5", 0);
     gradle_worker(&f);
     std::thread::scope(|scope| {
         scope.spawn(|| keep_busy(&f));
-        let output = f
-            .cmd(&["gate", "check", "--kind", "test"])
-            .env("CLAUDECAT_GRADLE_SAMPLE_MS", "400")
-            .output()
-            .expect("check");
-        assert_eq!(code(&output), 75);
+        for kind in ["test", "build"] {
+            let output = f
+                .cmd(&["gate", "check", "--kind", kind])
+                .env("CLAUDECAT_GRADLE_SAMPLE_MS", "400")
+                .output()
+                .expect("check");
+            assert_eq!(code(&output), 0, "{kind}: {}", String::from_utf8_lossy(&output.stderr));
+        }
     });
 }
 
@@ -1177,16 +1181,17 @@ fn run_holds_slot_during_child() {
     );
     assert!(holder.get("target").is_some());
     // A test run holds compiler.lock for the child's whole life, not just at the start.
-    // The script names no toolchain, so it holds them all.
+    // The script names no toolchain, so it holds every exclusive one.
     let compiler = File::open(f.gate().join("compiler-cargo.lock")).expect("compiler lock");
     assert!(compiler.try_lock().is_err());
-    let gradle = File::open(f.gate().join("compiler-gradle.lock")).expect("gradle lock");
-    assert!(gradle.try_lock().is_err());
+    // Gradle is gated on resources alone: no run holds its lock.
+    if let Ok(gradle) = File::open(f.gate().join("compiler-gradle.lock")) {
+        assert!(gradle.try_lock().is_ok(), "gradle lock must not be held");
+    }
     drop(child.stdin.take());
     assert!(child.wait().expect("wait").success());
     file.try_lock().expect("released");
     compiler.try_lock().expect("compiler lock released");
-    gradle.try_lock().expect("gradle lock released");
 }
 
 #[test]
@@ -1456,11 +1461,8 @@ fn cross_toolchain_does_not_deny_when_memory_is_ample() {
     assert_eq!(code(&hook_command(&f, "cargo test", f.temp.path())), 0);
     // The allowed cargo hook admitted a reservation; drop it so only the lock is under test.
     fs::remove_file(f.gate().join("admitted.jsonl")).unwrap();
-    let line = deny_line(&hook_command(&f, "./gradlew test", f.temp.path()));
-    assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
-    assert!(line.contains("gradle: pid=77"), "{line}");
-    assert!(line.contains("holders above"), "{line}");
-    assert_eq!(line.lines().count(), 1);
+    // Gradle is gated on resources alone: another Gradle holding the old lock does not deny it.
+    assert_eq!(code(&hook_command(&f, "./gradlew test", f.temp.path())), 0);
     // A running rustc counts against cargo only.
     let g = Fixture::new("0.5", 0);
     g.process(123, "rustc", &["rustc", "main.rs"], 99);
@@ -1522,8 +1524,8 @@ fn unknown_wanted_toolchain_is_conservative() {
     let f = Fixture::new("0.5", 0);
     let now = now_secs();
     f.meminfo(2000 * 1024, 0);
-    let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], now);
-    // `gate check` names no command: any toolchain's lock counts, and no reservation is checked.
+    let _cargo = hold_holder(&f, "compiler-cargo.lock", 77, &["cargo", "test"], now);
+    // `gate check` names no command: any exclusive toolchain's lock counts, and no reservation is checked.
     let o = f.run(&["gate", "check", "--kind", "build"]);
     assert_eq!(code(&o), 75);
     let line = String::from_utf8(o.stderr).unwrap();
@@ -1544,8 +1546,8 @@ fn compound_command_checks_both_toolchains() {
     let f = Fixture::new("0.5", 0);
     f.meminfo(8000 * 1024, 0);
     let _gradle = hold_holder(&f, "compiler-gradle.lock", 77, &["./gradlew", "test"], 1);
-    let line = deny_line(&hook_command(&f, compound, f.temp.path()));
-    assert!(line.starts_with("gate denied (compiler-lock) "), "{line}");
+    // The Gradle lock no longer excludes (resources only); the cargo half is free.
+    assert_eq!(code(&hook_command(&f, compound, f.temp.path())), 0);
     let g = Fixture::new("0.5", 0);
     g.meminfo(8000 * 1024, 0);
     let _cargo = hold_holder(&g, "compiler-cargo.lock", 78, &["cargo", "test"], 1);
