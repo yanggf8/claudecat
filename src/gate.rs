@@ -700,7 +700,7 @@ fn positive_u64(key: &str, default: u64) -> u64 {
 
 /// Our own uid. Linux reads the real /proc/self (CLAUDECAT_PROC_ROOT may be a fixture); macOS has no
 /// /proc, so it asks the kernel.
-fn own_uid() -> io::Result<u32> {
+pub fn own_uid() -> io::Result<u32> {
     #[cfg(target_os = "macos")]
     {
         Ok(crate::host_macos::uid())
@@ -2325,11 +2325,6 @@ fn execute(command: &[String]) -> i32 {
 pub fn status_value() -> io::Result<serde_json::Value> {
     let snap = config().and_then(|cfg| snapshot(&cfg, true))?;
     serde_json::to_value(&snap).map_err(io::Error::other)
-}
-
-/// Our own uid (the real /proc/self's owner), for callers outside the gate.
-pub fn own_uid() -> io::Result<u32> {
-    fs::metadata("/proc/self").map(|m| m.uid())
 }
 
 pub fn status(json: bool) -> i32 {
