@@ -1539,7 +1539,7 @@ struct GateLogRow {
     ctx: crate::gate_stats::DenyContext,
 }
 
-pub(crate) fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2214,6 +2214,17 @@ fn execute(command: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// The `status --json` document as a value, for the fleet snapshot.
+pub fn status_value() -> io::Result<serde_json::Value> {
+    let snap = config().and_then(|cfg| snapshot(&cfg, true))?;
+    serde_json::to_value(&snap).map_err(io::Error::other)
+}
+
+/// Our own uid (the real /proc/self's owner), for callers outside the gate.
+pub fn own_uid() -> io::Result<u32> {
+    fs::metadata("/proc/self").map(|m| m.uid())
 }
 
 pub fn status(json: bool) -> i32 {
