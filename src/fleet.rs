@@ -349,7 +349,7 @@ mod tests {
         proc_entry(&root, 101, "node", &["node", "x.js"], &work, 50_000);
         let own_uid = {
             use std::os::unix::fs::MetadataExt;
-            fs::metadata(&root.join("100")).unwrap().uid()
+            fs::metadata(root.join("100")).unwrap().uid()
         };
         let found = scan_sessions(&root, own_uid, 0);
         assert_eq!(found.len(), 1);
