@@ -119,6 +119,26 @@ Cargo 的 test／nextest／bench 為 `test`，build／check／clippy／doc／run
 
 安裝轉交需有 cort 的 `hook-gate` 子指令；`gate install` 與 `gate uninstall` 不直接修改 cort 設定檔。
 
+## Fleet（各機器的資源與 Claude session 回報）
+
+派工前先問「哪台機器現在能接」：每台機器把自己的快照寫進 cort 記憶用的同一個 Turso 資料庫，協調者一個指令讀全部。
+
+| 指令 | 用途 |
+|---|---|
+| `claudecat fleet push` | 收集本機快照並 upsert 自己那一列（失敗時一行錯誤、exit 1） |
+| `claudecat fleet [--json]` | 全部機器一張表：host、資料年齡、名額 用/總、MemAvailable MB、load 1m/上限、Claude session（忙/總；忙＝CPU > 5%）、編譯器數。超過 180 秒沒更新標 `STALE`；讀不到資源的機器標 `UNKNOWN` |
+| `claudecat fleet pick [--kind gradle\|other] [--json]` | 依適合度列出可接新重工的機器：資料新（非 STALE／UNKNOWN）、該池有空名額，記憶體餘裕最大者優先，同值看 load／上限最低者。沒有任何機器合適時 exit 1 |
+| `claudecat fleet install-cron` | 只印出 crontab 那一行（`* * * * * <claudecat 絕對路徑> fleet push >/dev/null 2>&1`），不安裝 |
+
+- 快照內容：`status --json` 的同一份資料，加上本機執行中的 `claude` 程序（pid、cwd、CPU%、已執行秒數，抓得到時加 tmux session 名）。
+  不含環境變數、指令列參數、檔案內容。session 掃描目前只支援 Linux；其他系統回報 `sessions_unsupported: true` 與空清單。
+- 儲存：Turso HTTP pipeline API，表 `claudecat_fleet (host PRIMARY KEY, updated_at, payload)`，一台一列；值一律以參數帶入。
+  連線設定讀 `cort memory configure` 存的檔（`$CORT_MEMORY_DIR` 或 `$XDG_DATA_HOME/cortexyoung/memory` 或 `~/.local/share/cortexyoung/memory` 下的 `turso-memory.json`），
+  也可用 `CLAUDECAT_FLEET_URL` ＋ `CLAUDECAT_FLEET_TOKEN` 覆蓋（兩個要一起設）。token 不會出現在任何輸出或錯誤訊息。
+- 保持新鮮、不用常駐程式：`gate check`／`gate run`／`status` 每次最多每 60 秒在背景起一個 `fleet push`（逾時 2 秒，失敗無聲，絕不拖慢或擋住閘門）；
+  時間戳存在資料目錄的 `fleet-last-push`。設了 `CLAUDECAT_PROC_ROOT`（測試用的假 /proc）或 `CLAUDECAT_FLEET_AUTOPUSH=0` 時不推。
+  機器上沒人在跑閘門時，用 `fleet install-cron` 印出的那一行放進 crontab。
+
 ## 不再提供的東西
 
 - **V2 導航地圖**（`scan`、`update`、`navigate`、`explore`、`track`）：做出來過，也寫進過 agent 的
