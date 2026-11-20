@@ -50,44 +50,185 @@ pub struct Pick {
 }
 
 /// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SSZ`; None for anything else.
-pub fn parse_rfc3339_utc(_s: &str) -> Option<u64> {
-    None
+pub fn parse_rfc3339_utc(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // days from civil (Howard Hinnant), the inverse of dates::civil_from_days
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86400 + hh * 3600 + mm * 60 + ss).ok()
 }
 
 /// `12s`, `5m`, `3h`, `2d`.
-pub fn format_age(_secs: u64) -> String {
-    String::new()
-}
-
-pub fn summarize(_row: &Row, _now: u64) -> Summary {
-    Summary {
-        host: String::new(),
-        os: String::new(),
-        state: State::Unknown,
-        updated_at: String::new(),
-        age_secs: 0,
-        slots_used: 0,
-        slots_total: 0,
-        other_slots_used: 0,
-        other_slots_total: 0,
-        mem_available_mb: None,
-        load_1m: None,
-        max_load: None,
-        sessions_busy: 0,
-        sessions_total: 0,
-        sessions_unsupported: false,
-        compilers: 0,
+pub fn format_age(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
     }
 }
 
-pub fn render_table(_rows: &[Summary]) -> String {
-    String::new()
+fn slot_counts(status: &serde_json::Value, key: &str) -> (usize, usize) {
+    let slots = status[key].as_array().map_or(&[][..], Vec::as_slice);
+    (
+        slots.iter().filter(|s| s["occupied"] == true).count(),
+        slots.len(),
+    )
+}
+
+pub fn summarize(row: &Row, now: u64) -> Summary {
+    let snap = &row.snapshot;
+    let age_secs = parse_rfc3339_utc(&row.updated_at).map_or(u64::MAX, |t| now.saturating_sub(t));
+    let status = snap.status.as_ref();
+    let state = if status.is_none() {
+        State::Unknown
+    } else if age_secs > STALE_SECS {
+        State::Stale
+    } else {
+        State::Ok
+    };
+    let null = serde_json::Value::Null;
+    let st = status.unwrap_or(&null);
+    let (slots_used, slots_total) = slot_counts(st, "slots");
+    let (other_slots_used, other_slots_total) = slot_counts(st, "other_slots");
+    Summary {
+        host: row.host.clone(),
+        os: snap.os.clone(),
+        state,
+        updated_at: row.updated_at.clone(),
+        age_secs,
+        slots_used,
+        slots_total,
+        other_slots_used,
+        other_slots_total,
+        mem_available_mb: st["mem_available_mb"].as_u64(),
+        load_1m: st["load_1m"].as_f64(),
+        max_load: st["limits"]["max_load"].as_f64(),
+        sessions_busy: snap.sessions.iter().filter(|s| s.cpu_percent > 5.0).count(),
+        sessions_total: snap.sessions.len(),
+        sessions_unsupported: snap.sessions_unsupported,
+        compilers: st["compiling"].as_array().map_or(0, Vec::len),
+    }
+}
+
+pub fn render_table(rows: &[Summary]) -> String {
+    let mut cells: Vec<[String; 8]> = vec![[
+        "HOST",
+        "STATE",
+        "AGE",
+        "SLOTS",
+        "MEM_AVAIL_MB",
+        "LOAD",
+        "CLAUDE(busy/total)",
+        "COMPILERS",
+    ]
+    .map(str::to_owned)];
+    let dash = || "-".to_owned();
+    for r in rows {
+        let readable = r.state != State::Unknown;
+        cells.push([
+            r.host.clone(),
+            match r.state {
+                State::Ok => "ok",
+                State::Stale => "STALE",
+                State::Unknown => "UNKNOWN",
+            }
+            .to_owned(),
+            format_age(r.age_secs),
+            if readable {
+                format!("{}/{}", r.slots_used, r.slots_total)
+            } else {
+                dash()
+            },
+            r.mem_available_mb.map_or_else(dash, |m| m.to_string()),
+            match (r.load_1m, r.max_load) {
+                (Some(l), Some(m)) => format!("{l:.2}/{m:.2}"),
+                _ => dash(),
+            },
+            if r.sessions_unsupported {
+                dash()
+            } else {
+                format!("{}/{}", r.sessions_busy, r.sessions_total)
+            },
+            if readable {
+                r.compilers.to_string()
+            } else {
+                dash()
+            },
+        ]);
+    }
+    let widths: Vec<usize> = (0..8)
+        .map(|i| cells.iter().map(|c| c[i].len()).max().unwrap_or(0))
+        .collect();
+    cells
+        .iter()
+        .map(|c| {
+            let line: Vec<String> = c
+                .iter()
+                .zip(&widths)
+                .map(|(v, w)| format!("{v:<w$}"))
+                .collect();
+            line.join("  ").trim_end().to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 /// Hosts fit for a new heavy job, best first: fresh, readable, a free slot in the pool, most
 /// MemAvailable, then lowest load ratio.
-pub fn pick(_rows: &[Summary], _pool: Pool) -> Vec<Pick> {
-    Vec::new()
+pub fn pick(rows: &[Summary], pool: Pool) -> Vec<Pick> {
+    let mut fit: Vec<Pick> = rows
+        .iter()
+        .filter(|r| r.state == State::Ok)
+        .filter_map(|r| {
+            let (used, total) = match pool {
+                Pool::Gradle => (r.slots_used, r.slots_total),
+                Pool::Other => (r.other_slots_used, r.other_slots_total),
+            };
+            let (mem, load, max_load) = (r.mem_available_mb?, r.load_1m?, r.max_load?);
+            (total > used).then(|| Pick {
+                host: r.host.clone(),
+                free_slots: total - used,
+                mem_available_mb: mem,
+                load_1m: load,
+                max_load,
+                load_ratio: if max_load > 0.0 {
+                    load / max_load
+                } else {
+                    f64::MAX
+                },
+            })
+        })
+        .collect();
+    fit.sort_by(|a, b| {
+        b.mem_available_mb
+            .cmp(&a.mem_available_mb)
+            .then(a.load_ratio.total_cmp(&b.load_ratio))
+            .then(a.host.cmp(&b.host))
+    });
+    fit
 }
 
 #[cfg(test)]

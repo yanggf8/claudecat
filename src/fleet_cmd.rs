@@ -1,0 +1,96 @@
+//! The `claudecat fleet` subcommands.
+use crate::fleet_store::{resolve_config, Config, Store, UreqHttp};
+use crate::fleet_view::{pick, render_table, summarize, Pool, Summary};
+use std::io::Write;
+use std::time::Duration;
+
+/// Default HTTP timeout for an explicit `fleet` command.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+fn config() -> Result<Config, String> {
+    resolve_config(&|k| std::env::var(k).ok())
+}
+
+fn fail(msg: &str) -> i32 {
+    let _ = writeln!(std::io::stderr(), "{msg}");
+    1
+}
+
+/// Collect this machine's snapshot and upsert its row.
+pub fn push(timeout_secs: u64) -> i32 {
+    let config = match config() {
+        Ok(c) => c,
+        Err(e) => return fail(&e),
+    };
+    let snap = crate::fleet::collect();
+    let store = Store {
+        config,
+        http: &UreqHttp,
+        timeout: Duration::from_secs(timeout_secs.max(1)),
+    };
+    match store.push(&snap) {
+        Ok(()) => 0,
+        Err(e) => fail(&format!("fleet push: {e}")),
+    }
+}
+
+fn summaries() -> Result<Vec<Summary>, String> {
+    let config = config()?;
+    let store = Store {
+        config,
+        http: &UreqHttp,
+        timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+    };
+    let now = crate::gate::unix_now();
+    let rows = store.list().map_err(|e| format!("fleet: {e}"))?;
+    Ok(rows.iter().map(|r| summarize(r, now)).collect())
+}
+
+/// Every machine's latest snapshot: a table, or JSON.
+pub fn show(json: bool) -> i32 {
+    let rows = match summaries() {
+        Ok(r) => r,
+        Err(e) => return fail(&e),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into())
+        );
+    } else if rows.is_empty() {
+        return fail(
+            "fleet: no machine has pushed yet; run `claudecat fleet push` on each machine",
+        );
+    } else {
+        print!("{}", render_table(&rows));
+    }
+    0
+}
+
+/// Hosts ordered by fitness for a new heavy job; exit 1 when none is fit.
+pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
+    let rows = match summaries() {
+        Ok(r) => r,
+        Err(e) => return fail(&e),
+    };
+    let fit = pick(&rows, pool);
+    if fit.is_empty() {
+        return fail(
+            "fleet pick: no eligible host (every host is stale, unknown or has no free slot)",
+        );
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&fit).unwrap_or_else(|_| "[]".into())
+        );
+    } else {
+        for p in &fit {
+            println!(
+                "{} free_slots={} mem_available_mb={} load={:.2}/{:.2}",
+                p.host, p.free_slots, p.mem_available_mb, p.load_1m, p.max_load
+            );
+        }
+    }
+    0
+}

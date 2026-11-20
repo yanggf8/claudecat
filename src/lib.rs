@@ -4,6 +4,7 @@ pub mod data_dir;
 pub mod dates;
 pub mod explore;
 pub mod fleet;
+pub mod fleet_cmd;
 pub mod fleet_store;
 pub mod fleet_view;
 pub mod gate;

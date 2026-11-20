@@ -61,12 +61,17 @@ impl Http for UreqHttp {
 
 /// `turso://h`, `libsql://h` or `https://h[/]` -> `https://h/v2/pipeline`.
 pub fn pipeline_url(db_url: &str) -> String {
-    let rest = db_url
-        .strip_prefix("turso://")
-        .or_else(|| db_url.strip_prefix("libsql://"))
-        .or_else(|| db_url.strip_prefix("https://"))
-        .unwrap_or(db_url);
-    format!("https://{}/v2/pipeline", rest.trim_end_matches('/'))
+    let (scheme, rest) = if let Some(r) = db_url.strip_prefix("http://") {
+        ("http", r)
+    } else {
+        let r = db_url
+            .strip_prefix("turso://")
+            .or_else(|| db_url.strip_prefix("libsql://"))
+            .or_else(|| db_url.strip_prefix("https://"))
+            .unwrap_or(db_url);
+        ("https", r)
+    };
+    format!("{scheme}://{}/v2/pipeline", rest.trim_end_matches('/'))
 }
 
 /// Where `cort memory configure` keeps its credentials.
@@ -276,7 +281,10 @@ mod tests {
         assert_eq!(pipeline_url("https://h.io/"), "https://h.io/v2/pipeline");
         assert_eq!(pipeline_url("https://h.io"), "https://h.io/v2/pipeline");
         // plain http is kept so a test can point at a local stub
-        assert_eq!(pipeline_url("http://127.0.0.1:9"), "http://127.0.0.1:9/v2/pipeline");
+        assert_eq!(
+            pipeline_url("http://127.0.0.1:9"),
+            "http://127.0.0.1:9/v2/pipeline"
+        );
     }
 
     #[test]
