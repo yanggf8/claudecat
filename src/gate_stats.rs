@@ -515,7 +515,7 @@ pub fn run_measured(kind: &str, command: &[String], proc_root: &Path) -> i32 {
     };
     let (toolchain, class) = task_class(command);
     let family_uid = (toolchain == "gradle")
-        .then(|| fs::metadata("/proc/self").map(|m| m.uid()).ok())
+        .then(crate::gate::own_uid_for_stats)
         .flatten();
     let acc = Arc::new(Mutex::new(Acc::default()));
     let stop = sampler(

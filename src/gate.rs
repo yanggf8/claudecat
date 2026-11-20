@@ -698,6 +698,35 @@ fn positive_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// Our own uid. Linux reads the real /proc/self (CLAUDECAT_PROC_ROOT may be a fixture); macOS has no
+/// /proc, so it asks the kernel.
+fn own_uid() -> io::Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(crate::host_macos::uid())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::metadata("/proc/self").map(|m| m.uid())
+    }
+}
+
+/// Prefix of the error `metrics` returns when load or memory cannot be read. The gate denies on it
+/// instead of allowing: with no figures it cannot tell an idle machine from one that is swapping.
+const UNREADABLE: &str = "machine resources unreadable";
+
+pub(crate) fn own_uid_for_stats() -> Option<u32> {
+    own_uid().ok()
+}
+
+fn unreadable(e: &io::Error) -> bool {
+    e.to_string().starts_with(UNREADABLE)
+}
+
+fn unreadable_reason(e: &io::Error) -> String {
+    format!("gate denied (resources) {e}; refusing heavy work until load and memory can be read")
+}
+
 fn positive_usize(key: &str) -> Option<usize> {
     env::var(key)
         .ok()
@@ -707,6 +736,10 @@ fn positive_usize(key: &str) -> Option<usize> {
 
 /// Logical CPUs listed in `cpuinfo`; None when the proc root has no such file.
 fn cpus(root: &Path) -> Option<usize> {
+    #[cfg(target_os = "macos")]
+    if crate::host_macos::native(root) {
+        return crate::host_macos::cpus();
+    }
     let n = fs::read_to_string(root.join("cpuinfo"))
         .ok()?
         .lines()
@@ -720,6 +753,10 @@ fn cpus(root: &Path) -> Option<usize> {
 }
 
 fn mem_total_mb(root: &Path) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    if crate::host_macos::native(root) {
+        return crate::host_macos::mem_total_mb();
+    }
     fs::read_to_string(root.join("meminfo"))
         .ok()?
         .lines()
@@ -799,7 +836,7 @@ fn config() -> io::Result<Config> {
         PathBuf::from(dir).join("claudecat/gate")
     } else {
         // Use the real proc mount, as snapshot() does: CLAUDECAT_PROC_ROOT may be a fixture.
-        let uid = fs::metadata("/proc/self")?.uid();
+        let uid = own_uid()?;
         PathBuf::from(format!("/tmp/claudecat-{uid}/gate"))
     };
     Ok(Config {
@@ -821,6 +858,14 @@ fn config() -> io::Result<Config> {
 }
 
 pub(crate) fn metrics(root: &Path) -> io::Result<(f64, u64, u64)> {
+    read_metrics(root).map_err(|e| io::Error::other(format!("{UNREADABLE}: {e}")))
+}
+
+fn read_metrics(root: &Path) -> io::Result<(f64, u64, u64)> {
+    #[cfg(target_os = "macos")]
+    if crate::host_macos::native(root) {
+        return crate::host_macos::metrics();
+    }
     let load = fs::read_to_string(root.join("loadavg"))?
         .split_whitespace()
         .next()
@@ -1095,6 +1140,10 @@ struct ProcEntry {
 }
 
 fn processes(root: &Path, own_uid: u32, read_environ: bool) -> io::Result<Vec<ProcEntry>> {
+    #[cfg(target_os = "macos")]
+    if crate::host_macos::native(root) {
+        return Ok(native_processes(own_uid, read_environ));
+    }
     let mut found = Vec::new();
     for item in fs::read_dir(root)? {
         let item = item?;
@@ -1155,6 +1204,43 @@ fn processes(root: &Path, own_uid: u32, read_environ: bool) -> io::Result<Vec<Pr
     Ok(found)
 }
 
+/// macOS: the same entries from libproc. Other users' argv, cwd and environment are not readable;
+/// those fields stay empty, as an unreadable /proc entry leaves them on Linux.
+#[cfg(target_os = "macos")]
+fn native_processes(own_uid: u32, read_environ: bool) -> Vec<ProcEntry> {
+    use crate::host_macos as mac;
+    let mut found: Vec<ProcEntry> = mac::all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let info = mac::proc_info(pid)?;
+            let (cmdline, env) = mac::args_env(pid).unwrap_or_default();
+            let environ = (read_environ
+                && info.uid == own_uid
+                && !env.is_empty()
+                && cmdline.first().is_some_and(|s| basename(s) == "cargo"))
+            .then_some(env);
+            let environ_target = environ.as_ref().and_then(|bytes| {
+                bytes.split(|b| *b == 0).find_map(|item| {
+                    item.strip_prefix(b"CARGO_TARGET_DIR=")
+                        .map(|v| String::from_utf8_lossy(v).into_owned())
+                })
+            });
+            Some(ProcEntry {
+                uid: info.uid,
+                pid,
+                name: info.name,
+                cmdline,
+                cwd: mac::cwd(pid).unwrap_or_else(|| "?".into()),
+                ppid: (info.ppid > 0).then_some(info.ppid),
+                environ_target,
+                environ_readable: environ.is_some(),
+            })
+        })
+        .collect();
+    found.sort_by_key(|p| p.pid);
+    found
+}
+
 /// Gradle only counts while a test or compile worker JVM is running: its main class is an argument
 /// ending in `.GradleWorkerMain`. The daemon is deliberately not counted -- it stays resident for
 /// hours after a build (three by default) and is idle most of that time, so counting it refused
@@ -1168,6 +1254,10 @@ fn is_gradle(p: &ProcEntry) -> bool {
 }
 
 fn cpu_sample(root: &Path, pid: u32) -> Option<(u64, u64)> {
+    #[cfg(target_os = "macos")]
+    if crate::host_macos::native(root) {
+        return crate::host_macos::cpu_sample(pid);
+    }
     let stat = fs::read_to_string(root.join(pid.to_string()).join("stat")).ok()?;
     let (_, tail) = stat.rsplit_once(") ")?;
     let fields: Vec<_> = tail.split_whitespace().collect();
@@ -1291,9 +1381,7 @@ fn snapshot_with_processes(
     // Our own uid, not the gate directory's owner: the directory can be shared with a group and
     // must not decide whose compilers count. CLAUDECAT_PROC_ROOT is the fixtures' fake proc, so
     // read the real /proc/self; fall back to the directory owner only if it is unreadable.
-    let uid = fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .or_else(|_| fs::metadata(&cfg.gate_dir).map(|m| m.uid()))?;
+    let uid = own_uid().or_else(|_| fs::metadata(&cfg.gate_dir).map(|m| m.uid()))?;
     let procs = processes(&cfg.proc_root, uid, read_environ)?;
     let (load_1m, swap_used_mb, mem_available_mb) = metrics(&cfg.proc_root)?;
     let compiler_locks = compiler_locks(cfg)?;
@@ -1848,6 +1936,10 @@ pub fn check(kind: Kind) -> i32 {
             }
             None => 0,
         },
+        Err(e) if unreadable(&e) => {
+            let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
+            75
+        }
         Err(e) => {
             warning(&e);
             0
@@ -1883,15 +1975,22 @@ pub fn hook() -> i32 {
     let Classification::Heavy(kind) = classification else {
         return 0;
     };
-    let Ok((cfg, mut snap, procs)) = config().and_then(|cfg| {
+    let (cfg, mut snap, procs) = match config().and_then(|cfg| {
         snapshot_with_processes(&cfg, true, kind.checks_compilers())
             .map(|(snap, procs)| (cfg, snap, procs))
-    }) else {
-        return 0;
+    }) {
+        Ok(t) => t,
+        Err(e) if unreadable(&e) => {
+            let _ = writeln!(
+                io::stdout(),
+                "{}",
+                unreadable_reason(&e).replace(['\n', '\r'], " ")
+            );
+            return 75;
+        }
+        Err(_) => return 0,
     };
-    let uid = fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .unwrap_or(u32::MAX);
+    let uid = own_uid().unwrap_or(u32::MAX);
     let duplicate_reason = identity
         .as_ref()
         .and_then(|id| duplicate(id, &snap, &procs, uid));
@@ -2048,6 +2147,10 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     let result = config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s)));
     let (cfg, snap) = match result {
         Ok(pair) => pair,
+        Err(e) if unreadable(&e) => {
+            let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
+            return 75;
+        }
         Err(e) => {
             warning(&e);
             return execute(command);

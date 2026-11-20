@@ -670,13 +670,21 @@ fn invalid_thresholds_use_defaults() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("psi_some_avg10=10.01/10.00"));
 }
 
+/// Without load or memory figures the gate cannot tell an idle machine from a swapping one, so it
+/// refuses (NUC #4380: a gate that allows on unreadable resources is no gate -- macOS had none).
 #[test]
-fn missing_proc_fails_open() {
+fn unreadable_resources_fail_closed() {
     let f = Fixture::new("0.5", 0);
     fs::remove_file(f.proc().join("loadavg")).expect("remove loadavg");
     let o = f.run(&["gate", "check"]);
-    assert_eq!(code(&o), 0);
-    assert!(String::from_utf8_lossy(&o.stderr).contains("warning"));
+    assert_eq!(code(&o), 75);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("gate denied (resources)") && err.contains("machine resources unreadable"),
+        "{err}"
+    );
+    let o = f.run(&["gate", "run", "--", "true"]);
+    assert_eq!(code(&o), 75, "run must not execute either");
 }
 
 #[test]
@@ -1092,7 +1100,8 @@ fn check_survives_closed_stderr_when_proc_unreadable() {
         .spawn()
         .expect("spawn");
     drop(child.stderr.take());
-    assert_eq!(child.wait().expect("wait").code(), Some(0));
+    // Unreadable resources deny (75); the point here is that a closed stderr does not crash it.
+    assert_eq!(child.wait().expect("wait").code(), Some(75));
 }
 
 #[test]
