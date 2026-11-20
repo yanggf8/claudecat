@@ -1839,6 +1839,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 }
 
 pub fn check(kind: Kind) -> i32 {
+    crate::fleet_cmd::maybe_push_background();
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
         Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, kind, &[]) {
             Some((reason, _)) => {
@@ -2043,6 +2044,7 @@ pub fn install(install: bool) -> i32 {
 }
 
 pub fn run(kind: Kind, command: &[String]) -> i32 {
+    crate::fleet_cmd::maybe_push_background();
     let result = config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s)));
     let (cfg, snap) = match result {
         Ok(pair) => pair,
@@ -2228,6 +2230,7 @@ pub fn own_uid() -> io::Result<u32> {
 }
 
 pub fn status(json: bool) -> i32 {
+    crate::fleet_cmd::maybe_push_background();
     let snap = match config().and_then(|cfg| snapshot(&cfg, true)) {
         Ok(s) => s,
         Err(e) => {

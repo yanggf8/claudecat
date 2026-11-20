@@ -103,8 +103,8 @@ pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
 
 /// Whether the last push (unix seconds, from the stamp file) is old enough to push again. A stamp
 /// in the future (clock change) counts as due, so it can never block pushing forever.
-pub fn due(_last: Option<u64>, _now: u64) -> bool {
-    false
+pub fn due(last: Option<u64>, now: u64) -> bool {
+    last.is_none_or(|t| t > now || now - t >= AUTOPUSH_INTERVAL_SECS)
 }
 
 /// The stamp file recording when this machine last started an automatic push.
@@ -114,15 +114,67 @@ pub fn stamp_path() -> PathBuf {
 
 /// Best-effort refresh of this machine's fleet row from `gate` and `status`: at most once per
 /// `AUTOPUSH_INTERVAL_SECS`, in a detached child so the caller never waits and never fails.
-pub fn maybe_push_background() {}
+pub fn maybe_push_background() {
+    // A fake /proc means a test fixture: the snapshot would describe the fixture, not the machine.
+    if std::env::var_os("CLAUDECAT_PROC_ROOT").is_some()
+        || std::env::var("CLAUDECAT_FLEET_AUTOPUSH").is_ok_and(|v| v == "0")
+    {
+        return;
+    }
+    let stamp = stamp_path();
+    let now = crate::gate::unix_now();
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    // No config means this machine is not part of the fleet: do not even fork.
+    if !due(last, now) || config().is_err() {
+        return;
+    }
+    // Stamp before spawning, so a failing push is retried a minute later, not on every command.
+    let _ = crate::data_dir::write_atomic(&stamp, &format!("{now}\n"));
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let spawned = std::process::Command::new(exe)
+        .args([
+            "fleet",
+            "push",
+            "--timeout-secs",
+            &AUTOPUSH_TIMEOUT_SECS.to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        // Reap it without making the caller wait.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
 
 /// The crontab line that keeps this machine's row fresh; printed, never installed.
-pub fn cron_line(_exe: &std::path::Path) -> String {
-    String::new()
+pub fn cron_line(exe: &std::path::Path) -> String {
+    let exe = exe.display().to_string();
+    let exe = if exe.contains(char::is_whitespace) {
+        format!("'{exe}'")
+    } else {
+        exe
+    };
+    format!("* * * * * {exe} fleet push >/dev/null 2>&1")
 }
 
 pub fn install_cron() -> i32 {
-    0
+    match std::env::current_exe().and_then(std::fs::canonicalize) {
+        Ok(exe) => {
+            println!("{}", cron_line(&exe));
+            0
+        }
+        Err(e) => fail(&format!(
+            "fleet install-cron: cannot find this executable: {e}"
+        )),
+    }
 }
 
 #[cfg(test)]
