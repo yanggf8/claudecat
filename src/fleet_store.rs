@@ -36,36 +36,105 @@ pub struct UreqHttp;
 impl Http for UreqHttp {
     fn post(
         &self,
-        _url: &str,
-        _token: &str,
-        _body: &str,
-        _timeout: Duration,
+        url: &str,
+        token: &str,
+        body: &str,
+        timeout: Duration,
     ) -> Result<String, String> {
-        Err("todo".into())
+        let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+        match agent
+            .post(url)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json")
+            .send_string(body)
+        {
+            Ok(resp) => resp.into_string().map_err(|e| format!("reading response: {e}")),
+            Err(ureq::Error::Status(401 | 403, _)) => {
+                Err("Turso rejected the token (HTTP 401/403); re-run `cort memory configure --url URL --token-stdin` with a valid token".into())
+            }
+            Err(ureq::Error::Status(code, _)) => Err(format!("Turso answered HTTP {code}")),
+            // The transport error text names the host, never a header.
+            Err(ureq::Error::Transport(t)) => Err(format!("cannot reach Turso: {t}")),
+        }
     }
 }
 
 /// `turso://h`, `libsql://h` or `https://h[/]` -> `https://h/v2/pipeline`.
-pub fn pipeline_url(_db_url: &str) -> String {
-    String::new()
+pub fn pipeline_url(db_url: &str) -> String {
+    let rest = db_url
+        .strip_prefix("turso://")
+        .or_else(|| db_url.strip_prefix("libsql://"))
+        .or_else(|| db_url.strip_prefix("https://"))
+        .unwrap_or(db_url);
+    format!("https://{}/v2/pipeline", rest.trim_end_matches('/'))
 }
 
 /// Where `cort memory configure` keeps its credentials.
-pub fn cort_config_path(_env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    None
+pub fn cort_config_path(env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let set = |k: &str| env(k).filter(|v| !v.is_empty());
+    let dir = if let Some(d) = set("CORT_MEMORY_DIR") {
+        PathBuf::from(d)
+    } else if let Some(x) = set("XDG_DATA_HOME") {
+        PathBuf::from(x).join("cortexyoung/memory")
+    } else {
+        PathBuf::from(set("HOME")?).join(".local/share/cortexyoung/memory")
+    };
+    Some(dir.join("turso-memory.json"))
 }
 
 /// Environment overrides first, then cort's file.
-pub fn resolve_config(_env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String> {
-    Err(String::new())
+pub fn resolve_config(env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String> {
+    let set = |k: &str| env(k).filter(|v| !v.is_empty());
+    match (set("CLAUDECAT_FLEET_URL"), set("CLAUDECAT_FLEET_TOKEN")) {
+        (Some(url), Some(token)) => return Ok(Config { url, token }),
+        (Some(_), None) => return Err("fleet: CLAUDECAT_FLEET_URL is set but CLAUDECAT_FLEET_TOKEN is not; set both or unset the URL".into()),
+        (None, Some(_)) => return Err("fleet: CLAUDECAT_FLEET_TOKEN is set but CLAUDECAT_FLEET_URL is not; set both or unset the token".into()),
+        (None, None) => {}
+    }
+    let path = cort_config_path(env).ok_or_else(|| NO_CONFIG.to_owned())?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(NO_CONFIG.into()),
+        Err(e) => return Err(format!("fleet: cannot read {}: {e}", path.display())),
+    };
+    let v: Value = serde_json::from_str(&text).map_err(|_| {
+        format!(
+            "fleet: {} is not valid JSON; re-run `cort memory configure --url URL --token-stdin`",
+            path.display()
+        )
+    })?;
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    match (field("url"), field("token")) {
+        (Some(url), Some(token)) => Ok(Config { url, token }),
+        _ => Err(format!(
+            "fleet: {} lacks url or token; re-run `cort memory configure --url URL --token-stdin`",
+            path.display()
+        )),
+    }
 }
 
-pub fn upsert_request(_host: &str, _updated_at: &str, _payload: &str) -> Value {
-    Value::Null
+fn text_arg(v: &str) -> Value {
+    json!({"type": "text", "value": v})
+}
+
+pub fn upsert_request(host: &str, updated_at: &str, payload: &str) -> Value {
+    json!({"type": "execute", "stmt": {
+        "sql": UPSERT_SQL,
+        "args": [text_arg(host), text_arg(updated_at), text_arg(payload)],
+    }})
+}
+
+fn execute(sql: &str) -> Value {
+    json!({"type": "execute", "stmt": {"sql": sql}})
 }
 
 pub fn select_request() -> Value {
-    Value::Null
+    execute(SELECT_SQL)
 }
 
 pub struct Row {
@@ -81,12 +150,70 @@ pub struct Store<'a, H: Http> {
 }
 
 impl<H: Http> Store<'_, H> {
-    pub fn push(&self, _snap: &FleetSnapshot) -> Result<(), String> {
-        Err("todo".into())
+    /// Send `statements` (plus a close) in one pipeline call; returns one result per statement.
+    fn pipeline(&self, statements: Vec<Value>) -> Result<Vec<Value>, String> {
+        let n = statements.len();
+        let mut requests = statements;
+        requests.push(json!({"type": "close"}));
+        let body = json!({"requests": requests}).to_string();
+        let reply = self.http.post(
+            &pipeline_url(&self.config.url),
+            &self.config.token,
+            &body,
+            self.timeout,
+        )?;
+        let reply: Value = serde_json::from_str(&reply)
+            .map_err(|_| "Turso sent a reply that is not JSON".to_owned())?;
+        let results = reply["results"].as_array().cloned().unwrap_or_default();
+        let mut out = Vec::with_capacity(n);
+        for result in results.into_iter().take(n) {
+            if result["type"] == "error" {
+                let msg = result["error"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown error");
+                return Err(format!("Turso statement failed: {msg}"));
+            }
+            out.push(result);
+        }
+        if out.len() < n {
+            return Err("Turso reply is missing statement results".into());
+        }
+        Ok(out)
+    }
+
+    pub fn push(&self, snap: &FleetSnapshot) -> Result<(), String> {
+        let payload = serde_json::to_string(snap).map_err(|e| e.to_string())?;
+        self.pipeline(vec![
+            execute(CREATE_SQL),
+            upsert_request(&snap.host, &snap.collected_at, &payload),
+        ])
+        .map(|_| ())
     }
 
     pub fn list(&self) -> Result<Vec<Row>, String> {
-        Err("todo".into())
+        let results = self.pipeline(vec![execute(CREATE_SQL), select_request()])?;
+        let rows = results[1]["response"]["result"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let cell = |row: &Value, i: usize| row[i]["value"].as_str().map(str::to_owned);
+        let mut out = Vec::new();
+        for row in &rows {
+            let (Some(host), Some(updated_at), Some(payload)) =
+                (cell(row, 0), cell(row, 1), cell(row, 2))
+            else {
+                continue;
+            };
+            // A row this version cannot read (older or newer schema) is skipped, not fatal.
+            if let Ok(snapshot) = serde_json::from_str::<FleetSnapshot>(&payload) {
+                out.push(Row {
+                    host,
+                    updated_at,
+                    snapshot,
+                });
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -203,6 +330,7 @@ mod tests {
     fn list_parses_rows_into_snapshots() {
         let payload = serde_json::to_string(&snap("mgpu")).unwrap();
         let m = mock(json!({"results":[
+            {"type":"ok","response":{"type":"execute","result":{"cols":[],"rows":[]}}},
             {"type":"ok","response":{"type":"execute","result":{
                 "cols":[{"name":"host"},{"name":"updated_at"},{"name":"payload"}],
                 "rows":[[
