@@ -161,6 +161,8 @@ enum FleetAction {
         #[arg(long, default_value_t = claudecat::fleet_cmd::DEFAULT_TIMEOUT_SECS, hide = true)]
         timeout_secs: u64,
     },
+    /// Print (do not install) the crontab line that keeps this machine's row fresh every minute
+    InstallCron,
     /// Hosts ordered by fitness for a new heavy job (fresh, free slot, most memory, lowest load)
     Pick {
         /// gradle: the build/test slots; other: the wrapper/script pool
@@ -340,6 +342,7 @@ fn main() {
         Commands::Fleet { action, json } => std::process::exit(match action {
             None => claudecat::fleet_cmd::show(json),
             Some(FleetAction::Push { timeout_secs }) => claudecat::fleet_cmd::push(timeout_secs),
+            Some(FleetAction::InstallCron) => claudecat::fleet_cmd::install_cron(),
             Some(FleetAction::Pick { kind, json }) => claudecat::fleet_cmd::pick_cmd(kind, json),
         }),
         Commands::Scan {

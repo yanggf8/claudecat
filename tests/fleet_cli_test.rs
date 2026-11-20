@@ -258,3 +258,126 @@ fn pick_with_no_fit_host_exits_1_with_a_reason() {
         "fleet pick: no eligible host (every host is stale, unknown or has no free slot)"
     );
 }
+
+#[test]
+fn install_cron_prints_the_line_for_this_binary_and_installs_nothing() {
+    let s = stub(vec![], 200);
+    let o = run(&s, &["fleet", "install-cron"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_claudecat")).unwrap();
+    assert_eq!(
+        text(&o.stdout).trim(),
+        format!("* * * * * {} fleet push >/dev/null 2>&1", exe.display())
+    );
+    assert!(s.requests.lock().unwrap().is_empty());
+}
+
+fn wait_for(s: &Stub, n: usize) -> usize {
+    for _ in 0..50 {
+        if s.requests.lock().unwrap().len() >= n {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    s.requests.lock().unwrap().len()
+}
+
+/// Run `claudecat <args>` on the real /proc (no fixture marker), as an agent would.
+fn run_live(s: &Stub, data: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_claudecat"))
+        .args(args)
+        .env("CLAUDECAT_FLEET_URL", &s.url)
+        .env("CLAUDECAT_FLEET_TOKEN", "TOPSECRET-TOKEN")
+        .env("CLAUDECAT_DATA_DIR", data)
+        .env("CLAUDECAT_GATE_DIR", data.join("gate"))
+        .env("CLAUDECAT_MIN_AVAILABLE_MB", "1")
+        .env("CLAUDECAT_MAX_LOAD", "100000")
+        .env("CLAUDECAT_MAX_MEM_PRESSURE", "100")
+        .env_remove("CLAUDECAT_PROC_ROOT")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn status_pushes_in_the_background_at_most_once_a_minute() {
+    let s = stub(vec![], 200);
+    let data = tempfile::tempdir().unwrap();
+    let first = run_live(&s, data.path(), &["status"]);
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    assert_eq!(wait_for(&s, 1), 1, "first status must push");
+    run_live(&s, data.path(), &["status"]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(
+        s.requests.lock().unwrap().len(),
+        1,
+        "second call inside 60 s must not push"
+    );
+    // age the stamp past the interval: the next call pushes again
+    std::fs::write(data.path().join("fleet-last-push"), "1\n").unwrap();
+    run_live(&s, data.path(), &["status"]);
+    assert_eq!(wait_for(&s, 2), 2);
+}
+
+#[test]
+fn gate_run_and_check_also_trigger_the_push() {
+    let s = stub(vec![], 200);
+    let data = tempfile::tempdir().unwrap();
+    let o = run_live(
+        &s,
+        data.path(),
+        &["gate", "run", "--kind", "other", "--", "true"],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert_eq!(wait_for(&s, 1), 1);
+    std::fs::write(data.path().join("fleet-last-push"), "1\n").unwrap();
+    let o = run_live(&s, data.path(), &["gate", "check", "--kind", "other"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert_eq!(wait_for(&s, 2), 2);
+}
+
+#[test]
+fn an_unreachable_fleet_never_fails_or_delays_the_gate() {
+    let dead = Stub {
+        url: "http://127.0.0.1:9".into(),
+        requests: Default::default(),
+    };
+    let data = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let o = run_live(
+        &dead,
+        data.path(),
+        &["gate", "run", "--kind", "other", "--", "true"],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!text(&o.stderr).contains("fleet"), "{}", text(&o.stderr));
+}
+
+#[test]
+fn fixture_proc_root_never_pushes() {
+    let s = stub(vec![], 200);
+    let data = tempfile::tempdir().unwrap();
+    let proc_dir = data.path().join("proc");
+    std::fs::create_dir(&proc_dir).unwrap();
+    std::fs::write(proc_dir.join("loadavg"), "0.1 0 0 1/1 1\n").unwrap();
+    std::fs::write(
+        proc_dir.join("meminfo"),
+        "MemAvailable: 4096000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+    )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_claudecat"))
+        .args(["status"])
+        .env("CLAUDECAT_FLEET_URL", &s.url)
+        .env("CLAUDECAT_FLEET_TOKEN", "T")
+        .env("CLAUDECAT_DATA_DIR", data.path())
+        .env("CLAUDECAT_GATE_DIR", data.path().join("gate"))
+        .env("CLAUDECAT_PROC_ROOT", &proc_dir)
+        .output()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(s.requests.lock().unwrap().is_empty());
+}

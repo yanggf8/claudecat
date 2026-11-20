@@ -2,7 +2,13 @@
 use crate::fleet_store::{resolve_config, Config, Store, UreqHttp};
 use crate::fleet_view::{pick, render_table, summarize, Pool, Summary};
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// Gate and status push at most this often (seconds).
+pub const AUTOPUSH_INTERVAL_SECS: u64 = 60;
+/// HTTP timeout for the automatic background push.
+pub const AUTOPUSH_TIMEOUT_SECS: u64 = 2;
 
 /// Default HTTP timeout for an explicit `fleet` command.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
@@ -93,4 +99,53 @@ pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
         }
     }
     0
+}
+
+/// Whether the last push (unix seconds, from the stamp file) is old enough to push again. A stamp
+/// in the future (clock change) counts as due, so it can never block pushing forever.
+pub fn due(_last: Option<u64>, _now: u64) -> bool {
+    false
+}
+
+/// The stamp file recording when this machine last started an automatic push.
+pub fn stamp_path() -> PathBuf {
+    crate::data_dir::data_dir().join("fleet-last-push")
+}
+
+/// Best-effort refresh of this machine's fleet row from `gate` and `status`: at most once per
+/// `AUTOPUSH_INTERVAL_SECS`, in a detached child so the caller never waits and never fails.
+pub fn maybe_push_background() {}
+
+/// The crontab line that keeps this machine's row fresh; printed, never installed.
+pub fn cron_line(_exe: &std::path::Path) -> String {
+    String::new()
+}
+
+pub fn install_cron() -> i32 {
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn due_when_never_pushed_or_old_enough() {
+        assert!(due(None, 100));
+        assert!(due(Some(40), 100)); // exactly 60 s ago
+        assert!(!due(Some(41), 100)); // 59 s ago
+    }
+
+    #[test]
+    fn a_stamp_in_the_future_is_due() {
+        assert!(due(Some(200), 100));
+    }
+
+    #[test]
+    fn cron_line_is_every_minute_quiet_and_absolute() {
+        assert_eq!(
+            cron_line(std::path::Path::new("/opt/bin/claudecat")),
+            "* * * * * /opt/bin/claudecat fleet push >/dev/null 2>&1"
+        );
+    }
 }
