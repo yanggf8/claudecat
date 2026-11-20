@@ -3,6 +3,7 @@ pub mod cort;
 pub mod data_dir;
 pub mod dates;
 pub mod explore;
+pub mod fleet;
 pub mod gate;
 pub mod gate_stats;
 pub mod guardrails;
