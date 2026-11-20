@@ -275,6 +275,8 @@ mod tests {
         assert_eq!(pipeline_url("libsql://h.io"), "https://h.io/v2/pipeline");
         assert_eq!(pipeline_url("https://h.io/"), "https://h.io/v2/pipeline");
         assert_eq!(pipeline_url("https://h.io"), "https://h.io/v2/pipeline");
+        // plain http is kept so a test can point at a local stub
+        assert_eq!(pipeline_url("http://127.0.0.1:9"), "http://127.0.0.1:9/v2/pipeline");
     }
 
     #[test]
