@@ -7,6 +7,8 @@ pub mod gate;
 pub mod gate_stats;
 pub mod guardrails;
 pub mod host;
+#[cfg(target_os = "macos")]
+pub mod host_macos;
 pub mod manifest;
 pub mod markdown;
 pub mod memory_eval;
