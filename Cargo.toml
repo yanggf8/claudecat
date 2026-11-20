@@ -26,6 +26,7 @@ tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.11.0"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

@@ -37,6 +37,13 @@ enum Commands {
         #[command(subcommand)]
         action: GateAction,
     },
+    /// Every machine's resource and Claude session report from Turso (`fleet push` writes this host)
+    Fleet {
+        #[command(subcommand)]
+        action: Option<FleetAction>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show machine resources, gate slots, compilers, and orphan brokers
     Status {
         #[arg(long)]
@@ -143,6 +150,26 @@ enum Commands {
         /// 地圖樣式：auto(依規模) | mini(迷你) | full(導航)
         #[arg(long, value_enum, default_value = "auto")]
         map: MapArg,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetAction {
+    /// Collect this machine's snapshot and upsert its row in Turso
+    Push {
+        /// HTTP timeout in seconds
+        #[arg(long, default_value_t = claudecat::fleet_cmd::DEFAULT_TIMEOUT_SECS, hide = true)]
+        timeout_secs: u64,
+    },
+    /// Print (do not install) the crontab line that keeps this machine's row fresh every minute
+    InstallCron,
+    /// Hosts ordered by fitness for a new heavy job (fresh, free slot, most memory, lowest load)
+    Pick {
+        /// gradle: the build/test slots; other: the wrapper/script pool
+        #[arg(long, value_enum, default_value = "gradle")]
+        kind: claudecat::fleet_view::Pool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -312,6 +339,12 @@ fn main() {
             GateAction::Uninstall => gate::install(false),
         }),
         Commands::Status { json } => std::process::exit(gate::status(json)),
+        Commands::Fleet { action, json } => std::process::exit(match action {
+            None => claudecat::fleet_cmd::show(json),
+            Some(FleetAction::Push { timeout_secs }) => claudecat::fleet_cmd::push(timeout_secs),
+            Some(FleetAction::InstallCron) => claudecat::fleet_cmd::install_cron(),
+            Some(FleetAction::Pick { kind, json }) => claudecat::fleet_cmd::pick_cmd(kind, json),
+        }),
         Commands::Scan {
             root,
             format,

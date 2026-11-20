@@ -700,7 +700,7 @@ fn positive_u64(key: &str, default: u64) -> u64 {
 
 /// Our own uid. Linux reads the real /proc/self (CLAUDECAT_PROC_ROOT may be a fixture); macOS has no
 /// /proc, so it asks the kernel.
-fn own_uid() -> io::Result<u32> {
+pub fn own_uid() -> io::Result<u32> {
     #[cfg(target_os = "macos")]
     {
         Ok(crate::host_macos::uid())
@@ -1627,7 +1627,7 @@ struct GateLogRow {
     ctx: crate::gate_stats::DenyContext,
 }
 
-pub(crate) fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1927,6 +1927,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 }
 
 pub fn check(kind: Kind) -> i32 {
+    crate::fleet_cmd::maybe_push_background();
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
         Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, kind, &[]) {
             Some((reason, _)) => {
@@ -2142,6 +2143,7 @@ pub fn install(install: bool) -> i32 {
 }
 
 pub fn run(kind: Kind, command: &[String]) -> i32 {
+    crate::fleet_cmd::maybe_push_background();
     let result = config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s)));
     let (cfg, snap) = match result {
         Ok(pair) => pair,
@@ -2319,7 +2321,14 @@ fn execute(command: &[String]) -> i32 {
     }
 }
 
+/// The `status --json` document as a value, for the fleet snapshot.
+pub fn status_value() -> io::Result<serde_json::Value> {
+    let snap = config().and_then(|cfg| snapshot(&cfg, true))?;
+    serde_json::to_value(&snap).map_err(io::Error::other)
+}
+
 pub fn status(json: bool) -> i32 {
+    crate::fleet_cmd::maybe_push_background();
     let snap = match config().and_then(|cfg| snapshot(&cfg, true)) {
         Ok(s) => s,
         Err(e) => {
