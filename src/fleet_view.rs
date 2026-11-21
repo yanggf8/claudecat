@@ -10,6 +10,7 @@ pub const STALE_SECS: u64 = 180;
 pub enum State {
     Ok,
     Stale,
+    Idle,
     Unknown,
 }
 
@@ -47,6 +48,7 @@ pub struct Pick {
     pub load_1m: f64,
     pub max_load: f64,
     pub load_ratio: f64,
+    pub idle: bool,
 }
 
 /// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SSZ`; None for anything else.
@@ -152,6 +154,7 @@ pub fn render_table(rows: &[Summary]) -> String {
             match r.state {
                 State::Ok => "ok",
                 State::Stale => "STALE",
+                State::Idle => "IDLE",
                 State::Unknown => "UNKNOWN",
             }
             .to_owned(),
@@ -219,6 +222,7 @@ pub fn pick(rows: &[Summary], pool: Pool) -> Vec<Pick> {
                 } else {
                     f64::MAX
                 },
+                idle: false,
             })
         })
         .collect();
@@ -320,15 +324,29 @@ mod tests {
     }
 
     #[test]
-    fn stale_after_180_seconds_not_at_180() {
+    fn idle_after_180_seconds_not_at_180() {
         assert_eq!(
             summarize(&row("a", 180, Ok(status(1, 0.0, 1.0, 0, 1))), NOW).state,
             State::Ok
         );
         assert_eq!(
             summarize(&row("a", 181, Ok(status(1, 0.0, 1.0, 0, 1))), NOW).state,
-            State::Stale
+            State::Idle
         );
+    }
+
+    #[test]
+    fn idle_row_has_no_work_but_keeps_totals_and_last_resources() {
+        let s = summarize(&row("mgpu", 500, Ok(status(900, 2.0, 8.0, 3, 3))), NOW);
+        assert_eq!(s.state, State::Idle);
+        assert_eq!((s.slots_used, s.slots_total), (0, 3));
+        assert_eq!((s.other_slots_used, s.other_slots_total), (0, 2));
+        assert_eq!(s.compilers, 0);
+        assert_eq!(s.sessions_busy, 0);
+        assert_eq!(s.mem_available_mb, Some(900));
+        assert_eq!(s.load_1m, Some(2.0));
+        assert_eq!(s.max_load, Some(8.0));
+        assert_eq!(s.age_secs, 500);
     }
 
     #[test]
@@ -340,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_wins_over_stale() {
+    fn unknown_wins_over_idle() {
         assert_eq!(
             summarize(&row("mac", 999, Err("x".into())), NOW).state,
             State::Unknown
@@ -359,7 +377,7 @@ mod tests {
             .lines()
             .map(|l| l.split_whitespace().collect())
             .collect();
-        assert_eq!(lines.len(), 4, "{out}");
+        assert_eq!(lines.len(), 5, "{out}");
         assert_eq!(
             lines[0],
             [
@@ -379,12 +397,22 @@ mod tests {
         );
         assert_eq!(
             lines[2],
-            ["mgpu", "STALE", "6m", "3/3", "900", "2.00/8.00", "1/3", "1"]
+            ["mgpu", "IDLE", "6m", "0/3", "900*", "2.00/8.00*", "0/3", "0"]
         );
         assert_eq!(
             lines[3],
             ["mac", "UNKNOWN", "5s", "-", "-", "-", "1/3", "-"]
         );
+        assert!(lines[4][0].starts_with('*'), "{out}");
+        assert!(out.contains("AGE"), "{out}");
+    }
+
+    #[test]
+    fn table_has_no_footnote_without_idle_rows() {
+        let rows = vec![summarize(&row("nuc", 12, Ok(status(5120, 0.52, 6.0, 1, 3))), NOW)];
+        let out = render_table(&rows);
+        assert_eq!(out.lines().count(), 2, "{out}");
+        assert!(!out.contains('*'), "{out}");
     }
 
     fn pick_rows() -> Vec<Summary> {
@@ -393,7 +421,8 @@ mod tests {
             summarize(&row("big", 5, Ok(status(9000, 3.0, 6.0, 1, 3))), NOW),
             summarize(&row("bigquiet", 5, Ok(status(9000, 0.5, 6.0, 1, 3))), NOW),
             summarize(&row("full", 5, Ok(status(20000, 0.0, 6.0, 3, 3))), NOW),
-            summarize(&row("stale", 500, Ok(status(30000, 0.0, 6.0, 0, 3))), NOW),
+            summarize(&row("idle", 500, Ok(status(30000, 0.0, 6.0, 3, 3))), NOW),
+            summarize(&row("unkold", 500, Err("x".into())), NOW),
             summarize(&row("unk", 5, Err("x".into())), NOW),
         ]
     }
@@ -404,7 +433,7 @@ mod tests {
             .into_iter()
             .map(|p| p.host)
             .collect();
-        assert_eq!(order, ["bigquiet", "big", "small"]);
+        assert_eq!(order, ["idle", "bigquiet", "big", "small"]);
     }
 
     #[test]
@@ -416,12 +445,21 @@ mod tests {
     }
 
     #[test]
+    fn pick_flags_idle_hosts_so_callers_know_resources_are_old() {
+        let picks = pick(&pick_rows(), Pool::Gradle);
+        assert!(picks.iter().find(|p| p.host == "idle").unwrap().idle);
+        assert!(!picks.iter().find(|p| p.host == "small").unwrap().idle);
+        // never an unreadable host, fresh or old
+        assert!(picks.iter().all(|p| p.host != "unk" && p.host != "unkold"));
+    }
+
+    #[test]
     fn pick_other_pool_uses_other_slots() {
         // Every fixture has other_slots 1/2 used, so each fresh readable host has one free.
         let hosts: Vec<_> = pick(&pick_rows(), Pool::Other)
             .into_iter()
             .map(|p| p.host)
             .collect();
-        assert_eq!(hosts, ["full", "bigquiet", "big", "small"]);
+        assert_eq!(hosts, ["idle", "full", "bigquiet", "big", "small"]);
     }
 }

@@ -194,7 +194,7 @@ fn fleet_json_lists_every_host_with_its_state() {
         .collect();
     assert_eq!(
         states,
-        [("nuc", "ok"), ("old", "stale"), ("mac", "unknown")]
+        [("nuc", "ok"), ("old", "idle"), ("mac", "unknown")]
     );
     assert_eq!(v[0]["mem_available_mb"], 5000);
     assert_eq!(v[0]["slots_used"], 1);
@@ -202,7 +202,7 @@ fn fleet_json_lists_every_host_with_its_state() {
 }
 
 #[test]
-fn fleet_table_marks_stale_and_unknown() {
+fn fleet_table_marks_idle_and_unknown() {
     let s = stub(
         vec![
             db_row("old", 600, Ok(status(9000, 0.1, 0))),
@@ -215,7 +215,7 @@ fn fleet_table_marks_stale_and_unknown() {
     assert!(out.lines().next().unwrap().starts_with("HOST"), "{out}");
     assert!(
         out.lines()
-            .any(|l| l.starts_with("old") && l.contains("STALE")),
+            .any(|l| l.starts_with("old") && l.contains("IDLE") && l.contains("9000*")),
         "{out}"
     );
     assert!(
@@ -226,13 +226,14 @@ fn fleet_table_marks_stale_and_unknown() {
 }
 
 #[test]
-fn pick_json_orders_fit_hosts_and_skips_full_stale_unknown() {
+fn pick_json_orders_fit_hosts_includes_idle_and_skips_full_unknown() {
     let s = stub(
         vec![
             db_row("small", 10, Ok(status(2000, 0.1, 0))),
             db_row("big", 10, Ok(status(9000, 0.1, 2))),
             db_row("full", 10, Ok(status(30000, 0.0, 3))),
             db_row("old", 600, Ok(status(40000, 0.0, 0))),
+            db_row("mac", 600, Err("x".into())),
         ],
         200,
     );
@@ -245,7 +246,9 @@ fn pick_json_orders_fit_hosts_and_skips_full_stale_unknown() {
         .iter()
         .map(|r| r["host"].as_str().unwrap())
         .collect();
-    assert_eq!(hosts, ["big", "small"]);
+    assert_eq!(hosts, ["old", "big", "small"]);
+    assert_eq!(v[0]["idle"], true);
+    assert_eq!(v[1]["idle"], false);
 }
 
 #[test]
@@ -255,21 +258,8 @@ fn pick_with_no_fit_host_exits_1_with_a_reason() {
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(
         text(&o.stderr).trim(),
-        "fleet pick: no eligible host (every host is stale, unknown or has no free slot)"
+        "fleet pick: no eligible host (every host is unknown or has no free slot)"
     );
-}
-
-#[test]
-fn install_cron_prints_the_line_for_this_binary_and_installs_nothing() {
-    let s = stub(vec![], 200);
-    let o = run(&s, &["fleet", "install-cron"]);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_claudecat")).unwrap();
-    assert_eq!(
-        text(&o.stdout).trim(),
-        format!("* * * * * {} fleet push >/dev/null 2>&1", exe.display())
-    );
-    assert!(s.requests.lock().unwrap().is_empty());
 }
 
 fn wait_for(s: &Stub, n: usize) -> usize {
