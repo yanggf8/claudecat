@@ -192,10 +192,7 @@ fn fleet_json_lists_every_host_with_its_state() {
         .iter()
         .map(|r| (r["host"].as_str().unwrap(), r["state"].as_str().unwrap()))
         .collect();
-    assert_eq!(
-        states,
-        [("nuc", "ok"), ("old", "idle"), ("mac", "unknown")]
-    );
+    assert_eq!(states, [("nuc", "ok"), ("old", "idle"), ("mac", "unknown")]);
     assert_eq!(v[0]["mem_available_mb"], 5000);
     assert_eq!(v[0]["slots_used"], 1);
     assert_eq!(v[0]["slots_total"], 3);

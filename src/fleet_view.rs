@@ -2,14 +2,14 @@
 use crate::fleet_store::Row;
 use serde::Serialize;
 
-/// A row older than this (seconds) is reported STALE and never picked.
-pub const STALE_SECS: u64 = 180;
+/// A row older than this (seconds) is reported IDLE: machines only report while running gates, so
+/// silence means no work. Its resources are the last reported values.
+pub const IDLE_SECS: u64 = 180;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
     Ok,
-    Stale,
     Idle,
     Unknown,
 }
@@ -105,15 +105,21 @@ pub fn summarize(row: &Row, now: u64) -> Summary {
     let status = snap.status.as_ref();
     let state = if status.is_none() {
         State::Unknown
-    } else if age_secs > STALE_SECS {
-        State::Stale
+    } else if age_secs > IDLE_SECS {
+        State::Idle
     } else {
         State::Ok
     };
     let null = serde_json::Value::Null;
     let st = status.unwrap_or(&null);
-    let (slots_used, slots_total) = slot_counts(st, "slots");
-    let (other_slots_used, other_slots_total) = slot_counts(st, "other_slots");
+    let idle = state == State::Idle;
+    // Idle: no report means no work, so nothing is in use; totals stay as last reported.
+    let (mut slots_used, slots_total) = slot_counts(st, "slots");
+    let (mut other_slots_used, other_slots_total) = slot_counts(st, "other_slots");
+    if idle {
+        slots_used = 0;
+        other_slots_used = 0;
+    }
     Summary {
         host: row.host.clone(),
         os: snap.os.clone(),
@@ -127,10 +133,18 @@ pub fn summarize(row: &Row, now: u64) -> Summary {
         mem_available_mb: st["mem_available_mb"].as_u64(),
         load_1m: st["load_1m"].as_f64(),
         max_load: st["limits"]["max_load"].as_f64(),
-        sessions_busy: snap.sessions.iter().filter(|s| s.cpu_percent > 5.0).count(),
+        sessions_busy: if idle {
+            0
+        } else {
+            snap.sessions.iter().filter(|s| s.cpu_percent > 5.0).count()
+        },
         sessions_total: snap.sessions.len(),
         sessions_unsupported: snap.sessions_unsupported,
-        compilers: st["compiling"].as_array().map_or(0, Vec::len),
+        compilers: if idle {
+            0
+        } else {
+            st["compiling"].as_array().map_or(0, Vec::len)
+        },
     }
 }
 
@@ -149,11 +163,12 @@ pub fn render_table(rows: &[Summary]) -> String {
     let dash = || "-".to_owned();
     for r in rows {
         let readable = r.state != State::Unknown;
+        // Idle rows show the last reported memory/load: mark them as old values.
+        let old = if r.state == State::Idle { "*" } else { "" };
         cells.push([
             r.host.clone(),
             match r.state {
                 State::Ok => "ok",
-                State::Stale => "STALE",
                 State::Idle => "IDLE",
                 State::Unknown => "UNKNOWN",
             }
@@ -164,9 +179,10 @@ pub fn render_table(rows: &[Summary]) -> String {
             } else {
                 dash()
             },
-            r.mem_available_mb.map_or_else(dash, |m| m.to_string()),
+            r.mem_available_mb
+                .map_or_else(dash, |m| format!("{m}{old}")),
             match (r.load_1m, r.max_load) {
-                (Some(l), Some(m)) => format!("{l:.2}/{m:.2}"),
+                (Some(l), Some(m)) => format!("{l:.2}/{m:.2}{old}"),
                 _ => dash(),
             },
             if r.sessions_unsupported {
@@ -184,7 +200,8 @@ pub fn render_table(rows: &[Summary]) -> String {
     let widths: Vec<usize> = (0..8)
         .map(|i| cells.iter().map(|c| c[i].len()).max().unwrap_or(0))
         .collect();
-    cells
+    let footnote = rows.iter().any(|r| r.state == State::Idle);
+    let mut out = cells
         .iter()
         .map(|c| {
             let line: Vec<String> = c
@@ -196,15 +213,19 @@ pub fn render_table(rows: &[Summary]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + "\n"
+        + "\n";
+    if footnote {
+        out.push_str("* last reported values (see AGE); IDLE = no recent report, no work\n");
+    }
+    out
 }
 
-/// Hosts fit for a new heavy job, best first: fresh, readable, a free slot in the pool, most
+/// Hosts fit for a new heavy job, best first: readable (silent ones count as idle), a free slot in the pool, most
 /// MemAvailable, then lowest load ratio.
 pub fn pick(rows: &[Summary], pool: Pool) -> Vec<Pick> {
     let mut fit: Vec<Pick> = rows
         .iter()
-        .filter(|r| r.state == State::Ok)
+        .filter(|r| matches!(r.state, State::Ok | State::Idle))
         .filter_map(|r| {
             let (used, total) = match pool {
                 Pool::Gradle => (r.slots_used, r.slots_total),
@@ -222,7 +243,7 @@ pub fn pick(rows: &[Summary], pool: Pool) -> Vec<Pick> {
                 } else {
                     f64::MAX
                 },
-                idle: false,
+                idle: r.state == State::Idle,
             })
         })
         .collect();
@@ -397,7 +418,16 @@ mod tests {
         );
         assert_eq!(
             lines[2],
-            ["mgpu", "IDLE", "6m", "0/3", "900*", "2.00/8.00*", "0/3", "0"]
+            [
+                "mgpu",
+                "IDLE",
+                "6m",
+                "0/3",
+                "900*",
+                "2.00/8.00*",
+                "0/3",
+                "0"
+            ]
         );
         assert_eq!(
             lines[3],
@@ -409,7 +439,10 @@ mod tests {
 
     #[test]
     fn table_has_no_footnote_without_idle_rows() {
-        let rows = vec![summarize(&row("nuc", 12, Ok(status(5120, 0.52, 6.0, 1, 3))), NOW)];
+        let rows = vec![summarize(
+            &row("nuc", 12, Ok(status(5120, 0.52, 6.0, 1, 3))),
+            NOW,
+        )];
         let out = render_table(&rows);
         assert_eq!(out.lines().count(), 2, "{out}");
         assert!(!out.contains('*'), "{out}");
@@ -438,7 +471,8 @@ mod tests {
 
     #[test]
     fn pick_reports_free_slots_and_load_ratio() {
-        let p = &pick(&pick_rows(), Pool::Gradle)[0];
+        let picks = pick(&pick_rows(), Pool::Gradle);
+        let p = picks.iter().find(|p| p.host == "bigquiet").unwrap();
         assert_eq!(p.free_slots, 2);
         assert_eq!(p.mem_available_mb, 9000);
         assert!((p.load_ratio - 0.5 / 6.0).abs() < 1e-9);

@@ -81,9 +81,7 @@ pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
     };
     let fit = pick(&rows, pool);
     if fit.is_empty() {
-        return fail(
-            "fleet pick: no eligible host (every host is stale, unknown or has no free slot)",
-        );
+        return fail("fleet pick: no eligible host (every host is unknown or has no free slot)");
     }
     if json {
         println!(
@@ -154,29 +152,6 @@ pub fn maybe_push_background() {
     }
 }
 
-/// The crontab line that keeps this machine's row fresh; printed, never installed.
-pub fn cron_line(exe: &std::path::Path) -> String {
-    let exe = exe.display().to_string();
-    let exe = if exe.contains(char::is_whitespace) {
-        format!("'{exe}'")
-    } else {
-        exe
-    };
-    format!("* * * * * {exe} fleet push >/dev/null 2>&1")
-}
-
-pub fn install_cron() -> i32 {
-    match std::env::current_exe().and_then(std::fs::canonicalize) {
-        Ok(exe) => {
-            println!("{}", cron_line(&exe));
-            0
-        }
-        Err(e) => fail(&format!(
-            "fleet install-cron: cannot find this executable: {e}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,13 +166,5 @@ mod tests {
     #[test]
     fn a_stamp_in_the_future_is_due() {
         assert!(due(Some(200), 100));
-    }
-
-    #[test]
-    fn cron_line_is_every_minute_quiet_and_absolute() {
-        assert_eq!(
-            cron_line(std::path::Path::new("/opt/bin/claudecat")),
-            "* * * * * /opt/bin/claudecat fleet push >/dev/null 2>&1"
-        );
     }
 }

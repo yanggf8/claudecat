@@ -126,18 +126,19 @@ Cargo 的 test／nextest／bench 為 `test`，build／check／clippy／doc／run
 | 指令 | 用途 |
 |---|---|
 | `claudecat fleet push` | 收集本機快照並 upsert 自己那一列（失敗時一行錯誤、exit 1） |
-| `claudecat fleet [--json]` | 全部機器一張表：host、資料年齡、名額 用/總、MemAvailable MB、load 1m/上限、Claude session（忙/總；忙＝CPU > 5%）、編譯器數。超過 180 秒沒更新標 `STALE`；讀不到資源的機器標 `UNKNOWN` |
-| `claudecat fleet pick [--kind gradle\|other] [--json]` | 依適合度列出可接新重工的機器：資料新（非 STALE／UNKNOWN）、該池有空名額，記憶體餘裕最大者優先，同值看 load／上限最低者。沒有任何機器合適時 exit 1 |
-| `claudecat fleet install-cron` | 只印出 crontab 那一行（`* * * * * <claudecat 絕對路徑> fleet push >/dev/null 2>&1`），不安裝 |
+| `claudecat fleet [--json]` | 全部機器一張表：host、資料年齡、名額 用/總、MemAvailable MB、load 1m/上限、Claude session（忙/總；忙＝CPU > 5%）、編譯器數。超過 180 秒沒更新標 `IDLE`（見下）；讀不到資源的機器標 `UNKNOWN` |
+| `claudecat fleet pick [--kind gradle\|other] [--json]` | 依適合度列出可接新重工的機器：非 UNKNOWN（含 IDLE）、該池有空名額，記憶體餘裕最大者優先，同值看 load／上限最低者。沒有任何機器合適時 exit 1。JSON 每筆有 `idle` 欄位，`true` 表示記憶體與 load 是舊值 |
 
 - 快照內容：`status --json` 的同一份資料，加上本機執行中的 `claude` 程序（pid、cwd、CPU%、已執行秒數，抓得到時加 tmux session 名）。
   不含環境變數、指令列參數、檔案內容。session 掃描目前只支援 Linux；其他系統回報 `sessions_unsupported: true` 與空清單。
 - 儲存：Turso HTTP pipeline API，表 `claudecat_fleet (host PRIMARY KEY, updated_at, payload)`，一台一列；值一律以參數帶入。
   連線設定讀 `cort memory configure` 存的檔（`$CORT_MEMORY_DIR` 或 `$XDG_DATA_HOME/cortexyoung/memory` 或 `~/.local/share/cortexyoung/memory` 下的 `turso-memory.json`），
   也可用 `CLAUDECAT_FLEET_URL` ＋ `CLAUDECAT_FLEET_TOKEN` 覆蓋（兩個要一起設）。token 不會出現在任何輸出或錯誤訊息。
-- 保持新鮮、不用常駐程式：`gate check`／`gate run`／`status` 每次最多每 60 秒在背景起一個 `fleet push`（逾時 2 秒，失敗無聲，絕不拖慢或擋住閘門）；
+- 回報時機、不用常駐程式：`gate check`／`gate run`／`status` 每次最多每 60 秒在背景起一個 `fleet push`（逾時 2 秒，失敗無聲，絕不拖慢或擋住閘門）；
   時間戳存在資料目錄的 `fleet-last-push`。設了 `CLAUDECAT_PROC_ROOT`（測試用的假 /proc）或 `CLAUDECAT_FLEET_AUTOPUSH=0` 時不推。
-  機器上沒人在跑閘門時，用 `fleet install-cron` 印出的那一行放進 crontab。
+- 閒置機器：機器只在跑閘門時回報，所以超過 180 秒沒回報（`IDLE`）就是沒工作量，視為可接工作，`fleet pick` 照常列入、排序同正常機器。
+  `IDLE` 列的名額用量、編譯器、忙碌 session 都當 0，名額總數照最後一次回報；記憶體與 load 是最後一次回報的值，表格以 `*` 標示（AGE 為資料年齡），pick JSON 的 `idle: true` 同義。
+  因此不需要 crontab 或常駐程式定時回報；讀不到資源的機器（`UNKNOWN`）不論新舊都不選。
 
 ## 不再提供的東西
 
