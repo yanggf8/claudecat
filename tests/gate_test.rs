@@ -3354,3 +3354,431 @@ fn holders_open_through_no_symlink_and_check_the_file_they_opened() {
         "nothing in holders() may look at the path through a symlink:\n{body}"
     );
 }
+
+/// 4.4: every figure of `capacity`, from a machine and a registry whose contents are known. The
+/// warm-up window is 6000s and whatever is warming sits halfway through it, so each reservation
+/// counts at half and a second more or less of clock changes nothing at two decimals.
+#[test]
+fn status_capacity_reports_every_figure() {
+    let f = Fixture::new("1.2", 0);
+    f.meminfo(10_000 * 1024, 0);
+    f.machine(8, 16_384_000);
+    f.pressure("0.50");
+    let now = now_secs();
+    let half = now - 3000;
+    // Load 1.0 and 1536MB; Gradle two forks: load 1.0 and 6144MB; an `other` run: 1024MB and no
+    // load; a run that names no toolchain: warming, but it reserves nothing.
+    let _cargo = hold_run(&f, 77, "build", &["cargo", "test"], half);
+    let _gradle = hold_run(
+        &f,
+        78,
+        "test",
+        &["./gradlew", "test", "-PtestForks=2"],
+        half,
+    );
+    let _other = hold_run(&f, 79, "other", &["sh", "-c", "sleep 100"], half);
+    let _plain = hold_run(&f, 80, "build", &["sleep", "100"], half);
+    // Past the window on both sides: neither counts.
+    let _old = hold_run(&f, 81, "build", &["cargo", "test"], now - 9000);
+    fs::create_dir_all(f.gate()).unwrap();
+    let rows = [
+        serde_json::json!({"ts": half, "session": "s1", "toolchains": ["cargo"]}),
+        serde_json::json!({"ts": now - 9000, "session": "s2", "toolchains": ["cargo"]}),
+    ];
+    fs::write(admissions_path(&f), format!("{}\n{}\n", rows[0], rows[1])).unwrap();
+    let (text, v) = status_pair(&f, &[("CLAUDECAT_RESERVE_WARMUP_SECS", "6000")]);
+    let cap = &v["capacity"];
+    assert_eq!(
+        *cap,
+        serde_json::json!({
+            "cpus": 8, "mem_total_mb": 16000, "max_load": 8.0, "load_1m": 1.2,
+            "reserved_load": 3.0, "load_headroom": 3.8, "mem_available_mb": 10000,
+            "reserved_mb": 10240, "mem_headroom_mb": 0, "mem_pressure": 0.5,
+            "blocked": [], "warming": 5,
+        }),
+        "{v}"
+    );
+    let mut keys: Vec<&str> = v["capacity"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "blocked",
+            "cpus",
+            "load_1m",
+            "load_headroom",
+            "max_load",
+            "mem_available_mb",
+            "mem_headroom_mb",
+            "mem_pressure",
+            "mem_total_mb",
+            "reserved_load",
+            "reserved_mb",
+            "warming",
+        ]
+    );
+    // The keys that stayed at the top say the same.
+    for (top, inside) in [
+        ("load_1m", "load_1m"),
+        ("mem_available_mb", "mem_available_mb"),
+        ("mem_pressure_some_avg10", "mem_pressure"),
+        ("limits.max_load", "max_load"),
+        ("limits.cpus", "cpus"),
+        ("limits.mem_total_mb", "mem_total_mb"),
+    ] {
+        let top = top.split('.').fold(&v, |at, key| &at[key]);
+        assert_eq!(top, &cap[inside], "{top} vs capacity.{inside}");
+    }
+    // The text prints the same figures.
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("capacity: "))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "capacity: cpus=8 mem_total=16000MB max_load=8.00 load_1m=1.20 reserved_load=3.00 load_headroom=3.80",
+            "capacity: mem_available=10000MB reserved=10240MB mem_headroom=0MB psi=0.50 blocked=none warming=5",
+        ],
+        "{text}"
+    );
+}
+
+/// 4.4: a machine that tells nothing of its CPUs, its memory total or its memory pressure reports
+/// null there, and the figures that need none of them are still reported.
+#[test]
+fn capacity_is_null_where_the_machine_tells_nothing() {
+    let f = Fixture::new("0.5", 0);
+    let _other = hold_run(&f, 77, "other", &["sleep", "100"], now_secs());
+    let (text, v) = status_pair(&f, &[]);
+    assert_eq!(
+        v["capacity"],
+        serde_json::json!({
+            "cpus": null, "mem_total_mb": null, "max_load": 6.0, "load_1m": 0.5,
+            "reserved_load": 0.0, "load_headroom": 5.5, "mem_available_mb": 4000,
+            "reserved_mb": 1024, "mem_headroom_mb": 2976, "mem_pressure": null,
+            "blocked": [], "warming": 1,
+        }),
+        "{v}"
+    );
+    assert!(
+        text.contains("capacity: cpus=? mem_total=? max_load=6.00 load_1m=0.50 reserved_load=0.00 load_headroom=5.50\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("capacity: mem_available=4000MB reserved=1024MB mem_headroom=2976MB psi=n/a blocked=none warming=1\n"),
+        "{text}"
+    );
+}
+
+/// 4.4: `blocked` is what denies a build or test run that needs nothing of its own right now -- the
+/// gate's own reasons, not a second set of thresholds -- and it names memory pressure even while
+/// memory headroom is plentiful.
+#[test]
+fn blocked_names_what_denies_a_build_with_no_need_right_now() {
+    let capacity = |f: &Fixture, env: &[(&str, &str)]| status_pair(f, env).1["capacity"].clone();
+    // PSI over the limit while memory headroom is plentiful.
+    let f = Fixture::new("0.5", 0);
+    f.pressure("10.01");
+    let cap = capacity(&f, &[]);
+    assert_eq!(cap["blocked"], serde_json::json!(["memory"]), "{cap}");
+    assert_eq!(cap["mem_headroom_mb"], 4000);
+    assert_eq!(cap["load_headroom"], 5.5);
+    // MemAvailable under the floor, with no PSI file at all.
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(1500 * 1024, 0);
+    assert_eq!(capacity(&f, &[])["blocked"], serde_json::json!(["memory"]));
+    // The measured load over the limit.
+    let f = Fixture::new("7", 0);
+    let cap = capacity(&f, &[]);
+    assert_eq!(cap["blocked"], serde_json::json!(["load"]));
+    assert_eq!(cap["load_headroom"], -1.0);
+    // Reserved load pushing it over: 0.5 + 1.0 (a cargo run, half decayed) > 1.4.
+    let f = Fixture::new("0.5", 0);
+    let _holder = hold_run(&f, 77, "build", &["cargo", "test"], now_secs() - 3000);
+    let cap = capacity(
+        &f,
+        &[
+            ("CLAUDECAT_RESERVE_WARMUP_SECS", "6000"),
+            ("CLAUDECAT_MAX_LOAD", "1.4"),
+        ],
+    );
+    assert_eq!(cap["reserved_load"], 1.0);
+    assert_eq!(cap["load_headroom"], -0.1);
+    assert_eq!(cap["blocked"], serde_json::json!(["load"]));
+    // Both, in the order of the gate's message.
+    let f = Fixture::new("7", 0);
+    f.pressure("10.01");
+    assert_eq!(
+        capacity(&f, &[])["blocked"],
+        serde_json::json!(["load", "memory"])
+    );
+    // The gate agrees: `gate check --kind build` needs nothing, so it is denied exactly when
+    // `blocked` is not empty. A boundary equal to the limit passes.
+    for (load, psi, available_mb, denied) in [
+        ("0.5", "0.02", 4000, false),
+        ("6", "0.02", 4000, false),
+        ("6.01", "0.02", 4000, true),
+        ("0.5", "10.01", 4000, true),
+        ("0.5", "0.02", 1536, false),
+        ("0.5", "0.02", 1535, true),
+    ] {
+        let f = Fixture::new(load, 0);
+        f.meminfo(available_mb * 1024, 0);
+        f.pressure(psi);
+        let blocked = capacity(&f, &[])["blocked"].as_array().cloned().unwrap();
+        let mut cmd = f.cmd(&["gate", "check", "--kind", "build"]);
+        let status = code(&cmd.output().expect("check"));
+        assert_eq!(
+            (!blocked.is_empty(), status),
+            (denied, if denied { 75 } else { 0 }),
+            "load {load} psi {psi} available {available_mb}MB: {blocked:?}"
+        );
+    }
+}
+
+/// The deny log's rows, as JSON.
+fn deny_rows(f: &Fixture) -> Vec<serde_json::Value> {
+    fs::read_to_string(log_path(f))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// 4.6, 7-8: a `gate check` or `gate run` denial reaches the deny log like a hook's, with the load
+/// figures; an allowed one writes nothing, and a denied run does not run.
+#[test]
+fn gate_check_and_run_denials_are_logged_with_the_load_figures() {
+    // A long warm-up window: the holder's reservation stays 2.00 at two decimals for seconds.
+    let warm = ("CLAUDECAT_RESERVE_WARMUP_SECS", "6000");
+    let f = Fixture::new("0.5", 0);
+    let _holder = hold_run(&f, 77, "build", &["cargo", "test"], now_secs());
+    // check, build row: 0.5 measured + 2.0 reserved, nothing needed.
+    let check = |max_load: &str| {
+        f.cmd(&["gate", "check", "--kind", "build"])
+            .env(warm.0, warm.1)
+            .env("CLAUDECAT_MAX_LOAD", max_load)
+            .output()
+            .expect("check")
+    };
+    assert_eq!(code(&check("2.4")), 75);
+    let rows = deny_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0],
+        serde_json::json!({
+            "ts": rows[0]["ts"], "session": null, "id": null, "sub": "check:build",
+            "reason": "load", "mem_available_mb": 4000, "load_1m": 0.5,
+            "reserved_load": 2.0, "need_load": 0.0,
+        }),
+        "{}",
+        rows[0]
+    );
+    assert_eq!(code(&check("2.5")), 0);
+    assert_eq!(deny_rows(&f).len(), 1, "an allowed check writes nothing");
+
+    // run: 0.5 + 2.0 reserved + 2.0 needed = 4.5 over 4.4. The command must not run.
+    let marker = f.temp.path().join("ran");
+    fake_tool(&f, "cargo", &format!("touch {}", marker.display()));
+    let run = |max_load: &str| {
+        let mut cmd = f.cmd(&[
+            "gate",
+            "run",
+            "--kind",
+            "build",
+            "--",
+            "sh",
+            "-c",
+            "cargo build",
+        ]);
+        cmd.env(warm.0, warm.1)
+            .env("CLAUDECAT_MAX_LOAD", max_load)
+            .stdin(Stdio::null());
+        with_fake_tools(&f, &mut cmd).output().expect("gate run")
+    };
+    assert_eq!(code(&run("4.4")), 75);
+    assert!(!marker.exists(), "a denied run ran its command");
+    let rows = deny_rows(&f);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        rows[1],
+        serde_json::json!({
+            "ts": rows[1]["ts"], "session": null, "id": null, "sub": "run:build",
+            "reason": "load", "mem_available_mb": 4000, "load_1m": 0.5,
+            "reserved_load": 2.0, "need_load": 2.0,
+        }),
+        "{}",
+        rows[1]
+    );
+    assert_eq!(code(&run("4.5")), 0);
+    assert!(marker.exists());
+    assert_eq!(deny_rows(&f).len(), 2, "an allowed run writes nothing");
+
+    // The hook's rows carry the same two figures.
+    let line = deny_line(&hook_at(&f, Some("sess-a"), "cargo test", "4.4"));
+    assert!(line.starts_with("gate denied (load) "), "{line}");
+    let last = deny_rows(&f).pop().expect("hook row");
+    // Under the default window the holder's reservation has decayed a little by now.
+    let reserved_load = last["reserved_load"].as_f64().expect("reserved_load");
+    assert!((1.9..=2.0).contains(&reserved_load), "{last}");
+    assert_eq!(last["need_load"], 2.0);
+    assert_eq!(last["sub"], "test");
+
+    // The other row denies on memory pressure: nothing is reserved on this machine, and the other
+    // row asks for no load.
+    let g = Fixture::new("0.5", 0);
+    g.pressure("10.01");
+    let mut cmd = g.cmd(&["gate", "check"]);
+    cmd.env(warm.0, warm.1);
+    assert_eq!(code(&cmd.output().expect("check")), 75);
+    let rows = deny_rows(&g);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["reason"], "memory");
+    assert_eq!(rows[0]["sub"], "check:other");
+    assert_eq!(rows[0]["reserved_load"], 0.0);
+    assert_eq!(rows[0]["need_load"], 0.0);
+    assert_eq!(rows[0]["psi_some_avg10"], 10.01);
+
+    // Resources that cannot be read refuse the work as well: that is logged too, without figures.
+    fs::remove_file(g.proc().join("loadavg")).unwrap();
+    let out = g.cmd(&["gate", "check"]).output().expect("check");
+    assert_eq!(code(&out), 75);
+    let rows = deny_rows(&g);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1]["reason"], "resources");
+    assert!(rows[1].get("load_1m").is_none(), "{}", rows[1]);
+}
+
+/// 4.6, 7-8: rows denied for `slots`, `compiler` or `compiler-lock` before the upgrade stay in the
+/// log, and `gate log` still sums them, alone and beside the reasons that remain.
+#[test]
+fn gate_log_still_sums_old_rows_with_removed_reasons() {
+    let f = Fixture::new("0.5", 0);
+    let now = now_secs();
+    let row = |reason: &str, session: &str| serde_json::json!({"ts": now - 10, "session": session, "id": "x", "sub": "test", "reason": reason});
+    fs::create_dir_all(log_path(&f).parent().unwrap()).unwrap();
+    let rows = [
+        row("slots", "a"),
+        row("compiler", "b"),
+        row("compiler-lock", "c"),
+        row("load,compiler-lock", "d"),
+        row("memory,slots,compiler", "e"),
+    ];
+    let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
+    fs::write(log_path(&f), text).unwrap();
+    let out = f.run(&["gate", "log", "--json"]);
+    assert_eq!(code(&out), 0);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["reasons"],
+        serde_json::json!({"slots": 2, "compiler": 2, "compiler-lock": 2, "load": 1, "memory": 1}),
+        "{value}"
+    );
+    let text = String::from_utf8(f.run(&["gate", "log"]).stdout).unwrap();
+    for line in ["slots: 2", "compiler: 2", "compiler-lock: 2"] {
+        assert!(text.contains(&format!("\n  {line}\n")), "{text}");
+    }
+}
+
+/// 7-7: the real `status --json` of this build, through `summarize` and `pick`. A machine that
+/// reports no slots is judged on its capacity: one that fits is picked under either kind, one that
+/// is blocked is not, however much memory it has, and neither is one whose memory the reservations
+/// have used up, though it reports nothing blocked.
+#[test]
+fn fleet_pick_reads_the_status_document_of_this_build() {
+    use claudecat::fleet::assemble;
+    use claudecat::fleet_store::Row;
+    use claudecat::fleet_view::{pick, summarize, Pool, State};
+    let now = now_secs();
+    let fresh = Fixture::new("0.5", 0);
+    fresh.meminfo(12_000 * 1024, 0);
+    // Warming cargo runs reserve 4.0: 0.5 + 4.0 is under 6.
+    let _a = hold_run(&fresh, 77, "build", &["cargo", "test"], now);
+    let _b = hold_run(&fresh, 78, "build", &["cargo", "test"], now);
+    // The same two on a machine with 4000 MB: they reserve 3072 of them, too little is left for a
+    // Gradle run, and nothing else is the matter with it.
+    let booked = Fixture::new("0.5", 0);
+    let _d = hold_run(&booked, 77, "build", &["cargo", "test"], now);
+    let _e = hold_run(&booked, 78, "build", &["cargo", "test"], now);
+    let pressed = Fixture::new("0.5", 0);
+    pressed.meminfo(30_000 * 1024, 0);
+    pressed.pressure("10.01");
+    let loaded = Fixture::new("0.5", 0);
+    loaded.meminfo(40_000 * 1024, 0);
+    // 0.5 + 2.0 reserved is over its limit of 2.4.
+    let _c = hold_run(&loaded, 77, "build", &["cargo", "test"], now);
+    let row = |host: &str, f: &Fixture, max_load: &str| {
+        let out = f
+            .cmd(&["status", "--json"])
+            .env("CLAUDECAT_MAX_LOAD", max_load)
+            .output()
+            .expect("status");
+        let status = serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("document");
+        assert!(status.get("slots").is_none(), "this build reports no slots");
+        let snap = assemble(host, "linux", now, Ok(status), Some(vec![]));
+        Row {
+            host: host.into(),
+            updated_at: snap.collected_at.clone(),
+            snapshot: snap,
+        }
+    };
+    let rows = [
+        row("small", &fresh, "6"),
+        row("booked", &booked, "6"),
+        row("pressed", &pressed, "6"),
+        row("big", &loaded, "2.4"),
+    ];
+    let summaries: Vec<_> = rows.iter().map(|r| summarize(r, now)).collect();
+    assert!(summaries.iter().all(|s| s.state == State::Ok));
+    for pool in [Pool::Gradle, Pool::Other] {
+        let picked: Vec<_> = pick(&summaries, pool)
+            .into_iter()
+            .map(|p| serde_json::to_value(p).unwrap())
+            .collect();
+        assert_eq!(picked.len(), 1, "{pool:?}: {picked:?}");
+        assert_eq!(picked[0]["host"], "small");
+        assert_eq!(picked[0]["free_slots"], serde_json::Value::Null);
+        assert_eq!(picked[0]["mem_available_mb"], 12_000);
+        assert_eq!(picked[0]["mem_headroom_mb"], 12_000 - 3072);
+    }
+    let summary = |host: &str, key: &str| {
+        summaries
+            .iter()
+            .find(|s| s.host == host)
+            .map(|s| serde_json::to_value(s).unwrap()[key].clone())
+            .unwrap()
+    };
+    for host in ["small", "booked"] {
+        assert_eq!(summary(host, "blocked"), serde_json::json!([]), "{host}");
+    }
+    assert_eq!(summary("booked", "mem_available_mb"), 4000);
+    assert_eq!(summary("booked", "mem_headroom_mb"), 4000 - 3072);
+    assert_eq!(summary("pressed", "blocked"), serde_json::json!(["memory"]));
+    assert_eq!(summary("big", "blocked"), serde_json::json!(["load"]));
+}
+
+/// `status` as text and as the JSON document, with `env` set for both.
+fn status_pair(f: &Fixture, env: &[(&str, &str)]) -> (String, serde_json::Value) {
+    let (mut text, mut json) = (f.cmd(&["status"]), f.cmd(&["status", "--json"]));
+    for (key, value) in env {
+        text.env(key, value);
+        json.env(key, value);
+    }
+    let text = String::from_utf8(text.output().expect("status").stdout).unwrap();
+    let out = json.output().expect("status");
+    assert!(
+        out.stdout.starts_with(b"{"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (
+        text,
+        serde_json::from_slice(&out.stdout).expect("json document"),
+    )
+}

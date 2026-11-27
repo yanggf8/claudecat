@@ -228,3 +228,155 @@ fn deny_rows_carry_system_context() {
     assert_eq!(denies[0]["psi_some_avg10"], 0.25);
     assert_eq!(denies[0]["load_1m"], 0.5);
 }
+
+/// 4.6: `gate usage` reports the average cores of a run, `cpu_secs / wall_secs`, per group; for
+/// Gradle also those of the whole family, from `gradle_family_cpu_secs`. A run that reports no CPU
+/// time, or no wall time to divide by, is left out of the ratios and still counted.
+#[test]
+fn gate_usage_reports_average_cores() {
+    let f = Fixture::new();
+    let t = now();
+    let line = |tool: &str, class: &str, wall: f64, cpu: Option<f64>, family_cpu: Option<f64>| {
+        let mut row = serde_json::json!({
+            "ts": t - 10, "session": null, "toolchain": tool, "class": class, "kind": "test",
+            "wall_secs": wall, "peak_rss_mb": 100.0, "cpu_secs": cpu, "exit": 0,
+            "start": {}, "end": {}
+        });
+        if let Some(cpu) = family_cpu {
+            row["gradle_family_cpu_secs"] = cpu.into();
+        }
+        row.to_string()
+    };
+    // Cores 2, 2 and 5; the family's 10, 3 and 7.5. A wall of 0 and a missing cpu_secs divide
+    // nothing.
+    let lines = [
+        line("gradle", "test", 10.0, Some(20.0), Some(100.0)),
+        line("gradle", "test", 20.0, Some(40.0), Some(60.0)),
+        line("gradle", "test", 40.0, Some(200.0), Some(300.0)),
+        line("gradle", "test", 0.0, Some(5.0), Some(5.0)),
+        line("gradle", "build", 5.0, None, None),
+        line("cargo", "build", 4.0, Some(6.0), None),
+    ];
+    fs::create_dir_all(f.temp.path().join("state")).expect("state");
+    fs::write(f.usage_log(), lines.join("\n")).expect("write log");
+    let out = f.run(&["gate", "usage", "--json", "--days", "7"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("usage json");
+    let groups = value["groups"].as_array().expect("groups");
+    assert_eq!(groups.len(), 3, "{value}");
+    let group = |tool: &str, class: &str| {
+        groups
+            .iter()
+            .find(|g| g["toolchain"] == tool && g["class"] == class)
+            .cloned()
+            .unwrap_or_else(|| panic!("{tool} {class}: {value}"))
+    };
+    let test = group("gradle", "test");
+    assert_eq!(
+        test["avg_cores"],
+        serde_json::json!({"mean": 3.0, "p50": 2.0, "p90": 5.0, "max": 5.0}),
+        "{test}"
+    );
+    assert_eq!(
+        test["gradle_family_avg_cores"],
+        serde_json::json!({"mean": 6.83, "p50": 7.5, "p90": 10.0, "max": 10.0}),
+        "{test}"
+    );
+    assert_eq!(
+        test["count"], 4,
+        "the run without wall time is still counted"
+    );
+    assert_eq!(
+        test["cpu_secs_mean"], 66.25,
+        "unchanged: CPU seconds per run"
+    );
+    let cargo = group("cargo", "build");
+    assert_eq!(
+        cargo["avg_cores"],
+        serde_json::json!({"mean": 1.5, "p50": 1.5, "p90": 1.5, "max": 1.5}),
+        "{cargo}"
+    );
+    // Not Gradle: the family is not measured, as for `gradle_family_rss_mb`.
+    assert_eq!(
+        cargo["gradle_family_avg_cores"],
+        serde_json::json!({"mean": null, "p50": null, "p90": null, "max": null}),
+        "{cargo}"
+    );
+    let gradle_build = group("gradle", "build");
+    assert_eq!(gradle_build["avg_cores"]["mean"], serde_json::Value::Null);
+    assert_eq!(gradle_build["count"], 1);
+
+    let text = String::from_utf8_lossy(&f.run(&["gate", "usage"]).stdout).into_owned();
+    let header = text.lines().next().unwrap();
+    assert!(header.contains("cores_mean"), "{text}");
+    let line = |tool: &str, class: &str| {
+        text.lines()
+            .skip(1)
+            .find(|l| {
+                let words: Vec<&str> = l.split_whitespace().collect();
+                words.len() >= 2 && words[0] == tool && words[1] == class
+            })
+            .unwrap_or_else(|| panic!("{tool} {class}: {text}"))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(line("gradle", "test").last().unwrap(), "3.00");
+    assert_eq!(line("cargo", "build").last().unwrap(), "1.50");
+    assert_eq!(line("gradle", "build").last().unwrap(), "-");
+}
+
+/// 4.6: a Gradle run's usage row measures the CPU of the whole Gradle family; no other run's does.
+#[test]
+fn gradle_runs_measure_the_family_cpu_and_no_other_run_does() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let gradlew = f.temp.path().join("gradlew");
+    fs::write(&gradlew, "#!/bin/sh\nsleep 0.3\n").expect("gradlew");
+    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).expect("mode");
+    let run = |args: &[&str]| {
+        f.cmd(args)
+            // Sample the real /proc; the gate's own figures still come from the fixture.
+            .env("CLAUDECAT_USAGE_PID_ROOT", "/proc")
+            .output()
+            .expect("claudecat")
+    };
+    let out = run(&[
+        "gate",
+        "run",
+        "--kind",
+        "test",
+        "--",
+        gradlew.to_str().expect("path"),
+        "test",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let logged = rows(&f.usage_log());
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(logged[0]["toolchain"], "gradle");
+    assert!(logged[0]["gradle_family_rss_mb"].is_number(), "{logged:?}");
+    assert!(
+        logged[0]["gradle_family_cpu_secs"].is_number(),
+        "{}",
+        logged[0]
+    );
+    let out = run(&[
+        "gate",
+        "run",
+        "--kind",
+        "test",
+        "--",
+        "sh",
+        "-c",
+        "sleep 0.1",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let logged = rows(&f.usage_log());
+    assert_eq!(logged.len(), 2);
+    assert_eq!(logged[1]["toolchain"], "unknown");
+    assert!(
+        logged[1].get("gradle_family_cpu_secs").is_none(),
+        "{}",
+        logged[1]
+    );
+}

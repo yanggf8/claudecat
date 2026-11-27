@@ -1018,7 +1018,7 @@ pub(crate) fn mem_pressure(root: &Path) -> Option<f64> {
 }
 
 /// What the runs still warming up hold back for the ones that follow.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Reservation {
     /// Memory per toolchain, in MB.
     memory: BTreeMap<Toolchain, u64>,
@@ -1028,6 +1028,9 @@ struct Reservation {
     load: f64,
     /// Seconds until the last of these runs is past the window.
     warmup_left: u64,
+    /// Runs still inside the window, holders and admissions alike, whether they reserve anything
+    /// or not.
+    warming: usize,
 }
 
 impl Reservation {
@@ -1076,6 +1079,7 @@ fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> Reservation {
     let mut out = Reservation::default();
     for holder in &s.holders {
         if warming(holder.started_at) {
+            out.warming += 1;
             // The run was checked on the `other` row -- declared `other`, or a test runner that
             // drives no compiler whatever kind it declared (`gate run --kind test -- python3 …`) --
             // so it is memory it holds back, like any other run of that row.
@@ -1092,6 +1096,7 @@ fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> Reservation {
     }
     for admission in &s.admissions {
         if warming(admission.ts) {
+            out.warming += 1;
             // Only a command that names a toolchain is admitted, so a row never needs `other_mb`.
             reserve_into(
                 &admission.estimate(),
@@ -1111,6 +1116,20 @@ fn one() -> u64 {
 
 fn is_one(n: &u64) -> bool {
     *n == 1
+}
+
+/// A denial of `gate check` or `gate run` goes into the deny log like a hook's, so that the log
+/// shows every path that was refused. The row names neither a session nor a command, and nothing
+/// a dispatch sends is recorded: only the path, its kind and the figures.
+fn record_path_deny(path: &str, kind: Kind, reasons: &str, ctx: crate::gate_stats::DenyContext) {
+    let _ = record_deny(
+        unix_now(),
+        None,
+        None,
+        &format!("{path}:{}", kind.as_str()),
+        reasons,
+        ctx,
+    );
 }
 
 /// A command the PreToolUse hook allowed. Claude runs it directly, so it registers no holder;
@@ -1787,18 +1806,51 @@ impl Snapshot {
     }
 }
 
-/// Why a command of `kind`, estimated as `wanted`, may not start: its message, and the reasons in
-/// it. The build row counts the measured load together with the load reserved for runs still
-/// warming up and the command's own. `other` keeps to the measured load (external callers see no
-/// change there) and instead must find `reserve_other_mb` beyond the reserved memory.
-fn deny_reason(
+/// Why a command may not start: its message, the reasons in it, and the figures it was decided on.
+struct Denial {
+    /// The message, one line, for whoever asked.
+    message: String,
+    /// The reasons in the message, in its order.
+    reasons: Vec<&'static str>,
+    /// What the runs still warming up held back, and for how much longer.
+    table: Reservation,
+    /// The load the command asks for on the row that decided: none on the `other` row.
+    need_load: f64,
+}
+
+impl Denial {
+    /// The system figures of this denial, for the deny log.
+    fn context(&self, s: &Snapshot) -> crate::gate_stats::DenyContext {
+        crate::gate_stats::DenyContext::new(
+            s.mem_available_mb,
+            s.mem_pressure_some_avg10,
+            s.load_1m,
+        )
+        // The figures of the message: the load reserved on the machine, and what this command
+        // asked for on its row.
+        .with_loads(self.table.load, self.need_load)
+    }
+}
+
+/// Why a command of `kind`, estimated as `wanted`, may not start, on the reservations of this
+/// moment.
+fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind, wanted: &Estimate) -> Option<Denial> {
+    deny_on(s, cfg, kind, wanted, reserved(s, cfg, unix_now()))
+}
+
+/// The same on reservations already summed up, so that figures reported beside the reasons come
+/// from the very table the reasons were read off. The build row counts the measured load together
+/// with the load reserved for runs still warming up and the command's own. `other` keeps to the
+/// measured load (external callers see no change there) and instead must find `reserve_other_mb`
+/// beyond the reserved memory.
+fn deny_on(
     s: &Snapshot,
     cfg: &Config,
     kind: Kind,
     wanted: &Estimate,
-) -> Option<(String, Vec<&'static str>)> {
+    table: Reservation,
+) -> Option<Denial> {
     let other = kind == Kind::Other;
-    let table = reserved(s, cfg, unix_now());
     let (need_mb, need_load, reserved_load) = if other {
         (cfg.reserve_other_mb, 0.0, 0.0)
     } else {
@@ -1854,7 +1906,74 @@ fn deny_reason(
         holders.join("; "),
         compilers.join("; ")
     );
-    Some((message, failed))
+    Some(Denial {
+        message,
+        reasons: failed,
+        table,
+        need_load,
+    })
+}
+
+fn two_decimals(n: f64) -> f64 {
+    (n * 100.0).round() / 100.0
+}
+
+/// What the machine has left, in figures every machine reports the same way so that a coordinator
+/// can compare them. All of it is read off one snapshot and one sum of the reservations, so the
+/// figures agree with each other and with what the gate would decide.
+#[derive(Serialize)]
+struct Capacity {
+    cpus: Option<usize>,
+    mem_total_mb: Option<u64>,
+    max_load: f64,
+    load_1m: f64,
+    /// Estimated load of the runs still warming up, decayed to now.
+    reserved_load: f64,
+    /// `max_load - load_1m - reserved_load`: negative once a build would be denied on load.
+    load_headroom: f64,
+    mem_available_mb: u64,
+    /// All the memory reserved, the `other` row's included.
+    reserved_mb: u64,
+    /// `mem_available_mb - reserved_mb`, never below 0.
+    mem_headroom_mb: u64,
+    /// PSI `some avg10`; None where the kernel has no PSI.
+    mem_pressure: Option<f64>,
+    /// Why a build or test run that needs nothing of its own would be denied right now. Empty when
+    /// it would start: a coordinator that sees headroom here need not be told otherwise.
+    blocked: Vec<&'static str>,
+    /// Runs still warming up, holders and admissions alike.
+    warming: usize,
+}
+
+fn capacity(s: &Snapshot, cfg: &Config, table: Reservation) -> Capacity {
+    let (reserved_mb, reserved_load, warming) = (table.mb(), table.load, table.warming);
+    // The gate's own reasons, for a run that asks for nothing: with nothing needed, memory already
+    // reserved denies nobody, so only load and memory pressure can be in it.
+    let blocked = deny_on(s, cfg, Kind::Build, &Estimate::default(), table)
+        .map_or_else(Vec::new, |denial| denial.reasons);
+    Capacity {
+        cpus: cfg.limits.cpus,
+        mem_total_mb: cfg.limits.mem_total_mb,
+        max_load: cfg.max_load,
+        load_1m: s.load_1m,
+        reserved_load: two_decimals(reserved_load),
+        load_headroom: two_decimals(cfg.max_load - s.load_1m - reserved_load),
+        mem_available_mb: s.mem_available_mb,
+        reserved_mb,
+        mem_headroom_mb: s.mem_available_mb.saturating_sub(reserved_mb),
+        mem_pressure: s.mem_pressure_some_avg10,
+        blocked,
+        warming,
+    }
+}
+
+/// The `status --json` document, which `fleet push` uploads as well: the snapshot, and the
+/// capacity read from it.
+#[derive(Serialize)]
+struct StatusDocument {
+    #[serde(flatten)]
+    snapshot: Snapshot,
+    capacity: Capacity,
 }
 
 fn warning(error: &io::Error) {
@@ -2178,14 +2297,16 @@ pub fn check(kind: Kind) -> i32 {
     crate::fleet_cmd::maybe_push_background();
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
         Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, &Estimate::default()) {
-            Some((reason, _)) => {
-                let _ = writeln!(io::stderr(), "{reason}");
+            Some(denial) => {
+                let _ = writeln!(io::stderr(), "{}", denial.message);
+                record_path_deny("check", kind, &denial.reasons.join(","), denial.context(&s));
                 75
             }
             None => 0,
         },
         Err(e) if unreadable(&e) => {
             let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
+            record_path_deny("check", kind, "resources", Default::default());
             75
         }
         Err(e) => {
@@ -2255,23 +2376,27 @@ pub fn hook() -> i32 {
     } else {
         None
     };
+    // The load figures of a denial by resources, for its deny log row. A duplicate is not one:
+    // the resources are fine, the same command is already running.
+    let mut loads = None;
     let (decision, keys) = if let Some(reason) = duplicate_reason {
         (Some(reason), vec!["duplicate"])
-    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind, &wanted) {
+    } else if let Some(denial) = deny_reason(&snap, &cfg, kind, &wanted) {
         // A denial the reservations cause is over once they are, at most when the longest warm-up
         // left has passed. Otherwise -- load or memory pressure alone, or a need that MemAvailable
         // alone cannot meet -- the wait is for load and memory pressure.
-        let table = reserved(&snap, &cfg, unix_now());
-        let by_reservation = (keys.contains(&"reserved") && table.mb() > 0)
-            || (keys.contains(&"load")
-                && table.load > 0.0
+        let by_reservation = (denial.reasons.contains(&"reserved") && denial.table.mb() > 0)
+            || (denial.reasons.contains(&"load")
+                && denial.table.load > 0.0
                 && snap.load_1m + wanted.load(&cfg) <= cfg.max_load);
         let wait = if by_reservation {
-            format!("the warm-up passes (at most {}s)", table.warmup_left)
+            format!("the warm-up passes (at most {}s)", denial.table.warmup_left)
         } else {
             "load and memory pressure drop (figures above)".to_owned()
         };
-        (Some(format!("{reason} Denied, not queued: nothing will run this command later. Retry it after {wait}; do not poll with sleep in the foreground.")), keys)
+        loads = Some((denial.table.load, denial.need_load));
+        let message = format!("{} Denied, not queued: nothing will run this command later. Retry it after {wait}; do not poll with sleep in the foreground.", denial.message);
+        (Some(message), denial.reasons)
     } else {
         (None, Vec::new())
     };
@@ -2298,17 +2423,21 @@ pub fn hook() -> i32 {
         .unwrap_or_else(|| "gradle".into());
     let now = unix_now();
     if let Some(reason) = decision {
+        let mut ctx = crate::gate_stats::DenyContext::new(
+            snap.mem_available_mb,
+            snap.mem_pressure_some_avg10,
+            snap.load_1m,
+        );
+        if let Some((reserved_load, need_load)) = loads {
+            ctx = ctx.with_loads(reserved_load, need_load);
+        }
         let retry = record_deny(
             now,
             session.as_deref(),
             id.as_deref(),
             &sub,
             &keys.join(","),
-            crate::gate_stats::DenyContext::new(
-                snap.mem_available_mb,
-                snap.mem_pressure_some_avg10,
-                snap.load_1m,
-            ),
+            ctx,
         );
         let reason = if let Some((count, first)) = retry.filter(|(count, _)| *count >= 2) {
             let suffix = if count >= 3 {
@@ -2386,8 +2515,8 @@ pub fn install(install: bool) -> i32 {
 
 /// How a `gate run` may start, as decided under `admission.lock`.
 enum Start {
-    /// Denied: the message for stderr.
-    Denied(String),
+    /// Denied: the message for stderr, with its reasons and figures.
+    Denied(Denial),
     /// Registered: the lock file is held until this is dropped.
     Registered(Registration),
     /// Nothing could be written to the registry: warn and run without a registration.
@@ -2401,6 +2530,7 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
             Ok(pair) => pair,
             Err(e) if unreadable(&e) => {
                 let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
+                record_path_deny("run", kind, "resources", Default::default());
                 return 75;
             }
             Err(e) => {
@@ -2442,8 +2572,8 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     // registration, say -- would hold it for its whole runtime, and every other run and hook
     // would wait out its budget until then.
     let start = guard.under(|| {
-        if let Some((reason, _)) = deny_reason(&snap, &cfg, check_kind, &wanted) {
-            return Start::Denied(reason);
+        if let Some(denial) = deny_reason(&snap, &cfg, check_kind, &wanted) {
+            return Start::Denied(denial);
         }
         let holder = Holder {
             pid: std::process::id(),
@@ -2462,8 +2592,15 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
         }
     });
     match start {
-        Start::Denied(reason) => {
-            let _ = writeln!(io::stderr(), "{reason}");
+        Start::Denied(denial) => {
+            let _ = writeln!(io::stderr(), "{}", denial.message);
+            // Outside the lock, like everything else done with the decision.
+            record_path_deny(
+                "run",
+                kind,
+                &denial.reasons.join(","),
+                denial.context(&snap),
+            );
             75
         }
         Start::Unregistered(e) => {
@@ -2504,8 +2641,26 @@ fn execute(command: &[String]) -> i32 {
 
 /// The `status --json` document as a value, for the fleet snapshot.
 pub fn status_value() -> io::Result<serde_json::Value> {
-    let snap = config().and_then(|cfg| snapshot(&cfg, true))?;
-    serde_json::to_value(&snap).map_err(io::Error::other)
+    document()
+        .map(|(document, _)| document)
+        .and_then(|document| serde_json::to_value(&document).map_err(io::Error::other))
+}
+
+/// The snapshot of this moment with the capacity read from it -- what `status` prints, as JSON or
+/// as text, and what `fleet push` uploads -- and the sum of reservations both were taken from, so
+/// that no figure of one report is a second older than another.
+fn document() -> io::Result<(StatusDocument, Reservation)> {
+    let cfg = config()?;
+    let snap = snapshot(&cfg, true)?;
+    let table = reserved(&snap, &cfg, unix_now());
+    let capacity = capacity(&snap, &cfg, table.clone());
+    Ok((
+        StatusDocument {
+            snapshot: snap,
+            capacity,
+        },
+        table,
+    ))
 }
 
 /// `CLAUDECAT_SLOTS` and `CLAUDECAT_OTHER_SLOTS` used to cap the runs. They do nothing now.
@@ -2531,15 +2686,25 @@ fn open_gate_dir(path: &Path) -> Option<String> {
 
 pub fn status(json: bool) -> i32 {
     crate::fleet_cmd::maybe_push_background();
-    let snap = match config().and_then(|cfg| snapshot(&cfg, true)) {
-        Ok(s) => s,
+    let (snap, capacity, table) = match document() {
+        Ok((
+            StatusDocument {
+                snapshot: snap,
+                capacity,
+            },
+            table,
+        )) => (snap, capacity, table),
         Err(e) => {
             let _ = writeln!(io::stderr(), "status warning: {e}");
             return 0;
         }
     };
+    let open_dir = open_gate_dir(&snap.gate_dir);
     if json {
-        match serde_json::to_string_pretty(&snap) {
+        match serde_json::to_string_pretty(&StatusDocument {
+            snapshot: snap,
+            capacity,
+        }) {
             Ok(s) => {
                 let _ = writeln!(io::stdout(), "{s}");
             }
@@ -2567,6 +2732,33 @@ pub fn status(json: bool) -> i32 {
             l.max_load,
             l.max_load_basis
         );
+        let total = |figure: Option<String>| figure.unwrap_or_else(|| "?".to_owned());
+        let _ = writeln!(
+            io::stdout(),
+            "capacity: cpus={} mem_total={} max_load={:.2} load_1m={:.2} reserved_load={:.2} load_headroom={:.2}",
+            total(capacity.cpus.map(|c| c.to_string())),
+            total(capacity.mem_total_mb.map(|mb| format!("{mb}MB"))),
+            capacity.max_load,
+            capacity.load_1m,
+            capacity.reserved_load,
+            capacity.load_headroom
+        );
+        let _ = writeln!(
+            io::stdout(),
+            "capacity: mem_available={}MB reserved={}MB mem_headroom={}MB psi={} blocked={} warming={}",
+            capacity.mem_available_mb,
+            capacity.reserved_mb,
+            capacity.mem_headroom_mb,
+            capacity
+                .mem_pressure
+                .map_or_else(|| "n/a".into(), |psi| format!("{psi:.2}")),
+            if capacity.blocked.is_empty() {
+                "none".to_owned()
+            } else {
+                capacity.blocked.join(",")
+            },
+            capacity.warming
+        );
         for h in &snap.holders {
             let _ = writeln!(
                 io::stdout(),
@@ -2577,15 +2769,12 @@ pub fn status(json: bool) -> i32 {
                 h.started_at
             );
         }
-        if let Ok(cfg) = config() {
-            let table = reserved(&snap, &cfg, unix_now());
-            let _ = writeln!(
-                io::stdout(),
-                "{} reserved_load={:.2}",
-                reserved_figure(&table),
-                table.load
-            );
-        }
+        let _ = writeln!(
+            io::stdout(),
+            "{} reserved_load={:.2}",
+            reserved_figure(&table),
+            table.load
+        );
         for p in &snap.compiling {
             let _ = writeln!(
                 io::stdout(),
@@ -2625,7 +2814,7 @@ pub fn status(json: bool) -> i32 {
             );
         }
     }
-    if let Some(notice) = open_gate_dir(&snap.gate_dir) {
+    if let Some(notice) = open_dir {
         let _ = writeln!(io::stderr(), "status warning: {notice}");
     }
     0

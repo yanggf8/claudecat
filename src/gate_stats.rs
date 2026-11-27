@@ -38,6 +38,12 @@ pub struct DenyContext {
     psi_some_avg10: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     load_1m: Option<f64>,
+    /// Load counted for the runs still warming up when the denial was decided, and the load the
+    /// denied command asked for; both to two decimals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserved_load: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    need_load: Option<f64>,
 }
 
 impl DenyContext {
@@ -46,7 +52,16 @@ impl DenyContext {
             mem_available_mb: Some(mem_available_mb),
             psi_some_avg10,
             load_1m: Some(load_1m),
+            reserved_load: None,
+            need_load: None,
         }
+    }
+
+    /// The same, with the load figures of a denial by load, memory or reserved memory.
+    pub fn with_loads(mut self, reserved_load: f64, need_load: f64) -> Self {
+        self.reserved_load = Some(round(reserved_load, 2));
+        self.need_load = Some(round(need_load, 2));
+        self
     }
 }
 
@@ -85,6 +100,11 @@ pub struct UsageRow {
     /// daemon detaches from the client, so `peak_rss_mb` alone misses most of a Gradle build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gradle_family_rss_mb: Option<f64>,
+    /// Gradle only: CPU seconds the same family used while the run lasted, the daemon and the
+    /// test workers that left the run's tree included. `cpu_secs` misses those, so it is no basis
+    /// for the load reserved for a Gradle run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gradle_family_cpu_secs: Option<f64>,
     cpu_secs: Option<f64>,
     exit: i32,
     start: SysCtx,
@@ -281,6 +301,60 @@ struct Acc {
     peak_family_kb: Option<u64>,
     /// Highest utime+stime ticks seen per (pid, start time), summed for the CPU fallback.
     cpu_ticks: HashMap<(u32, u64), u64>,
+    /// Gradle only, of every Gradle JVM of this user: the CPU ticks at the first sample of the
+    /// run and at its highest. The difference over all of them is what the family used while the
+    /// run lasted: what a daemon burned before is not the run's. A process first seen after that
+    /// sample starts from 0, since the run started it.
+    family_cpu: HashMap<(u32, u64), (u64, u64)>,
+    /// Whether the family has been sampled at least once.
+    family_sampled: bool,
+}
+
+impl Acc {
+    /// What one sample adds.
+    fn note(&mut self, sample: &TreeSample, family: bool) {
+        self.peak_rss_kb = Some(
+            self.peak_rss_kb
+                .map_or(sample.rss_kb, |p| p.max(sample.rss_kb)),
+        );
+        if family {
+            self.peak_family_kb = Some(
+                self.peak_family_kb
+                    .map_or(sample.family_kb, |p| p.max(sample.family_kb)),
+            );
+            // The tree is in the family too: a member that is a Gradle JVM is counted once,
+            // whichever list has it. Only a process that exists at the first sample of the run,
+            // a resident daemon as a rule, can have burned anything before it, so only that one
+            // is baselined where it stands. One first seen in a later sample was started by the
+            // run: its baseline is 0 and all of its ticks are the run's. A worker born and gone
+            // between two samples is never seen, and so never counted: a limit of sampling.
+            let first_sample = !self.family_sampled;
+            self.family_sampled = true;
+            for (key, ticks) in sample.cpu.iter().chain(&sample.family_cpu) {
+                let seen = self
+                    .family_cpu
+                    .entry(*key)
+                    .or_insert_with(|| (if first_sample { *ticks } else { 0 }, *ticks));
+                seen.1 = seen.1.max(*ticks);
+            }
+        }
+        for (key, ticks) in &sample.cpu {
+            let slot = self.cpu_ticks.entry(*key).or_default();
+            *slot = (*slot).max(*ticks);
+        }
+    }
+
+    /// CPU seconds the Gradle family used between the first and the highest sample of each of its
+    /// processes; None when the family was not followed, or never sampled.
+    fn family_cpu_secs(&self) -> Option<f64> {
+        self.peak_family_kb.is_some().then(|| {
+            self.family_cpu
+                .values()
+                .map(|(first, highest)| highest - first)
+                .sum::<u64>() as f64
+                / CLK_TCK
+        })
+    }
 }
 
 /// (pid, ppid, start ticks, cpu ticks) from a stat line; the comm field may contain spaces and
@@ -313,6 +387,8 @@ struct TreeSample {
     cpu: Vec<((u32, u64), u64)>,
     /// Tree RSS plus every other Gradle JVM of `family_uid`; 0 when no uid was given.
     family_kb: u64,
+    /// CPU ticks of the Gradle JVMs of `family_uid` that are not in the tree; empty without a uid.
+    family_cpu: Vec<((u32, u64), u64)>,
 }
 
 /// A Gradle daemon, worker or Kotlin daemon: a `java` process naming one of their main classes.
@@ -386,10 +462,20 @@ fn sample_tree(root: &Path, leader: u32, family_uid: Option<u32>) -> Option<Tree
     } else {
         0
     };
+    let family_cpu = gradle_jvms
+        .iter()
+        .filter(|pid| !seen.contains(pid))
+        .filter_map(|pid| {
+            stats
+                .get(pid)
+                .map(|(start, ticks)| ((*pid, *start), *ticks))
+        })
+        .collect();
     Some(TreeSample {
         rss_kb: rss,
         cpu,
         family_kb,
+        family_cpu,
     })
 }
 
@@ -407,23 +493,10 @@ fn sampler(
     let _ = thread::Builder::new().spawn(move || {
         let mut delay = Duration::from_millis(50).min(interval);
         loop {
-            if let Some(TreeSample {
-                rss_kb: rss,
-                cpu,
-                family_kb,
-            }) = sample_tree(&root, leader, family_uid)
+            if let (Ok(mut acc), Some(sample)) =
+                (acc.lock(), sample_tree(&root, leader, family_uid))
             {
-                if let Ok(mut acc) = acc.lock() {
-                    acc.peak_rss_kb = Some(acc.peak_rss_kb.map_or(rss, |p| p.max(rss)));
-                    if family_uid.is_some() {
-                        acc.peak_family_kb =
-                            Some(acc.peak_family_kb.map_or(family_kb, |p| p.max(family_kb)));
-                    }
-                    for (key, ticks) in cpu {
-                        let slot = acc.cpu_ticks.entry(key).or_default();
-                        *slot = (*slot).max(ticks);
-                    }
-                }
+                acc.note(&sample, family_uid.is_some());
             }
             // Early samples come quickly so short jobs still get a reading, then back off.
             if stop_rx.recv_timeout(delay) != Err(mpsc::RecvTimeoutError::Timeout) {
@@ -540,16 +613,17 @@ pub fn run_measured(kind: &str, command: &[String], proc_root: &Path) -> i32 {
         }
     };
     if status.is_ok() {
-        let (peak_kb, family_kb, sampled_ticks) = acc
+        let (peak_kb, family_kb, family_cpu_secs, sampled_ticks) = acc
             .try_lock()
             .map(|a| {
                 (
                     a.peak_rss_kb,
                     a.peak_family_kb,
+                    a.family_cpu_secs(),
                     a.cpu_ticks.values().sum::<u64>(),
                 )
             })
-            .unwrap_or((None, None, 0));
+            .unwrap_or((None, None, None, 0));
         let cpu_secs =
             reaped_cpu_secs().or((sampled_ticks > 0).then_some(sampled_ticks as f64 / CLK_TCK));
         let row = UsageRow {
@@ -561,6 +635,7 @@ pub fn run_measured(kind: &str, command: &[String], proc_root: &Path) -> i32 {
             wall_secs: round(wall.as_secs_f64(), 2),
             peak_rss_mb: peak_kb.map(|kb| round(kb as f64 / 1024.0, 1)),
             gradle_family_rss_mb: family_kb.map(|kb| round(kb as f64 / 1024.0, 1)),
+            gradle_family_cpu_secs: family_cpu_secs.map(|c| round(c, 2)),
             cpu_secs: cpu_secs.map(|c| round(c, 2)),
             exit,
             start: start_ctx,
@@ -618,6 +693,25 @@ fn read_rows(path: &Path) -> io::Result<Vec<UsageRow>> {
         .collect())
 }
 
+/// Average cores of each run -- CPU seconds over wall seconds -- that reports both, ascending.
+fn avg_cores<'a>(
+    rows: impl Iterator<Item = &'a UsageRow>,
+    cpu: fn(&UsageRow) -> Option<f64>,
+) -> Vec<f64> {
+    let mut cores: Vec<f64> = rows
+        .filter_map(|r| Some(cpu(r)? / r.wall_secs))
+        .filter(|cores| cores.is_finite())
+        .collect();
+    cores.sort_by(f64::total_cmp);
+    cores
+}
+
+fn cores_summary(sorted: &[f64]) -> serde_json::Value {
+    let mean =
+        (!sorted.is_empty()).then(|| round(sorted.iter().sum::<f64>() / sorted.len() as f64, 2));
+    serde_json::json!({"mean": mean, "p50": percentile(sorted, 50), "p90": percentile(sorted, 90), "max": sorted.last()})
+}
+
 /// Per (toolchain, class) summary of rows no older than `days`.
 pub fn summarize(rows: &[UsageRow], now: u64, days: u32) -> serde_json::Value {
     let floor = now.saturating_sub(u64::from(days) * 86400);
@@ -636,6 +730,12 @@ pub fn summarize(rows: &[UsageRow], now: u64, days: u32) -> serde_json::Value {
             let family = sorted(rows.iter().filter_map(|r| r.gradle_family_rss_mb).collect());
             let cpu: Vec<f64> = rows.iter().filter_map(|r| r.cpu_secs).collect();
             let cpu_mean = (!cpu.is_empty()).then(|| round(cpu.iter().sum::<f64>() / cpu.len() as f64, 2));
+            // The basis for the load reserved for a run of this group: `cpu_secs` is CPU seconds
+            // per run, not cores. For Gradle only the family's says anything: `cpu_secs` misses
+            // the daemon and the test workers.
+            let cores = avg_cores(rows.iter().copied(), |r| r.cpu_secs);
+            let family_cores =
+                avg_cores(rows.iter().copied(), |r| r.gradle_family_cpu_secs);
             serde_json::json!({
                 "toolchain": toolchain,
                 "class": class,
@@ -644,6 +744,8 @@ pub fn summarize(rows: &[UsageRow], now: u64, days: u32) -> serde_json::Value {
                 "gradle_family_rss_mb": {"p50": percentile(&family, 50), "p90": percentile(&family, 90), "max": family.last()},
                 "wall_secs": {"p50": percentile(&wall, 50), "p90": percentile(&wall, 90)},
                 "cpu_secs_mean": cpu_mean,
+                "avg_cores": cores_summary(&cores),
+                "gradle_family_avg_cores": cores_summary(&family_cores),
             })
         })
         .collect();
@@ -652,6 +754,11 @@ pub fn summarize(rows: &[UsageRow], now: u64, days: u32) -> serde_json::Value {
 
 fn cell(value: &serde_json::Value) -> String {
     value.as_f64().map_or("-".into(), |n| format!("{n:.1}"))
+}
+
+/// Two decimals: for figures read as cores.
+fn cores_cell(value: &serde_json::Value) -> String {
+    value.as_f64().map_or("-".into(), |n| format!("{n:.2}"))
 }
 
 pub fn usage(json: bool, days: u32) -> i32 {
@@ -667,10 +774,10 @@ pub fn usage(json: bool, days: u32) -> i32 {
             0
         }
         Ok(value) => {
-            println!("toolchain class     count  rss_p50  rss_p90  rss_max  wall_p50  wall_p90  cpu_mean");
+            println!("toolchain class     count  rss_p50  rss_p90  rss_max  wall_p50  wall_p90  cpu_mean  cores_mean");
             for g in value["groups"].as_array().into_iter().flatten() {
                 println!(
-                    "{:<9} {:<9} {:>5} {:>8} {:>8} {:>8} {:>9} {:>9} {:>9}",
+                    "{:<9} {:<9} {:>5} {:>8} {:>8} {:>8} {:>9} {:>9} {:>9} {:>11}",
                     g["toolchain"].as_str().unwrap_or("?"),
                     g["class"].as_str().unwrap_or("?"),
                     g["count"],
@@ -680,6 +787,7 @@ pub fn usage(json: bool, days: u32) -> i32 {
                     cell(&g["wall_secs"]["p50"]),
                     cell(&g["wall_secs"]["p90"]),
                     cell(&g["cpu_secs_mean"]),
+                    cores_cell(&g["avg_cores"]["mean"]),
                 );
             }
             0
@@ -822,6 +930,125 @@ mod tests {
         .unwrap();
         fs::write(dir.join("status"), format!("VmRSS:\t{rss_kb} kB\n")).unwrap();
         fs::write(dir.join("cmdline"), cmdline.join("\0") + "\0").unwrap();
+    }
+
+    /// Set a process's CPU ticks (utime + stime) in its `stat` line; every other field stays.
+    /// `fake_proc` starts every process at 2.
+    fn ticks(root: &Path, pid: u32, cpu: u64) {
+        let path = root.join(pid.to_string()).join("stat");
+        let text = fs::read_to_string(&path).unwrap();
+        let close = text.rfind(')').unwrap();
+        let mut fields: Vec<String> = text[close + 1..]
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        fields[11] = cpu.to_string();
+        fields[12] = "0".into();
+        fs::write(
+            path,
+            format!("{}{}\n", &text[..close + 1], fields.join(" ")),
+        )
+        .unwrap();
+    }
+
+    /// 4.6: the family's CPU is what it burned between the first and the highest sample -- the
+    /// daemon's work before the run is not the run's -- over the tree and the detached Gradle JVMs
+    /// alike, and of no other java.
+    #[test]
+    fn gradle_family_cpu_is_what_the_family_burned_between_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_proc(dir.path(), 10, 1, 100, &["java", "GradleWrapperMain"]);
+        fake_proc(
+            dir.path(),
+            20,
+            1,
+            2000,
+            &[
+                "/usr/bin/java",
+                "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+            ],
+        );
+        fake_proc(
+            dir.path(),
+            21,
+            20,
+            1000,
+            &[
+                "java",
+                "worker.org.gradle.process.internal.worker.GradleWorkerMain",
+            ],
+        );
+        fake_proc(dir.path(), 30, 1, 500, &["java", "-jar", "app.jar"]);
+        let uid = fs::metadata(dir.path()).unwrap().uid();
+        let sample = |family: bool| sample_tree(dir.path(), 10, family.then_some(uid)).unwrap();
+        let mut acc = Acc::default();
+        assert_eq!(acc.family_cpu_secs(), None, "nothing sampled yet");
+        acc.note(&sample(true), true);
+        // `fake_proc` starts every process at 2 ticks. The wrapper burns 100 more, the detached
+        // daemon 500, its worker 300; the unrelated java 999.
+        for (pid, cpu) in [(10, 102), (20, 502), (21, 302), (30, 1001)] {
+            ticks(dir.path(), pid, cpu);
+        }
+        acc.note(&sample(true), true);
+        assert_eq!(acc.family_cpu_secs(), Some(9.0));
+        // A sample changes nothing more: the family idles.
+        acc.note(&sample(true), true);
+        assert_eq!(acc.family_cpu_secs(), Some(9.0));
+        // Not a Gradle run: the family is not followed.
+        let mut acc = Acc::default();
+        acc.note(&sample(false), false);
+        assert_eq!(acc.family_cpu_secs(), None);
+    }
+
+    /// A process first seen after the first sample was started by the run, so all of its ticks are
+    /// the run's; only one that existed at the first sample, a resident daemon, has burned
+    /// anything before it. The worker is counted the same way hanging off the detached daemon,
+    /// outside the run's tree, and off the client, inside it.
+    #[test]
+    fn gradle_family_cpu_counts_all_the_ticks_of_a_worker_born_after_the_first_sample() {
+        for worker_ppid in [20, 10] {
+            let dir = tempfile::tempdir().unwrap();
+            fake_proc(dir.path(), 10, 1, 100, &["java", "GradleWrapperMain"]);
+            fake_proc(
+                dir.path(),
+                20,
+                1,
+                2000,
+                &[
+                    "/usr/bin/java",
+                    "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+                ],
+            );
+            ticks(dir.path(), 20, 10_000);
+            let uid = fs::metadata(dir.path()).unwrap().uid();
+            let sample = || sample_tree(dir.path(), 10, Some(uid)).unwrap();
+            let mut acc = Acc::default();
+            acc.note(&sample(), true);
+            // The run starts a worker between the first and the second sample; it has used 500
+            // ticks by then and 800 by the third.
+            fake_proc(
+                dir.path(),
+                21,
+                worker_ppid,
+                1000,
+                &[
+                    "java",
+                    "worker.org.gradle.process.internal.worker.GradleWorkerMain",
+                ],
+            );
+            ticks(dir.path(), 21, 500);
+            ticks(dir.path(), 20, 10_300);
+            acc.note(&sample(), true);
+            ticks(dir.path(), 21, 800);
+            acc.note(&sample(), true);
+            assert_eq!(acc.family_cpu.len(), 3, "worker ppid {worker_ppid}");
+            // 800 of the worker, 300 of the daemon.
+            assert_eq!(
+                acc.family_cpu_secs(),
+                Some(11.0),
+                "worker ppid {worker_ppid}"
+            );
+        }
     }
 
     #[test]
