@@ -825,7 +825,12 @@ fn gradle_worker_does_not_deny_build_or_test() {
                 .env("CLAUDECAT_GRADLE_SAMPLE_MS", "400")
                 .output()
                 .expect("check");
-            assert_eq!(code(&output), 0, "{kind}: {}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(
+                code(&output),
+                0,
+                "{kind}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     });
 }
@@ -1888,4 +1893,258 @@ fn other_kind_has_its_own_pool() {
     let o = f.run(&["gate", "run", "--", "touch", marker.to_str().unwrap()]);
     assert_eq!(code(&o), 75);
     assert!(!marker.exists());
+}
+
+/// An executable stand-in for `./gradlew`, so an allowed `gate run -- ./gradlew ...` exits 0.
+fn fake_gradlew(f: &Fixture) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = f.temp.path().join("gradlew");
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("gradlew");
+    let mut permissions = fs::metadata(&path).expect("gradlew").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("gradlew mode");
+}
+
+fn reserved_status(f: &Fixture) -> String {
+    String::from_utf8(f.run(&["status"]).stdout).unwrap()
+}
+
+#[test]
+fn warming_up_gradle_test_reserves_one_estimate_per_fork() {
+    let now = now_secs();
+    // 7000MB available: two forks reserve 6144MB and leave 856MB, below cargo's 1536MB.
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(7000 * 1024, 0);
+    let _slot = hold_holder(
+        &f,
+        "slot-0.lock",
+        77,
+        &["./gradlew", "test", "-PtestForks=2"],
+        now,
+    );
+    let _gradle = hold_holder(
+        &f,
+        "compiler-gradle.lock",
+        77,
+        &["./gradlew", "test", "-PtestForks=2"],
+        now,
+    );
+    // One holder in two locks reserves once.
+    assert!(reserved_status(&f).contains("reserved=gradle:6144MB"));
+    let line = deny_line(&hook_command(&f, "cargo test", f.temp.path()));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    assert!(line.contains("reserved=gradle:6144MB "), "{line}");
+    assert!(line.contains("holders above"), "{line}");
+    assert_eq!(line.lines().count(), 1);
+
+    // A holder may run its Gradle command through a shell.
+    let g = Fixture::new("0.5", 0);
+    g.meminfo(7000 * 1024, 0);
+    let _slot = hold_holder(
+        &g,
+        "slot-0.lock",
+        78,
+        &["sh", "-c", "./gradlew test -PtestForks=2"],
+        now,
+    );
+    assert!(reserved_status(&g).contains("reserved=gradle:6144MB"));
+
+    // The same holder asking for one fork leaves enough for cargo.
+    let one = Fixture::new("0.5", 0);
+    one.meminfo(7000 * 1024, 0);
+    let _slot = hold_holder(
+        &one,
+        "slot-0.lock",
+        77,
+        &["./gradlew", "test", "-PtestForks=1"],
+        now,
+    );
+    assert!(reserved_status(&one).contains("reserved=gradle:3072MB"));
+    assert_eq!(code(&hook_command(&one, "cargo test", one.temp.path())), 0);
+}
+
+#[test]
+fn gate_run_reserves_gradle_test_forks_also_through_a_shell() {
+    let f = Fixture::new("0.5", 0);
+    fake_gradlew(&f);
+    // 4000MB available: two forks need 6144MB, one fork's 3072MB fits.
+    let run = |command: &[&str]| {
+        f.cmd(&["gate", "run", "--kind", "test", "--"])
+            .args(command)
+            .current_dir(f.temp.path())
+            .output()
+            .expect("gate run")
+    };
+    let denied = [
+        vec!["./gradlew", "test", "-PtestForks=2"],
+        vec!["sh", "-c", "./gradlew test -PtestForks=2"],
+        vec!["bash", "-l", "-c", "cd x && ./gradlew test -PtestForks=2"],
+    ];
+    for command in &denied {
+        let o = run(command);
+        assert_eq!(
+            code(&o),
+            75,
+            "{command:?} {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let line = String::from_utf8(o.stderr).unwrap();
+        assert!(line.starts_with("gate denied (reserved) "), "{line}");
+        assert!(line.contains("reserved=none"), "{line}");
+    }
+    let allowed = [
+        vec!["./gradlew", "test", "-PtestForks=1"],
+        // An invalid count is no statement, and the gate knows no machine here: one fork.
+        vec!["./gradlew", "test", "-PtestForks=x"],
+        // Not a test run.
+        vec!["sh", "-c", "./gradlew build"],
+    ];
+    for command in &allowed {
+        let o = run(command);
+        assert_eq!(
+            code(&o),
+            0,
+            "{command:?} {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+#[test]
+fn hook_denies_a_gradle_test_whose_forks_do_not_fit() {
+    // The hook checks the new command's own need, not only what is already reserved: with
+    // 4000MB available and nothing reserved, two forks (6144MB) are denied and one (3072MB) fits.
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(4000 * 1024, 0);
+    let line = deny_line(&hook_command(
+        &f,
+        "./gradlew test -PtestForks=2",
+        f.temp.path(),
+    ));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    assert!(line.contains("reserved=none"), "{line}");
+    assert_eq!(
+        code(&hook_command(
+            &f,
+            "./gradlew test -PtestForks=1",
+            f.temp.path()
+        )),
+        0
+    );
+    // Excluding the tests is no test run, even where the default would be 2 forks.
+    let g = Fixture::new("0.5", 0);
+    g.meminfo(4000 * 1024, 0);
+    g.machine(16, 32_768_000);
+    assert_eq!(
+        code(&hook_command(&g, "./gradlew build -x test", g.temp.path())),
+        0
+    );
+}
+
+#[test]
+fn gradle_test_admission_reserves_one_estimate_per_fork() {
+    let f = Fixture::new("0.5", 0);
+    // 20000MB available: 2 x 3072MB fits.
+    f.meminfo(20_000 * 1024, 0);
+    assert_eq!(
+        code(&logged_hook(
+            &f,
+            Some("sess-a"),
+            "./gradlew test -PtestForks=2"
+        )),
+        0
+    );
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["toolchains"], serde_json::json!(["gradle"]));
+    assert_eq!(rows[0]["gradle_forks"], 2);
+    // Still no command text: only the fork count was added.
+    assert_eq!(rows[0].as_object().unwrap().len(), 4, "{rows:?}");
+    assert!(reserved_status(&f).contains("reserved=gradle:6144MB"));
+    // 7000MB available leave 856MB after the 6144MB: below cargo's 1536MB.
+    f.meminfo(7000 * 1024, 0);
+    let line = deny_line(&hook_command(&f, "cargo test", f.temp.path()));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    assert!(line.contains("reserved=gradle:6144MB "), "{line}");
+    // No slot or lock holder exists, only the admission.
+    assert!(line.contains("reservation warm-up passes"), "{line}");
+    assert!(!line.contains("holders above"), "{line}");
+
+    // The same session's next Gradle run replaces the row, forks included.
+    f.meminfo(20_000 * 1024, 0);
+    assert_eq!(code(&logged_hook(&f, Some("sess-a"), "./gradlew build")), 0);
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].get("gradle_forks").is_none(),
+        "one fork is not written"
+    );
+    let status = reserved_status(&f);
+    assert!(status.contains("reserved=gradle:3072MB"), "{status}");
+    assert!(!status.contains("6144"), "{status}");
+}
+
+#[test]
+fn gradle_test_forks_default_to_the_machine() {
+    // 16 CPUs and 32 GB: the build's default is 2 forks. (`machine` adds MemTotal to the meminfo
+    // that `meminfo` writes, so it goes last.)
+    let f = Fixture::new("0.5", 0);
+    f.meminfo(20_000 * 1024, 0);
+    f.machine(16, 32_768_000);
+    assert_eq!(code(&hook_command(&f, "./gradlew test", f.temp.path())), 0);
+    let rows = admission_rows(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["gradle_forks"], 2);
+    assert!(reserved_status(&f).contains("reserved=gradle:6144MB"));
+    // A command that states its forks wins over the default.
+    fs::remove_file(admissions_path(&f)).unwrap();
+    assert_eq!(
+        code(&hook_command(
+            &f,
+            "./gradlew :backend:test -P testForks=3",
+            f.temp.path()
+        )),
+        0
+    );
+    assert!(reserved_status(&f).contains("reserved=gradle:9216MB"));
+    // Not a test run: one estimate, whatever the machine.
+    fs::remove_file(admissions_path(&f)).unwrap();
+    assert_eq!(code(&hook_command(&f, "./gradlew build", f.temp.path())), 0);
+    let rows = admission_rows(&f);
+    assert_eq!(rows[0].as_object().unwrap().len(), 3, "{rows:?}");
+    assert!(reserved_status(&f).contains("reserved=gradle:3072MB"));
+
+    // 2 CPUs, or 6 GB of memory: one fork.
+    for (cpus, mem_total_kb) in [(2, 32_768_000), (16, 6_144_000)] {
+        let g = Fixture::new("0.5", 0);
+        g.machine(cpus, mem_total_kb);
+        assert_eq!(code(&hook_command(&g, "./gradlew test", g.temp.path())), 0);
+        let status = reserved_status(&g);
+        assert!(status.contains("reserved=gradle:3072MB"), "{status}");
+        assert!(!status.contains("6144"), "{status}");
+    }
+    // A machine the gate knows nothing about (no cpuinfo, no MemTotal): one fork as well.
+    let g = Fixture::new("0.5", 0);
+    assert_eq!(code(&hook_command(&g, "./gradlew test", g.temp.path())), 0);
+    let rows = admission_rows(&g);
+    assert_eq!(rows[0].as_object().unwrap().len(), 3, "{rows:?}");
+    assert!(reserved_status(&g).contains("reserved=gradle:3072MB"));
+}
+
+#[test]
+fn admission_rows_from_before_forks_reserve_one_estimate() {
+    // 16 CPUs and 32 GB, where a new test run defaults to 2 forks: a row written by an older
+    // binary states none and counts as one.
+    let f = Fixture::new("0.5", 0);
+    f.machine(16, 32_768_000);
+    fs::create_dir_all(f.gate()).unwrap();
+    let old = serde_json::json!({"ts": now_secs(), "session": null, "toolchains": ["gradle"]});
+    fs::write(admissions_path(&f), format!("{old}\n")).unwrap();
+    // 4000MB available: one estimate leaves 928MB, below cargo's 1536MB.
+    let status = reserved_status(&f);
+    assert!(status.contains("reserved=gradle:3072MB"), "{status}");
+    assert!(!status.contains("6144"), "{status}");
+    let line = deny_line(&hook_command(&f, "cargo test", f.temp.path()));
+    assert!(line.starts_with("gate denied (reserved) "), "{line}");
+    assert!(line.contains("reserved=gradle:3072MB "), "{line}");
 }
