@@ -3357,7 +3357,8 @@ fn holders_open_through_no_symlink_and_check_the_file_they_opened() {
 
 /// 4.4: every figure of `capacity`, from a machine and a registry whose contents are known. The
 /// warm-up window is 6000s and whatever is warming sits halfway through it, so each reservation
-/// counts at half and a second more or less of clock changes nothing at two decimals.
+/// counts at half and a second more or less of clock changes nothing at two decimals. The window
+/// itself is reported too, so that a reader knows how long the reservations are to be believed.
 #[test]
 fn status_capacity_reports_every_figure() {
     let f = Fixture::new("1.2", 0);
@@ -3394,7 +3395,7 @@ fn status_capacity_reports_every_figure() {
             "cpus": 8, "mem_total_mb": 16000, "max_load": 8.0, "load_1m": 1.2,
             "reserved_load": 3.0, "load_headroom": 3.8, "mem_available_mb": 10000,
             "reserved_mb": 10240, "mem_headroom_mb": 0, "mem_pressure": 0.5,
-            "blocked": [], "warming": 5,
+            "blocked": [], "warming": 5, "warmup_secs": 6000,
         }),
         "{v}"
     );
@@ -3420,6 +3421,7 @@ fn status_capacity_reports_every_figure() {
             "reserved_load",
             "reserved_mb",
             "warming",
+            "warmup_secs",
         ]
     );
     // The keys that stayed at the top say the same.
@@ -3462,7 +3464,7 @@ fn capacity_is_null_where_the_machine_tells_nothing() {
             "cpus": null, "mem_total_mb": null, "max_load": 6.0, "load_1m": 0.5,
             "reserved_load": 0.0, "load_headroom": 5.5, "mem_available_mb": 4000,
             "reserved_mb": 1024, "mem_headroom_mb": 2976, "mem_pressure": null,
-            "blocked": [], "warming": 1,
+            "blocked": [], "warming": 1, "warmup_secs": 60,
         }),
         "{v}"
     );
@@ -3474,6 +3476,28 @@ fn capacity_is_null_where_the_machine_tells_nothing() {
         text.contains("capacity: mem_available=4000MB reserved=1024MB mem_headroom=2976MB psi=n/a blocked=none warming=1\n"),
         "{text}"
     );
+}
+
+/// `capacity.warmup_secs` is the window in effect on the machine: `CLAUDECAT_RESERVE_WARMUP_SECS`
+/// where it is a positive number, the default (60) otherwise. A reader that keeps a row's
+/// reservations for as long as this says is reading the machine's own gate, not the default.
+#[test]
+fn capacity_reports_the_warm_up_window_in_effect() {
+    let f = Fixture::new("0.5", 0);
+    let window = |env: &[(&str, &str)]| status_pair(&f, env).1["capacity"]["warmup_secs"].clone();
+    assert_eq!(window(&[]), serde_json::json!(60));
+    assert_eq!(
+        window(&[("CLAUDECAT_RESERVE_WARMUP_SECS", "600")]),
+        serde_json::json!(600)
+    );
+    // Not a positive whole number: the gate falls back to the default, and says so.
+    for not_a_window in ["0", "abc", "-5", "1.5", ""] {
+        assert_eq!(
+            window(&[("CLAUDECAT_RESERVE_WARMUP_SECS", not_a_window)]),
+            serde_json::json!(60),
+            "{not_a_window:?}"
+        );
+    }
 }
 
 /// 4.4: `blocked` is what denies a build or test run that needs nothing of its own right now -- the
@@ -3493,12 +3517,21 @@ fn blocked_names_what_denies_a_build_with_no_need_right_now() {
     let f = Fixture::new("0.5", 0);
     f.meminfo(1500 * 1024, 0);
     assert_eq!(capacity(&f, &[])["blocked"], serde_json::json!(["memory"]));
-    // The measured load over the limit.
+    // The measured load over the limit. Headroom is how much load can still be added, so it stops
+    // at 0 (4.4, the owner: it cannot be negative): how far over the machine is shows in `load_1m`
+    // and in `blocked`.
     let f = Fixture::new("7", 0);
-    let cap = capacity(&f, &[]);
+    let (text, v) = status_pair(&f, &[]);
+    let cap = &v["capacity"];
     assert_eq!(cap["blocked"], serde_json::json!(["load"]));
-    assert_eq!(cap["load_headroom"], -1.0);
-    // Reserved load pushing it over: 0.5 + 1.0 (a cargo run, half decayed) > 1.4.
+    assert_eq!(cap["load_1m"], 7.0);
+    assert_eq!(cap["max_load"], 6.0);
+    assert_eq!(cap["load_headroom"], 0.0);
+    assert!(
+        text.contains("load_1m=7.00 reserved_load=0.00 load_headroom=0.00\n"),
+        "{text}"
+    );
+    // Reserved load pushing it over: 0.5 + 1.0 (a cargo run, half decayed) > 1.4. Floored as well.
     let f = Fixture::new("0.5", 0);
     let _holder = hold_run(&f, 77, "build", &["cargo", "test"], now_secs() - 3000);
     let cap = capacity(
@@ -3509,8 +3542,25 @@ fn blocked_names_what_denies_a_build_with_no_need_right_now() {
         ],
     );
     assert_eq!(cap["reserved_load"], 1.0);
-    assert_eq!(cap["load_headroom"], -0.1);
+    assert_eq!(cap["load_headroom"], 0.0);
     assert_eq!(cap["blocked"], serde_json::json!(["load"]));
+    // Just under the limit, the floor changes nothing: 1.4 - 0.5 - 1.0 is what is left.
+    let cap = capacity(
+        &f,
+        &[
+            ("CLAUDECAT_RESERVE_WARMUP_SECS", "6000"),
+            ("CLAUDECAT_MAX_LOAD", "1.6"),
+        ],
+    );
+    assert_eq!(cap["load_headroom"], 0.1);
+    assert_eq!(cap["blocked"], serde_json::json!([]));
+    // A hair below zero rounds to a negative zero. That is 0 as well, and prints as such: never
+    // `-0.0` in the document nor `-0.00` in the text. 5.9 measured, 6 the limit, 0.1 reserved.
+    let f = Fixture::new("5.9", 0);
+    let _holder = hold_run(&f, 77, "build", &["./gradlew", "build"], now_secs());
+    let (text, v) = status_pair(&f, &[("CLAUDECAT_RESERVE_GRADLE_LOAD", "0.1")]);
+    assert_eq!(v["capacity"]["load_headroom"].to_string(), "0.0");
+    assert!(text.contains("load_headroom=0.00\n"), "{text}");
     // Both, in the order of the gate's message.
     let f = Fixture::new("7", 0);
     f.pressure("10.01");
@@ -3687,20 +3737,27 @@ fn gate_log_still_sums_old_rows_with_removed_reasons() {
 }
 
 /// 7-7: the real `status --json` of this build, through `summarize` and `pick`. A machine that
-/// reports no slots is judged on its capacity: one that fits is picked under either kind, one that
-/// is blocked is not, however much memory it has, and neither is one whose memory the reservations
-/// have used up, though it reports nothing blocked.
+/// reports no slots is judged on its capacity. With the needs of a Gradle run (3072 MB and 1 core)
+/// or of an other one (1024 MB, no load), one that fits is picked; one that is blocked is not,
+/// however much memory it has, and neither is one whose memory the reservations have used up,
+/// though it reports nothing blocked. The headroom is never negative, in the document and after
+/// `summarize`.
 #[test]
 fn fleet_pick_reads_the_status_document_of_this_build() {
     use claudecat::fleet::assemble;
     use claudecat::fleet_store::Row;
-    use claudecat::fleet_view::{pick, summarize, Pool, State};
+    use claudecat::fleet_view::{pick, summarize, Need, State};
     let now = now_secs();
     let fresh = Fixture::new("0.5", 0);
     fresh.meminfo(12_000 * 1024, 0);
     // Warming cargo runs reserve 4.0: 0.5 + 4.0 is under 6.
     let _a = hold_run(&fresh, 77, "build", &["cargo", "test"], now);
     let _b = hold_run(&fresh, 78, "build", &["cargo", "test"], now);
+    // Three compilers of those two runs are running: each is listed, and neither run counts once
+    // more for them.
+    for pid in [201, 202, 203] {
+        fresh.process(pid, "rustc", &["rustc", "main.rs"], 77);
+    }
     // The same two on a machine with 4000 MB: they reserve 3072 of them, too little is left for a
     // Gradle run, and nothing else is the matter with it.
     let booked = Fixture::new("0.5", 0);
@@ -3719,8 +3776,14 @@ fn fleet_pick_reads_the_status_document_of_this_build() {
             .env("CLAUDECAT_MAX_LOAD", max_load)
             .output()
             .expect("status");
-        let status = serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("document");
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).expect("document");
         assert!(status.get("slots").is_none(), "this build reports no slots");
+        assert!(
+            status["capacity"]["load_headroom"]
+                .as_f64()
+                .is_some_and(|h| h >= 0.0),
+            "headroom is never negative: {status}"
+        );
         let snap = assemble(host, "linux", now, Ok(status), Some(vec![]));
         Row {
             host: host.into(),
@@ -3736,17 +3799,38 @@ fn fleet_pick_reads_the_status_document_of_this_build() {
     ];
     let summaries: Vec<_> = rows.iter().map(|r| summarize(r, now)).collect();
     assert!(summaries.iter().all(|s| s.state == State::Ok));
-    for pool in [Pool::Gradle, Pool::Other] {
-        let picked: Vec<_> = pick(&summaries, pool)
+    for need in [
+        Need {
+            mb: 3072,
+            load: 1.0,
+        },
+        Need {
+            mb: 1024,
+            load: 0.0,
+        },
+    ] {
+        let picked: Vec<_> = pick(&summaries, need)
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap())
             .collect();
-        assert_eq!(picked.len(), 1, "{pool:?}: {picked:?}");
+        assert_eq!(picked.len(), 1, "{need:?}: {picked:?}");
         assert_eq!(picked[0]["host"], "small");
-        assert_eq!(picked[0]["free_slots"], serde_json::Value::Null);
-        assert_eq!(picked[0]["mem_available_mb"], 12_000);
+        assert_eq!(picked[0]["blocked"], serde_json::json!([]));
         assert_eq!(picked[0]["mem_headroom_mb"], 12_000 - 3072);
+        // The fixture's proc has no cpuinfo and no MemTotal.
+        assert_eq!(picked[0]["cpus"], serde_json::Value::Null);
+        assert_eq!(picked[0]["mem_total_mb"], serde_json::Value::Null);
+        // 6 - 0.5 - 4.0 reserved, less a moment of decay.
+        let headroom = picked[0]["load_headroom"].as_f64().unwrap();
+        assert!((1.5..=1.6).contains(&headroom), "{headroom}");
     }
+    // Nothing asked: `booked` is listed too, with what its reservations leave it.
+    let mut listed: Vec<_> = pick(&summaries, Need::NOTHING)
+        .into_iter()
+        .map(|p| p.host)
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["booked", "small"]);
     let summary = |host: &str, key: &str| {
         summaries
             .iter()
@@ -3761,6 +3845,16 @@ fn fleet_pick_reads_the_status_document_of_this_build() {
     assert_eq!(summary("booked", "mem_headroom_mb"), 4000 - 3072);
     assert_eq!(summary("pressed", "blocked"), serde_json::json!(["memory"]));
     assert_eq!(summary("big", "blocked"), serde_json::json!(["load"]));
+    assert_eq!(summary("big", "load_headroom"), 0.0);
+    // Two `gate run` holders, three compilers under them: two jobs, not five.
+    assert_eq!(summary("small", "holders"), 2);
+    assert_eq!(summary("small", "compiling"), 3);
+    assert!(
+        summaries
+            .iter()
+            .all(|s| serde_json::to_value(s).unwrap().get("running").is_none()),
+        "the one summed figure is gone"
+    );
 }
 
 /// `status` as text and as the JSON document, with `env` set for both.

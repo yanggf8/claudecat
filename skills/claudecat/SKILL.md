@@ -1,11 +1,32 @@
 ---
 name: claudecat
-description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, use cortexyoung/cort for explicitly recorded project memory, and quantify exploration cost. Use when the user asks about a project map, a symbol location, cort index health, or invokes /claudecat.
+description: Run ClaudeCat (pure Rust CLI v2) to map and navigate a project, use cortexyoung/cort for explicitly recorded project memory, and quantify exploration cost. Use when the user asks about a project map, a symbol location, cort index health, or invokes /claudecat. Also gate heavy work on load and memory (`claudecat gate`) and pick a machine with room across the fleet (`claudecat fleet`), which is ClaudeCat's main job.
 ---
 
-# ClaudeCat — Project Map & cort Integration
+# ClaudeCat — Gate, Fleet, Project Map & cort Integration
 
 Pure Rust CLI. Run via Bash; binary is on PATH as `claudecat`. All subcommands default to cwd (`--root` to override).
+
+## Gate and fleet (ClaudeCat's main job)
+
+ClaudeCat gates heavy work on resources only: load (with the load reserved for runs still warming up), memory pressure, and available memory (with its reservations). There are **no slots and no compiler lock**: any number of runs may start while load and memory allow.
+
+```bash
+claudecat gate check [--kind build|test|e2e|other]   # exit 0 = may start; exit 75 = wait (reason on stderr)
+claudecat gate run [--kind …] -- <cmd>               # runs <cmd> under nice once it fits; the command's exit code, 75 when denied
+claudecat status [--json]                            # this machine: load, memory, `capacity`, who holds a gate run
+claudecat fleet                                      # every machine: CPUS, MEM_GB, LOAD, HEADROOM, FREE_GB, BLOCKED, WARM, RUN, COMP, SESS
+claudecat fleet pick --need-mb 3072 --need-load 1    # machines with that much memory and load headroom, best first; exit 1 when none
+```
+
+- **Rules.** `max_load` = CPUs × 1.0 (`CLAUDECAT_MAX_LOAD`). Memory: PSI `some avg10` > 10 or MemAvailable < 1536 MB (`CLAUDECAT_MAX_MEM_PRESSURE`, `CLAUDECAT_MIN_AVAILABLE_MB`). Denials are `load`, `memory`, `reserved`, `duplicate` (the same Cargo command already runs in the same directory) and `resources` (load or memory could not be read). Every denial is exit 75 with a line starting `gate denied (<reason>) `. Where that line goes depends on the entry point: `gate check` and `gate run` write it to **stderr**; `gate hook` writes it to **stdout** (read stdout for a hook's denial).
+- **build/test/e2e** are denied `load` when `load_1m + reserved_load + need_load > max_load`; **`other`** (the default kind) only when `load_1m > max_load`, and `reserved` when `MemAvailable − reserved_mb` is under 1024 MB (`CLAUDECAT_RESERVE_OTHER_MB`).
+- **Reservations** last the warm-up window (`CLAUDECAT_RESERVE_WARMUP_SECS`, 60 s) and the load decays linearly: memory gradle 3072 MB per test fork and cargo 1536 MB (`CLAUDECAT_RESERVE_GRADLE_MB`, `CLAUDECAT_RESERVE_CARGO_MB`); load cargo max(2, cpus × 0.25) and gradle 1.0 per fork (`CLAUDECAT_RESERVE_CARGO_LOAD`, `CLAUDECAT_RESERVE_GRADLE_LOAD`).
+- `CLAUDECAT_SLOTS` and `CLAUDECAT_OTHER_SLOTS` no longer apply.
+- **`capacity`** in `status --json`: `cpus`, `mem_total_mb`, `max_load`, `load_1m`, `reserved_load`, `load_headroom` (never negative), `mem_available_mb`, `reserved_mb`, `mem_headroom_mb`, `mem_pressure`, `blocked` (what would deny a build now), `warming`, `warmup_secs` (the warm-up window in effect on that machine: `CLAUDECAT_RESERVE_WARMUP_SECS`, 60 s unless set to a positive number).
+- **`fleet pick --need-mb N --need-load X [--json]`** needs nothing by default (0 and 0), orders by load headroom, then memory headroom, then host name, and skips machines that are `UNKNOWN` or `blocked`. JSON per host: `host`, `load_headroom`, `mem_headroom_mb`, `cpus`, `mem_total_mb`, `load_1m`, `max_load`, `blocked`, `idle`. `--kind gradle|other` is deprecated for one version (gradle = `--need-mb 3072 --need-load 1`, other = `--need-mb 1024 --need-load 0`) and says so on stderr, naming the needs in effect (a `--need-mb` or `--need-load` you passed shows its own value there). A row older than the reporting machine's warm-up window (`capacity.warmup_secs`, 60 s when the row does not say) is read without its reservations.
+- **`fleet` figures of who runs.** RUN is `holders` (the `gate run` jobs) and COMP is `compiling` (compiler processes); they are two figures and never summed. `-` in the table and `null` in the JSON mean the row cannot tell, not that nothing runs: every `IDLE` row (the machine has stopped reporting), and `holders` on a machine still running a build from before #5955.
+- On a denial, wait as the message says and then retry; do not poll with `sleep` in the foreground.
 
 ## Commands
 
