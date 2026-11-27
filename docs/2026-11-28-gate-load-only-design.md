@@ -94,7 +94,7 @@ hook 與 gate run **共用 `admission.lock`** 做「檢查→登記」：
 → 放鎖
 ```
 
-Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行 fail-open 放行但不記錄；gate run 在等待預算內重試，逾時則照現行 `warning` 後執行。
+Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行行為，用鎖外的 snapshot 判斷、但不記錄 admission（v2 原寫「放行」不符現行程式，A1 審查時更正）；gate run 在等待預算內重試，逾時則照現行 `warning` 後執行，且**執行前先放掉已拿到的鎖**。
 
 #### 預留負載
 

@@ -44,7 +44,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show machine resources, gate slots, compilers, and orphan brokers
+    /// Show machine resources, gate run holders, compilers, and orphan brokers
     Status {
         #[arg(long)]
         json: bool,
@@ -178,7 +178,7 @@ enum GateAction {
         #[arg(long, value_enum, default_value = "other")]
         kind: Kind,
     },
-    /// Run a command with a slot at low CPU priority
+    /// Run a command when load and memory allow, at low CPU priority
     Run {
         #[arg(long, value_enum, default_value = "other")]
         kind: Kind,
