@@ -1,6 +1,6 @@
 //! The `claudecat fleet` subcommands.
 use crate::fleet_store::{resolve_config, Config, Store, UreqHttp};
-use crate::fleet_view::{pick, render_table, summarize, Pool, Summary};
+use crate::fleet_view::{pick, render_table, summarize, Need, Pool, Summary};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -73,16 +73,53 @@ pub fn show(json: bool) -> i32 {
     0
 }
 
-/// Hosts ordered by fitness for a new heavy job; exit 1 when none is fit.
-pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
+/// What `fleet pick` is to find room for, and the notice `--kind` earns when it is given. `--kind`
+/// sets the needs of its runs where `--need-mb` and `--need-load` say nothing; where they do, theirs
+/// are the needs.
+fn need_of(
+    kind: Option<Pool>,
+    need_mb: Option<u64>,
+    need_load: Option<f64>,
+) -> (Need, Option<String>) {
+    let (default_mb, default_load) = kind.map_or((0, 0.0), |kind| {
+        let need = kind.need();
+        (need.mb, need.load)
+    });
+    let need = Need {
+        mb: need_mb.unwrap_or(default_mb),
+        load: need_load.unwrap_or(default_load),
+    };
+    // One line on stderr, naming the flags that replace it; stdout stays the list or the JSON. It
+    // names the needs in effect -- the flags' own values where they were given -- so that a reader
+    // who follows it asks for the same thing, not for the kind's defaults.
+    let notice = kind.map(|_| {
+        format!(
+            "fleet pick: --kind is deprecated and will be removed in the next version; use --need-mb {} --need-load {} instead",
+            need.mb, need.load
+        )
+    });
+    (need, notice)
+}
+
+/// Hosts ordered by fitness for a new job; exit 1 when none is fit.
+pub fn pick_cmd(
+    kind: Option<Pool>,
+    need_mb: Option<u64>,
+    need_load: Option<f64>,
+    json: bool,
+) -> i32 {
+    let (need, notice) = need_of(kind, need_mb, need_load);
+    if let Some(notice) = notice {
+        let _ = writeln!(std::io::stderr(), "{notice}");
+    }
     let rows = match summaries() {
         Ok(r) => r,
         Err(e) => return fail(&e),
     };
-    let fit = pick(&rows, pool);
+    let fit = pick(&rows, need);
     if fit.is_empty() {
         return fail(
-            "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)",
+            "fleet pick: no eligible host (every host is unknown, blocked, or has less memory or load headroom than asked for)",
         );
     }
     if json {
@@ -93,12 +130,8 @@ pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
     } else {
         for p in &fit {
             println!(
-                "{} free_slots={} mem_available_mb={} load={:.2}/{:.2}",
-                p.host,
-                p.free_slots.map_or("-".to_owned(), |free| free.to_string()),
-                p.mem_available_mb,
-                p.load_1m,
-                p.max_load
+                "{} load_headroom={:.2} mem_headroom_mb={} load={:.2}/{:.2}",
+                p.host, p.load_headroom, p.mem_headroom_mb, p.load_1m, p.max_load
             );
         }
     }

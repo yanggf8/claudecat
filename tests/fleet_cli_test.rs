@@ -19,17 +19,19 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// The status document of a build older than `capacity` and `holders`: its slot pools, and the
+/// limits such a build reported.
 fn status(mem: u64, load: f64, used: usize) -> Value {
     let slots: Vec<Value> = (0..3)
         .map(|i| json!({"index": i, "holder": null, "occupied": i < used}))
         .collect();
     json!({"load_1m": load, "mem_available_mb": mem, "swap_used_mb": 0, "slots": slots,
-           "other_slots": [], "limits": {"slots": 3, "max_load": 6.0}, "compiling": []})
+           "other_slots": [], "compiling": [],
+           "limits": {"slots": 3, "other_slots": 0, "cpus": 6, "mem_total_mb": 8000, "max_load": 6.0}})
 }
 
-/// A row as the table stores it: (host, age in seconds, status document).
 /// The status document of a machine that reports `capacity` and no slots (every build with the
-/// load-only gate): `blocked` is why a new build would be denied there now.
+/// load-only gate): 6 CPUs, 8000 MB, `max_load`, nothing reserved, and `blocked` as given.
 fn new_status(host_load: f64, mem: u64, max_load: f64, blocked: &[&str]) -> Value {
     json!({
         "load_1m": host_load, "mem_available_mb": mem, "swap_used_mb": 0, "mem_pressure_some_avg10": 0.1,
@@ -42,6 +44,16 @@ fn new_status(host_load: f64, mem: u64, max_load: f64, blocked: &[&str]) -> Valu
             "blocked": blocked, "warming": 0,
         }
     })
+}
+
+/// The same with `reserved_mb` held for `warming` runs still warming up, as the machine reports it
+/// while they are.
+fn reserved(mut status: Value, reserved_mb: u64, warming: usize) -> Value {
+    let mem = status["capacity"]["mem_available_mb"].as_u64().unwrap();
+    status["capacity"]["reserved_mb"] = reserved_mb.into();
+    status["capacity"]["mem_headroom_mb"] = mem.saturating_sub(reserved_mb).into();
+    status["capacity"]["warming"] = warming.into();
+    status
 }
 
 fn db_row(host: &str, age: u64, st: Result<Value, String>) -> Vec<Value> {
@@ -189,19 +201,39 @@ fn push_failure_is_one_error_line_and_nonzero() {
     assert!(!err.contains("TOPSECRET"));
 }
 
+/// Run `fleet` or `fleet pick` and parse its JSON; it must have exited 0 and said nothing.
+fn json_of(s: &Stub, args: &[&str]) -> Value {
+    let o = run(s, args);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stderr), "", "nothing to say without --kind");
+    serde_json::from_slice(&o.stdout).unwrap()
+}
+
+fn hosts(v: &Value) -> Vec<&str> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["host"].as_str().unwrap())
+        .collect()
+}
+
+fn sorted_keys(v: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
+}
+
 #[test]
 fn fleet_json_lists_every_host_with_its_state() {
     let s = stub(
         vec![
             db_row("nuc", 10, Ok(status(5000, 0.5, 1))),
-            db_row("old", 600, Ok(status(9000, 0.1, 0))),
+            db_row("old", 600, Ok(status(9000, 0.25, 0))),
             db_row("mac", 10, Err("cannot read".into())),
         ],
         200,
     );
-    let o = run(&s, &["fleet", "--json"]);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let v = json_of(&s, &["fleet", "--json"]);
     let states: Vec<(&str, &str)> = v
         .as_array()
         .unwrap()
@@ -210,15 +242,180 @@ fn fleet_json_lists_every_host_with_its_state() {
         .collect();
     assert_eq!(states, [("nuc", "ok"), ("old", "idle"), ("mac", "unknown")]);
     assert_eq!(v[0]["mem_available_mb"], 5000);
-    assert_eq!(v[0]["slots_used"], 1);
-    assert_eq!(v[0]["slots_total"], 3);
+    assert_eq!(v[0]["load_headroom"], 5.5);
+}
+
+/// `fleet --json` is what a coordinator reads by program: the capacity of each host in figures
+/// every build reports the same way, and no slot count from any build. Who runs is two figures,
+/// `holders` (the `gate run` registrations: one job each, whatever the number of compilers it has
+/// running) and `compiling` (the compiler processes).
+#[test]
+fn fleet_json_reports_the_capacity_of_each_host_and_no_slot_count() {
+    let mut gpu = new_status(0.5, 9000, 16.0, &["memory"]);
+    gpu["holders"] = json!([
+        {"pid": 1, "kind": "build", "command": ["cargo", "test"], "started_at": 1},
+        {"pid": 2, "kind": "other", "command": ["sleep", "1"], "started_at": 1},
+    ]);
+    gpu["compiling"] = json!([
+        {"pid": 3, "name": "rustc", "cwd": "/x"},
+        {"pid": 4, "name": "rustc", "cwd": "/x"},
+        {"pid": 5, "name": "rustc", "cwd": "/x"},
+    ]);
+    let s = stub(
+        vec![
+            db_row("gpu", 10, Ok(gpu)),
+            db_row("nuc", 10, Ok(status(5000, 0.5, 1))),
+        ],
+        200,
+    );
+    let v = json_of(&s, &["fleet", "--json"]);
+    let gpu = &v[0];
+    assert_eq!(
+        sorted_keys(gpu),
+        [
+            "age_secs",
+            "blocked",
+            "compiling",
+            "cpus",
+            "holders",
+            "host",
+            "load_1m",
+            "load_headroom",
+            "max_load",
+            "mem_available_mb",
+            "mem_headroom_mb",
+            "mem_total_mb",
+            "os",
+            "sessions_busy",
+            "sessions_total",
+            "sessions_unsupported",
+            "state",
+            "updated_at",
+            "warming",
+        ],
+        "{gpu}"
+    );
+    for (key, value) in [
+        ("cpus", json!(6)),
+        ("mem_total_mb", json!(8000)),
+        ("load_1m", json!(0.5)),
+        ("max_load", json!(16.0)),
+        ("load_headroom", json!(15.5)),
+        ("mem_available_mb", json!(9000)),
+        ("mem_headroom_mb", json!(9000)),
+        ("blocked", json!(["memory"])),
+        ("warming", json!(0)),
+        ("holders", json!(2)),
+        ("compiling", json!(3)),
+    ] {
+        assert_eq!(gpu[key], value, "{key}");
+    }
+    assert!(gpu.get("running").is_none(), "one figure is gone: {gpu}");
+    // An old row is judged on its top-level figures; it tells nothing of what it never reported
+    // (capacity, holders), and what compilers it had running.
+    let nuc = &v[1];
+    for (key, value) in [
+        ("cpus", json!(6)),
+        ("mem_total_mb", json!(8000)),
+        ("load_headroom", json!(5.5)),
+        ("mem_headroom_mb", json!(5000)),
+        ("blocked", json!([])),
+        ("warming", Value::Null),
+        ("holders", Value::Null),
+        ("compiling", json!(0)),
+    ] {
+        assert_eq!(nuc[key], value, "{key}");
+    }
+    assert!(!v.to_string().contains("slot"), "{v}");
+}
+
+/// A machine past the IDLE threshold has stopped reporting: whether anything runs on it now is
+/// not to be known, though two holders and a compiler were running when it last said. The JSON
+/// says null and the table a dash; neither claims 0.
+#[test]
+fn an_idle_machine_does_not_report_that_nothing_runs() {
+    let mut quiet = new_status(0.5, 9000, 6.0, &[]);
+    quiet["holders"] = json!([
+        {"pid": 1, "kind": "build", "command": ["cargo", "test"], "started_at": 1},
+        {"pid": 2, "kind": "other", "command": ["sleep", "1"], "started_at": 1},
+    ]);
+    quiet["compiling"] = json!([{"pid": 3, "name": "rustc", "cwd": "/x"}]);
+    let s = stub(vec![db_row("quiet", 600, Ok(quiet))], 200);
+    let v = json_of(&s, &["fleet", "--json"]);
+    assert_eq!(v[0]["state"], "idle");
+    assert_eq!(
+        (v[0]["holders"].clone(), v[0]["compiling"].clone()),
+        (Value::Null, Value::Null),
+        "{}",
+        v[0]
+    );
+    assert!(v[0].get("running").is_none(), "{}", v[0]);
+    let o = run(&s, &["fleet"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    let cells: Vec<&str> = out.lines().nth(1).unwrap().split_whitespace().collect();
+    assert_eq!(cells[..2], ["quiet", "IDLE"], "{out}");
+    assert_eq!(cells[10..12], ["-", "-"], "{out}");
+}
+
+/// The reservations of a row are kept until the reporting machine's own warm-up window has
+/// passed -- `capacity.warmup_secs` -- and not the default: a machine set to 600 s is still read
+/// with them at 100 s, where a row that names 60 s, or says nothing of the window, is not.
+#[test]
+fn a_row_keeps_its_reservations_for_the_reporting_machines_warm_up_window() {
+    let booked = |warmup: Option<u64>| {
+        let mut st = reserved(new_status(0.5, 4000, 6.0, &[]), 4096, 1);
+        if let Some(warmup) = warmup {
+            st["capacity"]["warmup_secs"] = warmup.into();
+        }
+        st
+    };
+    let s = stub(
+        vec![
+            db_row("long", 100, Ok(booked(Some(600)))),
+            db_row("short", 100, Ok(booked(Some(60)))),
+            db_row("unsaid", 100, Ok(booked(None))),
+        ],
+        200,
+    );
+    let v = json_of(&s, &["fleet", "--json"]);
+    let row = |host: &str| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["host"] == host)
+            .unwrap()
+    };
+    // 4000 MB available, 4096 of them reserved: nothing is left, and a run is warming up.
+    let long = row("long");
+    assert_eq!(
+        (long["mem_headroom_mb"].clone(), long["warming"].clone()),
+        (json!(0), json!(1)),
+        "{long}"
+    );
+    for host in ["short", "unsaid"] {
+        let r = row(host);
+        assert_eq!(
+            (r["mem_headroom_mb"].clone(), r["warming"].clone()),
+            (json!(4000), json!(0)),
+            "{host}: {r}"
+        );
+    }
+    // Picked on what is left: a job needing all 4000 MB fits the two whose window has passed.
+    assert_eq!(
+        hosts(&json_of(
+            &s,
+            &["fleet", "pick", "--need-mb", "4000", "--json"]
+        )),
+        ["short", "unsaid"]
+    );
 }
 
 #[test]
 fn fleet_table_marks_idle_and_unknown() {
     let s = stub(
         vec![
-            db_row("old", 600, Ok(status(9000, 0.1, 0))),
+            db_row("old", 600, Ok(status(9000, 0.25, 0))),
             db_row("mac", 10, Err("x".into())),
         ],
         200,
@@ -228,7 +425,7 @@ fn fleet_table_marks_idle_and_unknown() {
     assert!(out.lines().next().unwrap().starts_with("HOST"), "{out}");
     assert!(
         out.lines()
-            .any(|l| l.starts_with("old") && l.contains("IDLE") && l.contains("9000*")),
+            .any(|l| l.starts_with("old") && l.contains("IDLE") && l.contains("8.8*")),
         "{out}"
     );
     assert!(
@@ -238,47 +435,468 @@ fn fleet_table_marks_idle_and_unknown() {
     );
 }
 
+/// One row per host with what the machine has and what is left of it. A row of an old build is
+/// read on its top-level figures and shows a dash for what that build never reported.
 #[test]
-fn pick_json_orders_fit_hosts_includes_idle_and_skips_full_unknown() {
+fn fleet_table_lists_the_capacity_of_every_kind_of_row() {
+    let mut gpu = new_status(0.5, 9000, 16.0, &["memory"]);
+    gpu["holders"] = json!([
+        {"pid": 1, "kind": "build", "command": ["cargo", "test"], "started_at": 1},
+        {"pid": 2, "kind": "other", "command": ["sleep", "1"], "started_at": 1},
+    ]);
+    gpu["compiling"] = json!([{"pid": 3, "name": "rustc", "cwd": "/x"}]);
+    gpu["capacity"]["warming"] = 3.into();
     let s = stub(
         vec![
-            db_row("small", 10, Ok(status(2000, 0.1, 0))),
-            db_row("big", 10, Ok(status(9000, 0.1, 2))),
+            db_row("gpu", 10, Ok(gpu)),
+            db_row("nuc", 10, Ok(status(5000, 0.5, 1))),
+            db_row("old", 600, Ok(status(9000, 0.25, 0))),
+            db_row("mac", 10, Err("x".into())),
+        ],
+        200,
+    );
+    let o = run(&s, &["fleet"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    let lines: Vec<Vec<&str>> = out
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        lines[0],
+        [
+            "HOST", "STATE", "AGE", "CPUS", "MEM_GB", "LOAD", "HEADROOM", "FREE_GB", "BLOCKED",
+            "WARM", "RUN", "COMP", "SESS",
+        ],
+        "{out}"
+    );
+    // The age is 10s or 11s, by when the clock last turned over: not what this is about.
+    let row = |i: usize| {
+        let mut cells = lines[i].clone();
+        cells.remove(2);
+        cells
+    };
+    // A build with capacity: headroom after the reservations (none here), who is warming up, the
+    // two `gate run` holders and the one compiler, each to its own column.
+    assert_eq!(
+        row(1),
+        [
+            "gpu",
+            "ok",
+            "6",
+            "7.8",
+            "0.50/16.00",
+            "15.50",
+            "8.8",
+            "memory",
+            "3",
+            "2",
+            "1",
+            "0"
+        ],
+        "{out}"
+    );
+    // A build that still counted slots: CPU, memory, load and what is left of them from its
+    // top-level figures; a dash for what it never reported (capacity, holders), and its compilers,
+    // none here.
+    assert_eq!(
+        row(2),
+        [
+            "nuc",
+            "ok",
+            "6",
+            "7.8",
+            "0.50/6.00",
+            "5.50",
+            "4.9",
+            "-",
+            "-",
+            "-",
+            "0",
+            "0"
+        ],
+        "{out}"
+    );
+    // The same row when old: the last reported figures, marked as such.
+    assert_eq!(
+        row(3),
+        [
+            "old",
+            "IDLE",
+            "6",
+            "7.8",
+            "0.25/6.00*",
+            "5.75*",
+            "8.8*",
+            "-",
+            "-",
+            "-",
+            "-",
+            "0",
+        ],
+        "{out}"
+    );
+    assert_eq!(
+        row(4),
+        ["mac", "UNKNOWN", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0",],
+        "{out}"
+    );
+    assert!(lines[5][0].starts_with('*'), "{out}");
+}
+
+/// Most load headroom first, then most memory. A row of any build counts, an IDLE one too with its
+/// figures flagged old, and an unreadable one never.
+#[test]
+fn pick_json_orders_by_load_headroom_includes_idle_and_skips_unknown() {
+    let s = stub(
+        vec![
+            db_row("small", 10, Ok(status(2000, 0.25, 0))),
+            db_row("big", 10, Ok(status(9000, 0.25, 2))),
             db_row("full", 10, Ok(status(30000, 0.0, 3))),
             db_row("old", 600, Ok(status(40000, 0.0, 0))),
             db_row("mac", 600, Err("x".into())),
         ],
         200,
     );
-    let o = run(&s, &["fleet", "pick", "--kind", "gradle", "--json"]);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-    let hosts: Vec<&str> = v
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r["host"].as_str().unwrap())
-        .collect();
-    assert_eq!(hosts, ["old", "big", "small"]);
+    let v = json_of(&s, &["fleet", "pick", "--json"]);
+    assert_eq!(hosts(&v), ["old", "full", "big", "small"]);
     assert_eq!(v[0]["idle"], true);
     assert_eq!(v[1]["idle"], false);
+    // Per host: what is left of its load and memory, the totals they are a share of, and why it
+    // would be blocked, which is never, or it would not be listed.
+    assert_eq!(
+        sorted_keys(&v[1]),
+        [
+            "blocked",
+            "cpus",
+            "host",
+            "idle",
+            "load_1m",
+            "load_headroom",
+            "max_load",
+            "mem_headroom_mb",
+            "mem_total_mb",
+        ],
+        "{}",
+        v[1]
+    );
+    let full = &v[1];
+    for (key, value) in [
+        ("load_headroom", json!(6.0)),
+        ("mem_headroom_mb", json!(30000)),
+        ("cpus", json!(6)),
+        ("mem_total_mb", json!(8000)),
+        ("load_1m", json!(0.0)),
+        ("max_load", json!(6.0)),
+        ("blocked", json!([])),
+    ] {
+        assert_eq!(full[key], value, "{key}");
+    }
+    assert!(!v.to_string().contains("slot"), "{v}");
+    // The same in text, one line per host, best first.
+    let o = run(&s, &["fleet", "pick"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "old load_headroom=6.00 mem_headroom_mb=40000 load=0.00/6.00",
+            "full load_headroom=6.00 mem_headroom_mb=30000 load=0.00/6.00",
+            "big load_headroom=5.75 mem_headroom_mb=9000 load=0.25/6.00",
+            "small load_headroom=5.75 mem_headroom_mb=2000 load=0.25/6.00",
+        ]
+    );
 }
 
 #[test]
-fn pick_with_no_fit_host_exits_1_with_a_reason() {
-    let s = stub(vec![db_row("full", 10, Ok(status(30000, 0.0, 3)))], 200);
+fn pick_with_no_room_exits_1_with_a_reason() {
+    let s = stub(
+        vec![
+            db_row("over", 10, Ok(status(30000, 6.5, 0))),
+            db_row("blocked", 10, Ok(new_status(0.5, 30000, 6.0, &["memory"]))),
+        ],
+        200,
+    );
     let o = run(&s, &["fleet", "pick"]);
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(
         text(&o.stderr).trim(),
-        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
+        "fleet pick: no eligible host (every host is unknown, blocked, or has less memory or load headroom than asked for)"
+    );
+    // The same when the only host has room, only not as much as asked.
+    let s = stub(
+        vec![db_row("small", 10, Ok(new_status(0.5, 2000, 6.0, &[])))],
+        200,
+    );
+    let o = run(
+        &s,
+        &["fleet", "pick", "--need-mb", "4000", "--need-load", "8"],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        text(&o.stderr).trim(),
+        "fleet pick: no eligible host (every host is unknown, blocked, or has less memory or load headroom than asked for)"
     );
 }
 
-/// 4.5: machines that report no slots are judged on their capacity. They are picked, most memory
-/// first; a blocked one is not, whatever its memory, and no row shows a slot count any more.
+/// Slots are nobody's criterion: a row of a build that still counts them is picked like any other,
+/// whatever it says about them.
 #[test]
-fn pick_judges_machines_without_slots_on_capacity_and_skips_blocked_ones() {
+fn pick_lists_an_old_row_whose_slots_are_all_used() {
+    let s = stub(vec![db_row("full", 10, Ok(status(30000, 0.0, 3)))], 200);
+    let v = json_of(&s, &["fleet", "pick", "--json"]);
+    assert_eq!(hosts(&v), ["full"]);
+    assert_eq!(v[0]["load_headroom"], 6.0);
+    assert_eq!(v[0]["mem_headroom_mb"], 30000);
+}
+
+/// `--need-mb` and `--need-load` keep only the hosts with that much memory headroom and that much
+/// load headroom, each on its own and together.
+#[test]
+fn pick_need_mb_and_need_load_keep_only_hosts_with_room() {
+    let s = stub(
+        vec![
+            // 5.0 cores, 9000 MB
+            db_row("roomy", 10, Ok(new_status(1.0, 9000, 6.0, &[]))),
+            // 1.5 cores, 20000 MB
+            db_row("tight-load", 10, Ok(new_status(4.5, 20000, 6.0, &[]))),
+            // 5.5 cores, 2000 MB
+            db_row("tight-mem", 10, Ok(new_status(0.5, 2000, 6.0, &[]))),
+            // 2.0 cores, 4000 MB
+            db_row("exact", 10, Ok(new_status(4.0, 4000, 6.0, &[]))),
+            db_row("blocked", 10, Ok(new_status(0.5, 30000, 6.0, &["memory"]))),
+        ],
+        200,
+    );
+    assert_eq!(
+        hosts(&json_of(&s, &["fleet", "pick", "--json"])),
+        ["tight-mem", "roomy", "exact", "tight-load"]
+    );
+    assert_eq!(
+        hosts(&json_of(
+            &s,
+            &["fleet", "pick", "--need-mb", "4000", "--json"]
+        )),
+        ["roomy", "exact", "tight-load"]
+    );
+    assert_eq!(
+        hosts(&json_of(
+            &s,
+            &["fleet", "pick", "--need-load", "2", "--json"]
+        )),
+        ["tight-mem", "roomy", "exact"]
+    );
+    assert_eq!(
+        hosts(&json_of(
+            &s,
+            &[
+                "fleet",
+                "pick",
+                "--need-mb",
+                "4000",
+                "--need-load",
+                "2",
+                "--json"
+            ]
+        )),
+        ["roomy", "exact"]
+    );
+}
+
+/// `--kind` stays for one version. It sets the needs of its runs (gradle: 3072 MB and 1 core;
+/// other: 1024 MB and no load), `--need-mb` and `--need-load` override them one by one, and it
+/// says on stderr, in one line, which flags replace it -- naming the needs in effect (see the
+/// next test for what that means where a flag overrides).
+#[test]
+fn pick_kind_sets_the_needs_says_it_is_deprecated_and_yields_to_the_new_flags() {
+    let s = stub(
+        vec![
+            // 1.0 cores, 4000 MB
+            db_row("gradle-sized", 10, Ok(new_status(5.0, 4000, 6.0, &[]))),
+            // 0.5 cores, 2000 MB
+            db_row("other-sized", 10, Ok(new_status(5.5, 2000, 6.0, &[]))),
+            // 0.5 cores, 4000 MB
+            db_row("wide-but-loaded", 10, Ok(new_status(5.5, 4000, 6.0, &[]))),
+            // 0.5 cores, 500 MB
+            db_row("tiny", 10, Ok(new_status(5.5, 500, 6.0, &[]))),
+        ],
+        200,
+    );
+    let pick = |args: &[&str]| {
+        let o = run(&s, args);
+        let stderr: Vec<String> = text(&o.stderr).lines().map(str::to_owned).collect();
+        // With no eligible host there is no stdout: the list is empty then.
+        let v: Value = serde_json::from_slice(&o.stdout).unwrap_or_else(|_| json!([]));
+        (o.status.code(), stderr, hosts(&v).join(","))
+    };
+    let notice = |mb: &str, load: &str| {
+        format!("fleet pick: --kind is deprecated and will be removed in the next version; use --need-mb {mb} --need-load {load} instead")
+    };
+    assert_eq!(
+        pick(&["fleet", "pick", "--kind", "gradle", "--json"]),
+        (
+            Some(0),
+            vec![notice("3072", "1")],
+            "gradle-sized".to_owned()
+        )
+    );
+    assert_eq!(
+        pick(&["fleet", "pick", "--kind", "other", "--json"]),
+        (
+            Some(0),
+            vec![notice("1024", "0")],
+            "gradle-sized,wide-but-loaded,other-sized".to_owned()
+        )
+    );
+    // An explicit need wins over the kind's; the other need stays the kind's. The notice names
+    // the needs in effect, so following it changes nothing.
+    assert_eq!(
+        pick(&[
+            "fleet",
+            "pick",
+            "--kind",
+            "gradle",
+            "--need-load",
+            "0.5",
+            "--json"
+        ]),
+        (
+            Some(0),
+            vec![notice("3072", "0.5")],
+            "gradle-sized,wide-but-loaded".to_owned()
+        )
+    );
+    assert_eq!(
+        pick(&[
+            "fleet",
+            "pick",
+            "--kind",
+            "other",
+            "--need-mb",
+            "2500",
+            "--json"
+        ]),
+        (
+            Some(0),
+            vec![notice("2500", "0")],
+            "gradle-sized,wide-but-loaded".to_owned()
+        )
+    );
+    // With no host left, the deprecation is still the only other line.
+    assert_eq!(
+        pick(&["fleet", "pick", "--kind", "other", "--need-mb", "2500", "--need-load", "2", "--json"]),
+        (
+            Some(1),
+            vec![
+                notice("2500", "2"),
+                "fleet pick: no eligible host (every host is unknown, blocked, or has less memory or load headroom than asked for)".to_owned(),
+            ],
+            String::new()
+        )
+    );
+    // The same needs spelled out say nothing.
+    assert_eq!(
+        pick(&[
+            "fleet",
+            "pick",
+            "--need-mb",
+            "3072",
+            "--need-load",
+            "1",
+            "--json"
+        ]),
+        (Some(0), vec![], "gradle-sized".to_owned())
+    );
+}
+
+/// The `--kind` notice names the needs in effect, not the kind's defaults: where `--need-mb` or
+/// `--need-load` is given, its value is the one in the notice. One that named the defaults would
+/// send the reader to a command that asks for something else.
+#[test]
+fn pick_kind_notice_names_the_needs_in_effect_not_the_kinds_defaults() {
+    // 5.5 cores, 16384 MB: every need below fits.
+    let s = stub(
+        vec![db_row("huge", 10, Ok(new_status(0.5, 16384, 6.0, &[])))],
+        200,
+    );
+    let noticed = |args: &[&str]| {
+        let o = run(&s, args);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        assert_eq!(
+            hosts(&serde_json::from_slice::<Value>(&o.stdout).unwrap()),
+            ["huge"]
+        );
+        text(&o.stderr)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        noticed(&[
+            "fleet",
+            "pick",
+            "--kind",
+            "gradle",
+            "--need-mb",
+            "8192",
+            "--json"
+        ]),
+        ["fleet pick: --kind is deprecated and will be removed in the next version; use --need-mb 8192 --need-load 1 instead"]
+    );
+    assert_eq!(
+        noticed(&[
+            "fleet",
+            "pick",
+            "--kind",
+            "gradle",
+            "--need-mb",
+            "8192",
+            "--need-load",
+            "2",
+            "--json"
+        ]),
+        ["fleet pick: --kind is deprecated and will be removed in the next version; use --need-mb 8192 --need-load 2 instead"]
+    );
+    assert_eq!(
+        noticed(&[
+            "fleet",
+            "pick",
+            "--kind",
+            "other",
+            "--need-load",
+            "3",
+            "--json"
+        ]),
+        ["fleet pick: --kind is deprecated and will be removed in the next version; use --need-mb 1024 --need-load 3 instead"]
+    );
+    // The notice asks for exactly what the command did: a host one MB short of it is not listed.
+    let t = stub(
+        vec![db_row("short", 10, Ok(new_status(0.5, 8191, 6.0, &[])))],
+        200,
+    );
+    let o = run(
+        &t,
+        &[
+            "fleet",
+            "pick",
+            "--kind",
+            "gradle",
+            "--need-mb",
+            "8192",
+            "--json",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stdout).is_empty(), "{}", text(&o.stdout));
+}
+
+/// A blocked machine is not picked, whatever its memory. One whose memory the reservations have
+/// used up is not either while its report is fresh -- `blocked` does not say so, the machine
+/// figures it for a run that needs nothing -- and is once the report is older than the warm-up
+/// window: the reservations are over by then.
+#[test]
+fn pick_skips_blocked_machines_and_reserved_memory_only_while_the_report_is_fresh() {
     let s = stub(
         vec![
             db_row("small", 10, Ok(new_status(0.5, 9000, 6.0, &[]))),
@@ -293,6 +911,16 @@ fn pick_judges_machines_without_slots_on_capacity_and_skips_blocked_ones() {
                 10,
                 Ok(new_status(0.5, 30000, 6.0, &["memory"])),
             ),
+            db_row(
+                "used-up",
+                10,
+                Ok(reserved(new_status(0.5, 4000, 6.0, &[]), 4096, 1)),
+            ),
+            db_row(
+                "room",
+                10,
+                Ok(reserved(new_status(0.5, 4000, 6.0, &[]), 0, 0)),
+            ),
         ],
         200,
     );
@@ -300,107 +928,44 @@ fn pick_judges_machines_without_slots_on_capacity_and_skips_blocked_ones() {
         let o = run(&s, &["fleet", "pick", "--kind", kind, "--json"]);
         assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
         let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-        let hosts: Vec<&str> = v
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r["host"].as_str().unwrap())
-            .collect();
-        assert_eq!(hosts, ["big", "small"], "{kind}");
-        assert!(v
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["free_slots"].is_null()));
+        assert_eq!(hosts(&v), ["big", "small", "room"], "{kind}");
+        assert_eq!(v[2]["mem_headroom_mb"], 4000);
     }
-    let o = run(&s, &["fleet", "pick"]);
-    let line = |host: &str| {
-        o.stdout
-            .split(|b| *b == b'\n')
-            .find(|l| l.starts_with(host.as_bytes()))
-            .unwrap_or_else(|| panic!("{host}: {}", text(&o.stdout)))
-    };
-    assert_eq!(
-        text(line("big")),
-        "big free_slots=- mem_available_mb=20000 load=0.50/6.00"
-    );
-    assert_eq!(
-        text(line("small")),
-        "small free_slots=- mem_available_mb=9000 load=0.50/6.00"
-    );
+    let v = json_of(&s, &["fleet", "--json"]);
+    let used_up = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["host"] == "used-up")
+        .unwrap();
+    assert_eq!(used_up["blocked"], json!([]));
+    assert_eq!(used_up["mem_available_mb"], 4000);
+    assert_eq!(used_up["mem_headroom_mb"], 0);
 
+    // The same machine, reported 100 s ago: nothing is reserved any more, so all 4000 MB are
+    // the run's, and nothing is warming up.
     let s = stub(
-        vec![
-            db_row("full", 10, Ok(status(30000, 0.0, 3))),
-            db_row("blocked", 10, Ok(new_status(0.5, 30000, 6.0, &["load"]))),
-        ],
+        vec![db_row(
+            "used-up",
+            100,
+            Ok(reserved(new_status(0.5, 4000, 6.0, &[]), 4096, 1)),
+        )],
         200,
     );
-    let o = run(&s, &["fleet", "pick"]);
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(
-        text(&o.stderr).trim(),
-        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
-    );
-}
-
-/// A machine whose memory headroom is used up by reservations is not picked, though `blocked` is
-/// empty: the machine figures that for a run that needs nothing. `fleet pick` and `fleet` report
-/// the headroom.
-#[test]
-fn pick_skips_machines_whose_memory_headroom_is_used_up() {
-    // `mem` MB available, `reserved_mb` of them held for runs still warming up.
-    let status = |mem: u64, reserved_mb: u64| {
-        let mut status = new_status(0.5, mem, 6.0, &[]);
-        status["capacity"]["reserved_mb"] = reserved_mb.into();
-        status["capacity"]["mem_headroom_mb"] = mem.saturating_sub(reserved_mb).into();
-        status
-    };
-    let s = stub(
-        vec![
-            db_row("used-up", 10, Ok(status(4000, 4096))),
-            db_row("room", 10, Ok(status(4000, 0))),
-        ],
-        200,
-    );
-    for kind in ["gradle", "other"] {
-        let o = run(&s, &["fleet", "pick", "--kind", kind, "--json"]);
-        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-        let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-        let hosts: Vec<&str> = v
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r["host"].as_str().unwrap())
-            .collect();
-        assert_eq!(hosts, ["room"], "{kind}");
-        assert_eq!(v[0]["mem_available_mb"], 4000);
-        assert_eq!(v[0]["mem_headroom_mb"], 4000);
-    }
-    let o = run(&s, &["fleet", "--json"]);
+    let o = run(&s, &["fleet", "pick", "--kind", "gradle", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-    let by_host = |host: &str| {
-        v.as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["host"] == host)
-            .unwrap()
-    };
-    assert_eq!(by_host("used-up")["blocked"], json!([]));
-    assert_eq!(by_host("used-up")["mem_available_mb"], 4000);
-    assert_eq!(by_host("used-up")["mem_headroom_mb"], 0);
-
-    let s = stub(vec![db_row("used-up", 10, Ok(status(4000, 4096)))], 200);
-    let o = run(&s, &["fleet", "pick"]);
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(
-        text(&o.stderr).trim(),
-        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
-    );
+    assert_eq!(hosts(&v), ["used-up"]);
+    assert_eq!(v[0]["mem_headroom_mb"], 4000);
+    let v = json_of(&s, &["fleet", "--json"]);
+    assert_eq!(v[0]["mem_headroom_mb"], 4000);
+    assert_eq!(v[0]["load_headroom"], 5.5);
+    assert_eq!(v[0]["warming"], 0);
 }
 
-/// A binary older than `capacity` reports neither it nor slots. Its memory must cover a run of the
-/// pool: 2000 MB is less than a Gradle run needs, and more than one of the other pool.
+/// A machine that reports neither capacity nor slots is judged on its top-level figures: all the
+/// memory it has available is the run's, and 2000 MB is less than a Gradle run needs and more
+/// than one of the other kind.
 #[test]
 fn pick_needs_a_pools_worth_of_memory_from_a_machine_that_reports_no_capacity() {
     let mut old = new_status(0.5, 2000, 6.0, &[]);
@@ -409,56 +974,15 @@ fn pick_needs_a_pools_worth_of_memory_from_a_machine_that_reports_no_capacity() 
     let o = run(&s, &["fleet", "pick", "--kind", "gradle", "--json"]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o.stdout));
     assert_eq!(
-        text(&o.stderr).trim(),
-        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
+        text(&o.stderr).lines().last(),
+        Some("fleet pick: no eligible host (every host is unknown, blocked, or has less memory or load headroom than asked for)")
     );
     let o = run(&s, &["fleet", "pick", "--kind", "other", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-    assert_eq!(v[0]["host"], "old");
-    // No capacity, so no headroom to report: the run was judged on `mem_available_mb`.
-    assert_eq!(v[0]["mem_headroom_mb"], Value::Null);
-}
-
-/// The fleet table has no slot count to show for a machine that reports none.
-#[test]
-fn fleet_table_shows_no_slot_count_for_machines_without_slots() {
-    let s = stub(
-        vec![
-            db_row("nuc", 10, Ok(status(5000, 0.5, 1))),
-            db_row("gpu", 10, Ok(new_status(0.5, 9000, 16.0, &[]))),
-        ],
-        200,
-    );
-    let o = run(&s, &["fleet", "--json"]);
-    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-    let by_host = |host: &str| {
-        v.as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["host"] == host)
-            .unwrap()
-    };
-    assert_eq!(by_host("nuc")["slots_used"], 1);
-    assert_eq!(by_host("nuc")["slots_total"], 3);
-    assert_eq!(by_host("gpu")["slots_used"], Value::Null);
-    assert_eq!(by_host("gpu")["slots_total"], Value::Null);
-    assert_eq!(by_host("gpu")["blocked"], json!([]));
-    assert_eq!(by_host("gpu")["mem_available_mb"], 9000);
-    let o = run(&s, &["fleet"]);
-    let out = text(&o.stdout);
-    assert!(out.contains("\ngpu"), "{out}");
-    let gpu = out.lines().find(|l| l.starts_with("gpu")).unwrap();
-    // The age is 10s or 11s, by when the clock last turned over: not what this is about.
-    let cells: Vec<&str> = gpu
-        .split_whitespace()
-        .filter(|c| !c.ends_with('s'))
-        .collect();
-    assert_eq!(
-        cells,
-        ["gpu", "ok", "-", "9000", "0.50/16.00", "0/0", "0"],
-        "{out}"
-    );
+    assert_eq!(hosts(&v), ["old"]);
+    assert_eq!(v[0]["mem_headroom_mb"], 2000);
+    assert_eq!(v[0]["load_headroom"], 5.5);
 }
 
 fn wait_for(s: &Stub, n: usize) -> usize {

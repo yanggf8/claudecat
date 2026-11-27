@@ -161,11 +161,17 @@ enum FleetAction {
         #[arg(long, default_value_t = claudecat::fleet_cmd::DEFAULT_TIMEOUT_SECS, hide = true)]
         timeout_secs: u64,
     },
-    /// Hosts ordered by fitness for a new heavy job (not blocked, most memory, lowest load)
+    /// Hosts ordered by fitness for a new job (not blocked, most load headroom first, then most memory)
     Pick {
-        /// The runs to start there: gradle for build and test, other for dispatch and scripts
-        #[arg(long, value_enum, default_value = "gradle")]
-        kind: claudecat::fleet_view::Pool,
+        /// Deprecated, goes away in the next version. The runs to start there: gradle for build and test, other for dispatch and scripts. Sets what --need-mb and --need-load ask for
+        #[arg(long, value_enum)]
+        kind: Option<claudecat::fleet_view::Pool>,
+        /// Memory the job needs, in MB
+        #[arg(long)]
+        need_mb: Option<u64>,
+        /// Load, in cores, the job needs
+        #[arg(long)]
+        need_load: Option<f64>,
         #[arg(long)]
         json: bool,
     },
@@ -340,7 +346,12 @@ fn main() {
         Commands::Fleet { action, json } => std::process::exit(match action {
             None => claudecat::fleet_cmd::show(json),
             Some(FleetAction::Push { timeout_secs }) => claudecat::fleet_cmd::push(timeout_secs),
-            Some(FleetAction::Pick { kind, json }) => claudecat::fleet_cmd::pick_cmd(kind, json),
+            Some(FleetAction::Pick {
+                kind,
+                need_mb,
+                need_load,
+                json,
+            }) => claudecat::fleet_cmd::pick_cmd(kind, need_mb, need_load, json),
         }),
         Commands::Scan {
             root,

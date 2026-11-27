@@ -26,7 +26,8 @@ const LOAD_PER_CPU: f64 = 1.0;
 // flat figure under-reserved them.
 const DEFAULT_RESERVE_GRADLE_MB: u64 = 3072;
 const DEFAULT_RESERVE_CARGO_MB: u64 = 1536;
-const DEFAULT_RESERVE_WARMUP_SECS: u64 = 60;
+/// Public for `fleet_view`, which reads a row older than this without its reservations.
+pub const DEFAULT_RESERVE_WARMUP_SECS: u64 = 60;
 // Estimated load (busy cores) reserved over the same window, and decaying with it. Cargo's scales
 // with the machine: 2.0 on a 6-CPU NUC, 4.0 on 16 cores. A Gradle test run takes the Gradle figure
 // per fork. Provisional: `gate usage` measured CPU seconds per run, not cores.
@@ -1918,6 +1919,17 @@ fn two_decimals(n: f64) -> f64 {
     (n * 100.0).round() / 100.0
 }
 
+/// Headroom is how much can still be added, so it stops at 0, at a positive zero: a value a hair
+/// below zero rounds to a negative one, and `-0.00` reads as a negative figure. Written out
+/// rather than as `max(0.0)`, which for a negative zero is not bound to give a positive one.
+pub(crate) fn at_least_zero(n: f64) -> f64 {
+    if n > 0.0 {
+        n
+    } else {
+        0.0
+    }
+}
+
 /// What the machine has left, in figures every machine reports the same way so that a coordinator
 /// can compare them. All of it is read off one snapshot and one sum of the reservations, so the
 /// figures agree with each other and with what the gate would decide.
@@ -1929,7 +1941,9 @@ struct Capacity {
     load_1m: f64,
     /// Estimated load of the runs still warming up, decayed to now.
     reserved_load: f64,
-    /// `max_load - load_1m - reserved_load`: negative once a build would be denied on load.
+    /// `max(0, max_load - load_1m - reserved_load)`: what can still be added, so never negative
+    /// (the owner: it cannot be). How far over the limit a machine is shows in `load_1m` and
+    /// `blocked`.
     load_headroom: f64,
     mem_available_mb: u64,
     /// All the memory reserved, the `other` row's included.
@@ -1943,6 +1957,11 @@ struct Capacity {
     blocked: Vec<&'static str>,
     /// Runs still warming up, holders and admissions alike.
     warming: usize,
+    /// The warm-up window in effect on this machine: `CLAUDECAT_RESERVE_WARMUP_SECS` where it is a
+    /// positive number, 60 otherwise. It is how long `reserved_load` and `reserved_mb` are to be
+    /// believed: a reader holding this document is to keep subtracting them until this many seconds
+    /// have passed, and no longer.
+    warmup_secs: u64,
 }
 
 fn capacity(s: &Snapshot, cfg: &Config, table: Reservation) -> Capacity {
@@ -1957,13 +1976,14 @@ fn capacity(s: &Snapshot, cfg: &Config, table: Reservation) -> Capacity {
         max_load: cfg.max_load,
         load_1m: s.load_1m,
         reserved_load: two_decimals(reserved_load),
-        load_headroom: two_decimals(cfg.max_load - s.load_1m - reserved_load),
+        load_headroom: at_least_zero(two_decimals(cfg.max_load - s.load_1m - reserved_load)),
         mem_available_mb: s.mem_available_mb,
         reserved_mb,
         mem_headroom_mb: s.mem_available_mb.saturating_sub(reserved_mb),
         mem_pressure: s.mem_pressure_some_avg10,
         blocked,
         warming,
+        warmup_secs: cfg.reserve_warmup_secs,
     }
 }
 

@@ -125,11 +125,12 @@ Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行�
 |---|---|
 | `cpus`、`mem_total_mb` | 這台的總量；讀不到時為 null |
 | `max_load`、`load_1m`、`reserved_load` | 負載上限、目前負載、暖機預留負載（已遞減） |
-| `load_headroom` | `max_load − load_1m − reserved_load`，可為負，取到小數 2 位。**近似值**：Linux 的 load 含 D 狀態，Mac 不含 IO 等待、且效能核與節能核等同；WSL2 看不到 Windows 主機的負載 |
+| `load_headroom` | `max(0, max_load − load_1m − reserved_load)`，取到小數 2 位。**不為負**（用戶 2026-11-28「不可能是負的」，B 批起）：餘裕是還能再承受多少，最少是 0；超載多少看 `load_1m` 與 `blocked`。**近似值**：Linux 的 load 含 D 狀態，Mac 不含 IO 等待、且效能核與節能核等同；WSL2 看不到 Windows 主機的負載 |
 | `mem_available_mb`、`reserved_mb`、`mem_headroom_mb` | 可用、暖機預留、兩者相減（不小於 0） |
 | `mem_pressure` | PSI some avg10；Mac 沒有 PSI，為 null |
 | `blocked` | **此刻**會擋下一件 build／test 的原因清單（例如 `["memory"]`），讓總管與 `fleet pick` 不被「看起來有餘裕」誤導（Fable S6） |
 | `warming` | 暖機中的 holder＋admission 數 |
+| `warmup_secs` | 這台機器生效中的暖機窗（`CLAUDECAT_RESERVE_WARMUP_SECS`，預設 60）。B 批審查後新增：fleet 讀列時以它為準（4.5 列齡），不再一律當 60 秒 |
 
 - `compiling` 保留為**純資訊**，不參與判定。
 - **已知盲點：** hook 放行、且不是 rustc／Gradle worker 的工作（例如執行中的 `cargo test` 測試程式、npm／vitest），過了暖機窗就不在任何清單裡。它們吃的資源仍反映在 `load_1m` 與 `MemAvailable`，**容量數字是準的**，只是「誰在吃」看不到。要補得擴大程序掃描，不在本次範圍。
@@ -137,8 +138,8 @@ Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行�
 ### 4.5 fleet
 
 - **A 批就要做的最小修改（Fable B4）：** `summarize`／`pick` 讀到沒有 `slots` 的列時，不再以名額過濾，改用 `capacity`（新列）或頂層 `load_1m`／`limits.max_load`／`mem_available_mb`（舊列）判斷放不放得下。否則 A 合併後、B 合併前，`fleet pick` 對所有已換版機器回空。
-- **B 批：** 全局表每台一列：CPU、記憶體總量、負載餘裕（核，近似）、可用 MB、`blocked`、暖機中、執行中工作、Claude session。`fleet pick --need-mb N --need-load X`：濾掉 `blocked` 非空與放不下的機器，依負載餘裕再依可用 MB 排序。`--kind gradle|other` 保留一個版本，對應成預設需求並提示改用新旗標。
-- **列齡（Fable S6）：** 上傳最多 60 秒一次，總管讀到時預留多半已過期。fleet 端在列齡超過暖機窗時，不再扣 `reserved_load`／`reserved_mb`。
+- **B 批：** 全局表每台一列：CPU、記憶體總量、負載餘裕（核，近似）、可用 MB、`blocked`、暖機中、執行中工作、Claude session。執行中工作是兩個數字、不相加（B 批審查後更正）：RUN＝`gate run` 的工作數（`holders`），COMP＝編譯程序數（`compiling`）；`IDLE` 的列機器沒在回報，兩欄都是 `-`（JSON 為 `null`，「不得而知」），不當 0。`fleet pick --need-mb N --need-load X`：濾掉 `blocked` 非空與放不下的機器，依負載餘裕再依可用 MB 排序。`--kind gradle|other` 保留一個版本，對應成預設需求並提示改用新旗標（提示印的是實際生效的需求值）。
+- **列齡（Fable S6）：** 上傳最多 60 秒一次，總管讀到時預留多半已過期。fleet 端在列齡超過暖機窗時，不再扣 `reserved_load`／`reserved_mb`。暖機窗是回報那台機器自己的（列裡的 `capacity.warmup_secs`；沒有這個欄位的列才用預設 60 秒）——設成 600 秒的機器，它的列到 600 秒前都還是扣過預留的。
 
 ### 4.6 量測與紀錄
 
