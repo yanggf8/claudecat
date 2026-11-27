@@ -44,7 +44,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show machine resources, gate slots, compilers, and orphan brokers
+    /// Show machine resources, gate run holders, compilers, and orphan brokers
     Status {
         #[arg(long)]
         json: bool,
@@ -161,9 +161,9 @@ enum FleetAction {
         #[arg(long, default_value_t = claudecat::fleet_cmd::DEFAULT_TIMEOUT_SECS, hide = true)]
         timeout_secs: u64,
     },
-    /// Hosts ordered by fitness for a new heavy job (fresh, free slot, most memory, lowest load)
+    /// Hosts ordered by fitness for a new heavy job (not blocked, most memory, lowest load)
     Pick {
-        /// gradle: the build/test slots; other: the wrapper/script pool
+        /// The runs to start there: gradle for build and test, other for dispatch and scripts
         #[arg(long, value_enum, default_value = "gradle")]
         kind: claudecat::fleet_view::Pool,
         #[arg(long)]
@@ -178,7 +178,7 @@ enum GateAction {
         #[arg(long, value_enum, default_value = "other")]
         kind: Kind,
     },
-    /// Run a command with a slot at low CPU priority
+    /// Run a command when load and memory allow, at low CPU priority
     Run {
         #[arg(long, value_enum, default_value = "other")]
         kind: Kind,

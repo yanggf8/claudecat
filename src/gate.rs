@@ -17,7 +17,6 @@ const DEFAULT_LOAD: f64 = 6.0;
 // processes stay in swap forever, so swap used never drops even on an idle machine.
 const DEFAULT_MEM_PRESSURE: f64 = 10.0;
 const DEFAULT_AVAILABLE_MB: u64 = 1536;
-const DEFAULT_SLOTS: usize = 3;
 // Load average allowed per CPU: the fleet's long-standing 6 was tuned on the NUC, whose WSL
 // exposes 6 CPUs, so 1.0 per CPU keeps it there.
 const LOAD_PER_CPU: f64 = 1.0;
@@ -28,6 +27,17 @@ const LOAD_PER_CPU: f64 = 1.0;
 const DEFAULT_RESERVE_GRADLE_MB: u64 = 3072;
 const DEFAULT_RESERVE_CARGO_MB: u64 = 1536;
 const DEFAULT_RESERVE_WARMUP_SECS: u64 = 60;
+// Estimated load (busy cores) reserved over the same window, and decaying with it. Cargo's scales
+// with the machine: 2.0 on a 6-CPU NUC, 4.0 on 16 cores. A Gradle test run takes the Gradle figure
+// per fork. Provisional: `gate usage` measured CPU seconds per run, not cores.
+const DEFAULT_RESERVE_CARGO_LOAD: f64 = 2.0;
+const CARGO_LOAD_PER_CPU: f64 = 0.25;
+const DEFAULT_RESERVE_GRADLE_LOAD: f64 = 1.0;
+// Memory reserved for a run of kind `other` that names no toolchain. Dispatch sends many at once
+// and their RSS reaches several GB, so each holds this back while it warms up.
+const DEFAULT_RESERVE_OTHER_MB: u64 = 1024;
+// How long `gate run` waits for `admission.lock`; a hook waits ADMISSION_LOCK_BUDGET.
+const RUN_LOCK_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Kind {
@@ -320,8 +330,7 @@ pub fn classify(command: &str) -> Classification {
     result
 }
 
-/// The compiler family a command drives. Compilers of the same family exclude each other; two
-/// families only compete for memory, which the reservation covers.
+/// The compiler family a command drives: what is estimated and reserved for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Toolchain {
@@ -329,27 +338,12 @@ enum Toolchain {
     Gradle,
 }
 
-const TOOLCHAINS: [Toolchain; 2] = [Toolchain::Cargo, Toolchain::Gradle];
-
 impl Toolchain {
-    /// Whether two runs of this family exclude each other. Gradle is gated on resources alone
-    /// (load, PSI, available memory and the per-build reservation): user 2026-11-20 「能先直接放寬
-    /// gradle,我也說過用資源判定呀」. A `./gradlew test` spends most of its life running test JVMs,
-    /// not compiling, so one exclusive lock held for the whole run starved urgent builds while the
-    /// machine sat at load 3/16 with 25 GB free.
-    fn exclusive(self) -> bool {
-        matches!(self, Self::Cargo)
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::Cargo => "cargo",
             Self::Gradle => "gradle",
         }
-    }
-
-    fn lock_name(self) -> String {
-        format!("compiler-{}.lock", self.as_str())
     }
 
     /// Estimated peak memory of one run, in MB. A Gradle test run multiplies this by its forks.
@@ -506,6 +500,23 @@ impl Estimate {
             *slot = slot.saturating_add(self.mb(*toolchain, cfg));
         }
     }
+
+    /// Estimated load (busy cores) of the command's run of `toolchain`.
+    fn toolchain_load(&self, toolchain: Toolchain, cfg: &Config) -> f64 {
+        match toolchain {
+            Toolchain::Cargo => cfg.reserve_cargo_load,
+            #[allow(clippy::cast_precision_loss)]
+            Toolchain::Gradle => cfg.reserve_gradle_load * self.gradle_forks as f64,
+        }
+    }
+
+    /// Estimated peak load of the whole command. Its segments run one after another, so the
+    /// largest sets it.
+    fn load(&self, cfg: &Config) -> f64 {
+        self.toolchains
+            .iter()
+            .fold(0.0, |peak, t| peak.max(self.toolchain_load(*t, cfg)))
+    }
 }
 
 /// Estimate of a shell command: every heavy segment, sorted; empty when none is recognised.
@@ -549,8 +560,8 @@ fn argv_estimate(argv: &[String], cfg: &Config) -> Estimate {
     estimate
 }
 
-/// Test runners that are known not to drive cargo or Gradle. Anything else unrecognised (`make`,
-/// `just`, a shell script) may, so it keeps holding every toolchain lock.
+/// Test runners that are known not to drive cargo or Gradle: they are checked on the `other`
+/// row. Anything else unrecognised (`make`, `just`, a shell script) may drive one.
 fn runs_no_compiler(argv: &[String]) -> bool {
     argv.get(command_index(argv)).is_some_and(|c| {
         matches!(
@@ -568,14 +579,6 @@ fn runs_no_compiler(argv: &[String]) -> bool {
                 | "python3"
         )
     })
-}
-
-fn process_toolchain(p: &Process) -> Option<Toolchain> {
-    match p.name.as_str() {
-        "rustc" => Some(Toolchain::Cargo),
-        "java" => Some(Toolchain::Gradle),
-        _ => None,
-    }
 }
 
 fn normalized(path: &Path) -> PathBuf {
@@ -738,6 +741,7 @@ impl Kind {
         }
     }
 
+    /// Whether `compiling` is listed for this kind. Information only: a compiler decides nothing.
     fn checks_compilers(self) -> bool {
         matches!(self, Self::Build | Self::Test)
     }
@@ -753,26 +757,6 @@ pub struct Holder {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing)]
     pub target: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct Slot {
-    pub index: usize,
-    pub holder: Option<Holder>,
-    pub occupied: bool,
-}
-
-#[derive(Serialize)]
-pub struct CompilerLock {
-    pub holder: Option<Holder>,
-    pub occupied: bool,
-}
-
-#[derive(Serialize)]
-struct ToolchainLock {
-    toolchain: Toolchain,
-    holder: Option<Holder>,
-    occupied: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -797,19 +781,21 @@ pub struct Snapshot {
     pub mem_available_mb: u64,
     /// PSI `some avg10` from `pressure/memory`; None when the kernel has no PSI.
     pub mem_pressure_some_avg10: Option<f64>,
-    pub slots: Vec<Slot>,
-    /// Pool for `--kind other` (LLM wrappers, scripts): separate from the build/test slots so a
-    /// long, nearly idle wrapper never blocks a build.
-    pub other_slots: Vec<Slot>,
+    /// The `gate run` runs holding a lock file in the gate directory, the new registrations and
+    /// the slot and compiler locks of runs started before the upgrade alike.
+    pub holders: Vec<Holder>,
     pub limits: Limits,
-    /// Summary of `compiler_locks` for older readers: occupied if any toolchain lock is.
-    pub compiler_lock: CompilerLock,
-    compiler_locks: Vec<ToolchainLock>,
+    /// Compilers of our own uid, for information: they decide nothing.
     pub compiling: Vec<Process>,
     pub orphan_brokers: Vec<Broker>,
     /// Recent hook admissions (see `Admission`); counted by `reserved` like warming-up holders.
     #[serde(skip)]
     admissions: Vec<Admission>,
+    /// Whose lock files count, and where they are: for `refresh`.
+    #[serde(skip)]
+    uid: u32,
+    #[serde(skip)]
+    gate_dir: PathBuf,
 }
 
 /// The machine's resources and the limits derived from them, with where each limit came from.
@@ -817,10 +803,6 @@ pub struct Snapshot {
 pub struct Limits {
     pub cpus: Option<usize>,
     pub mem_total_mb: Option<u64>,
-    pub slots: usize,
-    pub slots_basis: String,
-    pub other_slots: usize,
-    pub other_slots_basis: String,
     pub max_load: f64,
     pub max_load_basis: String,
 }
@@ -831,12 +813,13 @@ struct Config {
     max_load: f64,
     max_mem_pressure: f64,
     min_available_mb: u64,
-    slots: usize,
-    other_slots: usize,
     limits: Limits,
     reserve_gradle_mb: u64,
     reserve_cargo_mb: u64,
     reserve_warmup_secs: u64,
+    reserve_cargo_load: f64,
+    reserve_gradle_load: f64,
+    reserve_other_mb: u64,
 }
 
 fn positive_f64(key: &str, default: f64) -> f64 {
@@ -884,13 +867,6 @@ fn unreadable_reason(e: &io::Error) -> String {
     format!("gate denied (resources) {e}; refusing heavy work until load and memory can be read")
 }
 
-fn positive_usize(key: &str) -> Option<usize> {
-    env::var(key)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-}
-
 /// Logical CPUs listed in `cpuinfo`; None when the proc root has no such file.
 fn cpus(root: &Path) -> Option<usize> {
     #[cfg(target_os = "macos")]
@@ -925,37 +901,11 @@ fn mem_total_mb(root: &Path) -> Option<u64> {
         .map(|kb| kb / 1024)
 }
 
-/// Build/test slots: one per two CPUs, and no more than MemTotal holds of the largest toolchain
-/// estimate. Other slots: one per CPU. Load: `LOAD_PER_CPU` per CPU. Environment variables win.
-fn limits(root: &Path, per_slot_mb: u64) -> Limits {
+/// Load limit: `LOAD_PER_CPU` per CPU. Environment variables win. There is no slot limit: the
+/// gate judges load (with what is reserved for warming-up runs) and memory.
+fn limits(root: &Path) -> Limits {
     let cpus = cpus(root);
     let mem_total_mb = mem_total_mb(root);
-    let (slots, slots_basis) = if let Some(n) = positive_usize("CLAUDECAT_SLOTS") {
-        (n, "CLAUDECAT_SLOTS".to_owned())
-    } else {
-        match (cpus, mem_total_mb) {
-            (Some(c), Some(m)) => {
-                let by_cpu = (c / 2).max(1);
-                let by_mem = usize::try_from(m / per_slot_mb.max(1))
-                    .unwrap_or(usize::MAX)
-                    .max(1);
-                (
-                    by_cpu.min(by_mem),
-                    format!("min(cpus {c}/2={by_cpu}, MemTotal {m}MB/{per_slot_mb}MB={by_mem})"),
-                )
-            }
-            (Some(c), None) => ((c / 2).max(1), format!("cpus {c}/2")),
-            _ => (DEFAULT_SLOTS, "default (cpus unknown)".to_owned()),
-        }
-    };
-    let (other_slots, other_slots_basis) = if let Some(n) = positive_usize("CLAUDECAT_OTHER_SLOTS")
-    {
-        (n, "CLAUDECAT_OTHER_SLOTS".to_owned())
-    } else if let Some(c) = cpus {
-        (c, format!("cpus {c}"))
-    } else {
-        (DEFAULT_SLOTS, "default (cpus unknown)".to_owned())
-    };
     let env_load = env::var("CLAUDECAT_MAX_LOAD")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
@@ -971,13 +921,19 @@ fn limits(root: &Path, per_slot_mb: u64) -> Limits {
     Limits {
         cpus,
         mem_total_mb,
-        slots,
-        slots_basis,
-        other_slots,
-        other_slots_basis,
         max_load,
         max_load_basis,
     }
+}
+
+/// Load reserved for a cargo run: `CLAUDECAT_RESERVE_CARGO_LOAD`, else at least 2.0 and a quarter
+/// of the CPUs.
+fn reserve_cargo_load(cpus: Option<usize>) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let default = cpus.map_or(DEFAULT_RESERVE_CARGO_LOAD, |c| {
+        DEFAULT_RESERVE_CARGO_LOAD.max(c as f64 * CARGO_LOAD_PER_CPU)
+    });
+    positive_f64("CLAUDECAT_RESERVE_CARGO_LOAD", default)
 }
 
 fn config() -> io::Result<Config> {
@@ -986,7 +942,7 @@ fn config() -> io::Result<Config> {
         .unwrap_or_else(|| PathBuf::from("/proc"));
     let reserve_gradle_mb = positive_u64("CLAUDECAT_RESERVE_GRADLE_MB", DEFAULT_RESERVE_GRADLE_MB);
     let reserve_cargo_mb = positive_u64("CLAUDECAT_RESERVE_CARGO_MB", DEFAULT_RESERVE_CARGO_MB);
-    let limits = limits(&proc_root, reserve_gradle_mb.max(reserve_cargo_mb));
+    let limits = limits(&proc_root);
     let gate_dir = if let Some(dir) = env::var_os("CLAUDECAT_GATE_DIR") {
         PathBuf::from(dir)
     } else if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
@@ -996,14 +952,13 @@ fn config() -> io::Result<Config> {
         let uid = own_uid()?;
         PathBuf::from(format!("/tmp/claudecat-{uid}/gate"))
     };
+    let reserve_cargo_load = reserve_cargo_load(limits.cpus);
     Ok(Config {
         proc_root,
         gate_dir,
         max_load: limits.max_load,
         max_mem_pressure: positive_f64("CLAUDECAT_MAX_MEM_PRESSURE", DEFAULT_MEM_PRESSURE),
         min_available_mb: positive_u64("CLAUDECAT_MIN_AVAILABLE_MB", DEFAULT_AVAILABLE_MB),
-        slots: limits.slots,
-        other_slots: limits.other_slots,
         limits,
         reserve_gradle_mb,
         reserve_cargo_mb,
@@ -1011,6 +966,12 @@ fn config() -> io::Result<Config> {
             "CLAUDECAT_RESERVE_WARMUP_SECS",
             DEFAULT_RESERVE_WARMUP_SECS,
         ),
+        reserve_cargo_load,
+        reserve_gradle_load: positive_f64(
+            "CLAUDECAT_RESERVE_GRADLE_LOAD",
+            DEFAULT_RESERVE_GRADLE_LOAD,
+        ),
+        reserve_other_mb: positive_u64("CLAUDECAT_RESERVE_OTHER_MB", DEFAULT_RESERVE_OTHER_MB),
     })
 }
 
@@ -1056,38 +1017,97 @@ pub(crate) fn mem_pressure(root: &Path) -> Option<f64> {
         .filter(|n| n.is_finite() && *n >= 0.0)
 }
 
-/// Memory held back for holders still starting up. A holder older than the warm-up window is
-/// already inside MemAvailable, so reserving it again would count it twice. A holder seen in both
-/// its slot and a compiler lock counts once.
-fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> BTreeMap<Toolchain, u64> {
-    let holders = s
-        .slots
-        .iter()
-        .filter(|slot| slot.occupied)
-        .filter_map(|slot| slot.holder.as_ref())
-        .chain(
-            s.compiler_locks
-                .iter()
-                .filter(|lock| lock.occupied)
-                .filter_map(|lock| lock.holder.as_ref()),
-        );
-    let mut seen = BTreeSet::new();
-    let mut table = BTreeMap::new();
-    for holder in holders {
-        if !seen.insert(holder.pid)
-            || now.saturating_sub(holder.started_at) >= cfg.reserve_warmup_secs
-        {
-            continue;
+/// What the runs still warming up hold back for the ones that follow.
+#[derive(Debug, Default, Clone)]
+struct Reservation {
+    /// Memory per toolchain, in MB.
+    memory: BTreeMap<Toolchain, u64>,
+    /// Memory of `other` runs that name no toolchain, in MB.
+    other_mb: u64,
+    /// Load, decaying linearly over the warm-up window.
+    load: f64,
+    /// Seconds until the last of these runs is past the window.
+    warmup_left: u64,
+    /// Runs still inside the window, holders and admissions alike, whether they reserve anything
+    /// or not.
+    warming: usize,
+}
+
+impl Reservation {
+    /// Memory held back in all.
+    fn mb(&self) -> u64 {
+        self.memory
+            .values()
+            .fold(self.other_mb, |sum, mb| sum.saturating_add(*mb))
+    }
+}
+
+/// Adds what one run holds back `elapsed` seconds into the warm-up window: the estimate of its
+/// command, and `reserve_other_mb` for a run of the `other` row that names no toolchain. The
+/// memory is held in full for the whole window; the load decays linearly, roughly as load_1m picks
+/// up the real load, so the two neither double count at the end of the window nor leave a gap
+/// after it. Every run that reserves anything, memory or load, also lengthens `warmup_left`: a
+/// denial it causes is over no sooner than that.
+fn reserve_into(
+    estimate: &Estimate,
+    other_row: bool,
+    elapsed: u64,
+    cfg: &Config,
+    out: &mut Reservation,
+) {
+    estimate.reserve_into(&mut out.memory, cfg);
+    if other_row {
+        out.other_mb = out.other_mb.saturating_add(cfg.reserve_other_mb);
+    }
+    if estimate.toolchains.is_empty() && !other_row {
+        return;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let left = (cfg.reserve_warmup_secs - elapsed) as f64 / cfg.reserve_warmup_secs as f64;
+    out.load += estimate.load(cfg) * left;
+    out.warmup_left = out.warmup_left.max(cfg.reserve_warmup_secs - elapsed);
+}
+
+/// What the holders and admissions still inside the warm-up window reserve. A run older than the
+/// window is already inside MemAvailable and load_1m, so reserving it again would count it twice.
+/// One stamped in the future (clock step, hand edit) reserves nothing until the clock catches up.
+fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> Reservation {
+    let warming = |started_at: u64| {
+        started_at <= now.saturating_add(ADMISSION_CLOCK_SLACK_SECS)
+            && now.saturating_sub(started_at) < cfg.reserve_warmup_secs
+    };
+    let mut out = Reservation::default();
+    for holder in &s.holders {
+        if warming(holder.started_at) {
+            out.warming += 1;
+            // The run was checked on the `other` row -- declared `other`, or a test runner that
+            // drives no compiler whatever kind it declared (`gate run --kind test -- python3 …`) --
+            // so it is memory it holds back, like any other run of that row.
+            let other_row = holder.kind == "other" || runs_no_compiler(&holder.command);
+            let estimate = argv_estimate(&holder.command, cfg);
+            reserve_into(
+                &estimate,
+                other_row,
+                now.saturating_sub(holder.started_at),
+                cfg,
+                &mut out,
+            );
         }
-        argv_estimate(&holder.command, cfg).reserve_into(&mut table, cfg);
     }
     for admission in &s.admissions {
-        if now.saturating_sub(admission.ts) >= cfg.reserve_warmup_secs {
-            continue;
+        if warming(admission.ts) {
+            out.warming += 1;
+            // Only a command that names a toolchain is admitted, so a row never needs `other_mb`.
+            reserve_into(
+                &admission.estimate(),
+                false,
+                now.saturating_sub(admission.ts),
+                cfg,
+                &mut out,
+            );
         }
-        admission.estimate().reserve_into(&mut table, cfg);
     }
-    table
+    out
 }
 
 fn one() -> u64 {
@@ -1096,6 +1116,20 @@ fn one() -> u64 {
 
 fn is_one(n: &u64) -> bool {
     *n == 1
+}
+
+/// A denial of `gate check` or `gate run` goes into the deny log like a hook's, so that the log
+/// shows every path that was refused. The row names neither a session nor a command, and nothing
+/// a dispatch sends is recorded: only the path, its kind and the figures.
+fn record_path_deny(path: &str, kind: Kind, reasons: &str, ctx: crate::gate_stats::DenyContext) {
+    let _ = record_deny(
+        unix_now(),
+        None,
+        None,
+        &format!("{path}:{}", kind.as_str()),
+        reasons,
+        ctx,
+    );
 }
 
 /// A command the PreToolUse hook allowed. Claude runs it directly, so it registers no holder;
@@ -1150,7 +1184,8 @@ fn read_admissions(dir: &Path, now: u64, warmup: u64) -> io::Result<Vec<Admissio
         .collect())
 }
 
-/// Exclusive hold on `admission.lock`, serializing "check the table, then record" between hooks.
+/// Exclusive hold on `admission.lock`: the one critical section of the hook and of `gate run`,
+/// where each re-reads the registry, decides and records.
 struct AdmissionGuard {
     dir: PathBuf,
     _lock: File,
@@ -1160,7 +1195,7 @@ impl AdmissionGuard {
     /// None on timeout or any I/O error: a broken cache must never decide an outcome, so callers
     /// fail open and just skip recording. (Fresh rows read without the lock are still real
     /// reservations and keep counting; only the atomic check-then-record is lost.)
-    fn acquire(dir: &Path) -> Option<Self> {
+    fn acquire(dir: &Path, budget: Duration) -> Option<Self> {
         let lock = lock_file(&dir.join(ADMISSION_LOCK)).ok()?;
         let start = std::time::Instant::now();
         loop {
@@ -1171,14 +1206,18 @@ impl AdmissionGuard {
                         _lock: lock,
                     })
                 }
-                Err(std::fs::TryLockError::WouldBlock)
-                    if start.elapsed() < ADMISSION_LOCK_BUDGET =>
-                {
+                Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < budget => {
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 Err(_) => return None,
             }
         }
+    }
+
+    /// What `critical` returns, with the lock held while it runs and released before this
+    /// returns: nothing the caller does afterwards -- starting a child, printing -- is under it.
+    fn under<T>(self, critical: impl FnOnce() -> T) -> T {
+        critical()
     }
 
     /// Append `row` after pruning rows older than the warm-up window, keeping the newest 64.
@@ -1211,19 +1250,23 @@ impl AdmissionGuard {
     }
 }
 
-fn reserved_figure(table: &BTreeMap<Toolchain, u64>) -> String {
-    if table.is_empty() {
-        return "reserved=none".into();
-    }
-    let rows: Vec<_> = table
+fn reserved_figure(table: &Reservation) -> String {
+    let mut rows: Vec<_> = table
+        .memory
         .iter()
         .map(|(toolchain, mb)| format!("{}:{mb}MB", toolchain.as_str()))
         .collect();
+    if table.other_mb > 0 {
+        rows.push(format!("other:{}MB", table.other_mb));
+    }
+    if rows.is_empty() {
+        return "reserved=none".into();
+    }
     format!("reserved={}", rows.join(","))
 }
 
 /// Memory figures shared by every deny message, as key=value/limit.
-fn memory_figures(s: &Snapshot, cfg: &Config) -> String {
+fn memory_figures(s: &Snapshot, cfg: &Config, table: &Reservation) -> String {
     let psi = match s.mem_pressure_some_avg10 {
         Some(psi) => format!("{psi:.2}/{:.2}", cfg.max_mem_pressure),
         None => "n/a".into(),
@@ -1233,7 +1276,7 @@ fn memory_figures(s: &Snapshot, cfg: &Config) -> String {
         s.mem_available_mb,
         cfg.min_available_mb,
         s.swap_used_mb,
-        reserved_figure(&reserved(s, cfg, unix_now()))
+        reserved_figure(table)
     )
 }
 
@@ -1246,60 +1289,171 @@ fn lock_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Try the lock without waiting; release it immediately when we got it. A would-block lock is
-/// held by someone else, and the holder JSON they wrote is readable while it is locked.
-fn probe_lock(path: &Path) -> io::Result<(bool, Option<Holder>)> {
-    let mut file = lock_file(path)?;
-    match file.try_lock() {
-        Ok(()) => {
-            file.unlock()?;
-            Ok((false, None))
-        }
-        Err(std::fs::TryLockError::WouldBlock) => {
-            let mut data = String::new();
-            file.read_to_string(&mut data)?;
-            Ok((true, serde_json::from_str(&data).ok()))
-        }
-        Err(e) => Err(io::Error::other(e)),
+/// The registration of a `gate run`: its lock file, held until dropped.
+struct Registration {
+    /// The lock. Never read: it is kept for the lock it holds, released when dropped.
+    _file: File,
+    path: PathBuf,
+}
+
+impl Drop for Registration {
+    /// Unlinks the file while its lock is still held (`_file` is dropped after this returns), so
+    /// nobody finds a listed file unlocked and mistakes it for a stale one to clean up, or for a
+    /// holder.
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
-/// Lock-file prefix and size of the pool a kind takes its slot from.
-fn pool(cfg: &Config, kind: Kind) -> (&'static str, usize) {
-    if kind == Kind::Other {
-        ("other", cfg.other_slots)
-    } else {
-        ("slot", cfg.slots)
+/// Sixteen hex digits for a registration's name: eight bytes of `/dev/urandom` or, without it, a
+/// hash of the clock, our pid and thread. The pid alone could be reused by the next run.
+fn random_hex() -> String {
+    let mut bytes = [0u8; 8];
+    if File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .is_err()
+    {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let digest = Sha256::digest(format!(
+            "{} {nanos} {:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        bytes.copy_from_slice(&digest[..8]);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Create the gate directory, private (0700) like every parent it has to create: its default path
+/// under `/tmp` is predictable, and it holds lock files only our own uid may count.
+fn ensure_gate_dir(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)
+}
+
+/// Register a `gate run` for `holder` by the protocol of the load-only design: the file is created
+/// under a name no enumerator lists and locked at once, the holder JSON is written and synced, and
+/// only then does the file get its listed name. Whatever carries a listed name is therefore locked
+/// and complete.
+fn register(cfg: &Config, holder: &Holder) -> io::Result<Registration> {
+    let random = random_hex();
+    let temporary = cfg.gate_dir.join(format!(".reg-{random}"));
+    let path = cfg
+        .gate_dir
+        .join(format!("run-{}-{random}.lock", holder.pid));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.lock()?;
+    let written = write_holder(&mut file, holder).and_then(|()| file.sync_all());
+    match written {
+        Ok(()) => fs::rename(&temporary, &path).map(|()| Registration { _file: file, path }),
+        Err(e) => {
+            let _ = fs::remove_file(&temporary);
+            Err(e)
+        }
     }
 }
 
-fn slots(cfg: &Config, prefix: &str, count: usize) -> io::Result<Vec<Slot>> {
-    fs::create_dir_all(&cfg.gate_dir)?;
-    (0..count)
-        .map(|index| {
-            let (occupied, holder) =
-                probe_lock(&cfg.gate_dir.join(format!("{prefix}-{index}.lock")))?;
-            Ok(Slot {
-                index,
-                holder,
-                occupied,
-            })
-        })
-        .collect()
+/// Whether `path` still names the file `file` is open on: same device and inode.
+fn same_file(file: &File, path: &Path) -> bool {
+    match (file.metadata(), fs::symlink_metadata(path)) {
+        (Ok(opened), Ok(listed)) => opened.dev() == listed.dev() && opened.ino() == listed.ino(),
+        _ => false,
+    }
 }
 
-fn compiler_locks(cfg: &Config) -> io::Result<Vec<ToolchainLock>> {
-    TOOLCHAINS
-        .iter()
-        .map(|&toolchain| {
-            let (occupied, holder) = probe_lock(&cfg.gate_dir.join(toolchain.lock_name()))?;
-            Ok(ToolchainLock {
-                toolchain,
-                holder,
-                occupied,
-            })
+fn is_run_lock(name: &str) -> bool {
+    name.starts_with("run-") && name.ends_with(".lock")
+}
+
+/// The `gate run` runs registered in `dir`: this build's `run-<pid>-<random>.lock`, and the
+/// `slot-*.lock`, `other-*.lock` and `compiler-*.lock` of a run started before the upgrade (a pid
+/// holding several of those counts once). Only files owned by `uid` count, and they are opened
+/// read-only: enumerating must not create anything.
+///
+/// A listed file is locked for its whole life, so one that is not locked is stale: a `gate run`
+/// killed by a signal runs no cleanup. Whoever finds it removes it -- under the lock just taken,
+/// and only while the path still names that very file. A path naming another file was replaced
+/// meanwhile and is not ours to remove.
+///
+/// What counts is the file that was opened, never the path: it is opened through no symlink, and
+/// its owner and type are read from the open file itself.
+fn holders(dir: &Path, uid: u32) -> io::Result<Vec<Holder>> {
+    let mut names: Vec<String> = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            is_run_lock(name)
+                || (name.ends_with(".lock")
+                    && ["slot-", "other-", "compiler-"]
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)))
         })
-        .collect()
+        .collect();
+    names.sort_by_key(|name| (!is_run_lock(name), name.clone()));
+    let mut seen = BTreeSet::new();
+    let mut found = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        // A look, not a check: the file opened is checked below. It only keeps the gate from
+        // opening -- and blocking on -- whatever is no regular file (the open of a FIFO waits for
+        // its other end).
+        let Ok(looked) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !looked.is_file() {
+            continue;
+        }
+        // Through no symlink: in a directory that is not private, a planted link must not make
+        // the gate lock some other file. And the owner is read from the file just opened, not
+        // from the path before: the path could have named something else by then.
+        let Ok(mut file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        else {
+            continue;
+        };
+        let Ok(metadata) = file.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.uid() != uid {
+            continue;
+        }
+        match file.try_lock() {
+            Ok(()) => {
+                if is_run_lock(&name) && same_file(&file, &path) {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let mut data = String::new();
+                let holder = file
+                    .read_to_string(&mut data)
+                    .ok()
+                    .and_then(|_| serde_json::from_str(&data).ok())
+                    .unwrap_or(Holder {
+                        pid: 0,
+                        kind: "unknown".into(),
+                        command: Vec::new(),
+                        started_at: 0,
+                        cwd: None,
+                        target: None,
+                    });
+                if seen.insert(holder.pid) {
+                    found.push(holder);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    Ok(found)
 }
 
 struct ProcEntry {
@@ -1418,7 +1572,7 @@ fn native_processes(own_uid: u32, read_environ: bool) -> Vec<ProcEntry> {
 /// Gradle only counts while a test or compile worker JVM is running: its main class is an argument
 /// ending in `.GradleWorkerMain`. The daemon is deliberately not counted -- it stays resident for
 /// hours after a build (three by default) and is idle most of that time, so counting it refused
-/// every build/test until it timed out. A gated Gradle build is covered by `compiler-gradle.lock` instead.
+/// every build/test until it timed out. A gated Gradle build is covered by what its holder reserves instead.
 /// The JVM requirement and the dotted suffix keep `rg …GradleWorkerMain` and `tail -f` on a log --
 /// mentions, not compilers -- from blocking the gate. Workers outlive the build too (issue #1: an
 /// idle one denied every compile for three hours), so a worker is only a candidate; `compiling`
@@ -1551,28 +1705,20 @@ fn snapshot_with_processes(
     read_environ: bool,
     check_compilers: bool,
 ) -> io::Result<(Snapshot, Vec<ProcEntry>)> {
-    fs::create_dir_all(&cfg.gate_dir)?;
+    ensure_gate_dir(&cfg.gate_dir)?;
     // Our own uid, not the gate directory's owner: the directory can be shared with a group and
     // must not decide whose compilers count. CLAUDECAT_PROC_ROOT is the fixtures' fake proc, so
     // read the real /proc/self; fall back to the directory owner only if it is unreadable.
     let uid = own_uid().or_else(|_| fs::metadata(&cfg.gate_dir).map(|m| m.uid()))?;
     let procs = processes(&cfg.proc_root, uid, read_environ)?;
     let (load_1m, swap_used_mb, mem_available_mb) = metrics(&cfg.proc_root)?;
-    let compiler_locks = compiler_locks(cfg)?;
-    let first_held = compiler_locks.iter().find(|lock| lock.occupied);
     let snap = Snapshot {
         load_1m,
         swap_used_mb,
         mem_available_mb,
         mem_pressure_some_avg10: mem_pressure(&cfg.proc_root),
-        slots: slots(cfg, "slot", cfg.slots)?,
-        other_slots: slots(cfg, "other", cfg.other_slots)?,
+        holders: holders(&cfg.gate_dir, uid)?,
         limits: cfg.limits.clone(),
-        compiler_lock: CompilerLock {
-            holder: first_held.and_then(|lock| lock.holder.clone()),
-            occupied: first_held.is_some(),
-        },
-        compiler_locks,
         compiling: if check_compilers {
             compiling(&procs, uid, &cfg.proc_root)
         } else {
@@ -1581,24 +1727,15 @@ fn snapshot_with_processes(
         orphan_brokers: brokers(&procs),
         admissions: read_admissions(&cfg.gate_dir, unix_now(), cfg.reserve_warmup_secs)
             .unwrap_or_default(),
+        uid,
+        gate_dir: cfg.gate_dir.clone(),
     };
     Ok((snap, procs))
 }
 
 fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) -> Option<String> {
     let mut canonical_dir = None;
-    let holders = snap
-        .slots
-        .iter()
-        .chain(&snap.other_slots)
-        .filter(|s| s.occupied)
-        .filter_map(|s| s.holder.as_ref())
-        .chain(
-            snap.compiler_locks
-                .iter()
-                .filter(|lock| lock.occupied)
-                .filter_map(|lock| lock.holder.as_ref()),
-        );
+    let holders = snap.holders.iter();
     let candidates = holders.filter_map(|holder| {
         let cwd = holder.cwd.as_ref()?;
         let id = identity(&holder.command, Path::new(cwd), holder.target.as_deref())?;
@@ -1660,60 +1797,75 @@ fn duplicate(wanted: &Identity, snap: &Snapshot, procs: &[ProcEntry], uid: u32) 
 }
 
 impl Snapshot {
-    fn pool(&self, kind: Kind) -> &[Slot] {
-        if kind == Kind::Other {
-            &self.other_slots
-        } else {
-            &self.slots
-        }
+    /// Re-read the registry under the admission lock: the holders and admissions were read
+    /// without it.
+    fn refresh(&mut self, cfg: &Config) -> io::Result<()> {
+        self.holders = holders(&self.gate_dir, self.uid)?;
+        self.admissions = read_admissions(&self.gate_dir, unix_now(), cfg.reserve_warmup_secs)?;
+        Ok(())
     }
 }
 
-/// `wanted` is the toolchains the command drives, with the memory reserved for them; no toolchain
-/// means unknown, and then every toolchain's compilers and lock count against it and no
-/// reservation is checked. `pool_kind` picks the slot pool (the declared kind); `kind` picks the
-/// checks (a JS test runner is checked as Other).
-fn deny_reason(
+/// Why a command may not start: its message, the reasons in it, and the figures it was decided on.
+struct Denial {
+    /// The message, one line, for whoever asked.
+    message: String,
+    /// The reasons in the message, in its order.
+    reasons: Vec<&'static str>,
+    /// What the runs still warming up held back, and for how much longer.
+    table: Reservation,
+    /// The load the command asks for on the row that decided: none on the `other` row.
+    need_load: f64,
+}
+
+impl Denial {
+    /// The system figures of this denial, for the deny log.
+    fn context(&self, s: &Snapshot) -> crate::gate_stats::DenyContext {
+        crate::gate_stats::DenyContext::new(
+            s.mem_available_mb,
+            s.mem_pressure_some_avg10,
+            s.load_1m,
+        )
+        // The figures of the message: the load reserved on the machine, and what this command
+        // asked for on its row.
+        .with_loads(self.table.load, self.need_load)
+    }
+}
+
+/// Why a command of `kind`, estimated as `wanted`, may not start, on the reservations of this
+/// moment.
+fn deny_reason(s: &Snapshot, cfg: &Config, kind: Kind, wanted: &Estimate) -> Option<Denial> {
+    deny_on(s, cfg, kind, wanted, reserved(s, cfg, unix_now()))
+}
+
+/// The same on reservations already summed up, so that figures reported beside the reasons come
+/// from the very table the reasons were read off. The build row counts the measured load together
+/// with the load reserved for runs still warming up and the command's own. `other` keeps to the
+/// measured load (external callers see no change there) and instead must find `reserve_other_mb`
+/// beyond the reserved memory.
+fn deny_on(
     s: &Snapshot,
     cfg: &Config,
     kind: Kind,
-    pool_kind: Kind,
     wanted: &Estimate,
-) -> Option<(String, Vec<&'static str>)> {
-    let (prefix, total) = pool(cfg, pool_kind);
-    let pool_slots = s.pool(pool_kind);
-    let counts = |t: Toolchain| wanted.toolchains.is_empty() || wanted.toolchains.contains(&t);
-    let table = reserved(s, cfg, unix_now());
-    let need = wanted.total_mb(cfg);
+    table: Reservation,
+) -> Option<Denial> {
+    let other = kind == Kind::Other;
+    let (need_mb, need_load, reserved_load) = if other {
+        (cfg.reserve_other_mb, 0.0, 0.0)
+    } else {
+        (wanted.total_mb(cfg), wanted.load(cfg), table.load)
+    };
     let reasons = [
-        (s.load_1m > cfg.max_load, "load"),
+        (s.load_1m + reserved_load + need_load > cfg.max_load, "load"),
         (
             s.mem_pressure_some_avg10
                 .is_some_and(|psi| psi > cfg.max_mem_pressure)
                 || s.mem_available_mb < cfg.min_available_mb,
             "memory",
         ),
-        (pool_slots.iter().all(|slot| slot.occupied), "slots"),
         (
-            kind.checks_compilers()
-                && s.compiling
-                    .iter()
-                    .any(|p| process_toolchain(p).is_none_or(|t| t.exclusive() && counts(t))),
-            "compiler",
-        ),
-        (
-            kind.checks_compilers()
-                && s.compiler_locks.iter().any(|lock| {
-                    lock.occupied && lock.toolchain.exclusive() && counts(lock.toolchain)
-                }),
-            "compiler-lock",
-        ),
-        (
-            kind.checks_compilers()
-                && need > 0
-                && s.mem_available_mb
-                    .saturating_sub(table.values().fold(0u64, |sum, mb| sum.saturating_add(*mb)))
-                    < need,
+            need_mb > 0 && s.mem_available_mb.saturating_sub(table.mb()) < need_mb,
             "reserved",
         ),
     ];
@@ -1725,19 +1877,17 @@ fn deny_reason(
     if failed.is_empty() {
         return None;
     }
-    let holders: Vec<_> = pool_slots
+    let holders: Vec<_> = s
+        .holders
         .iter()
-        .filter(|slot| slot.occupied)
-        .map(|slot| match &slot.holder {
-            Some(h) => format!(
-                "{prefix}-{} pid={} kind={} cmd={} since={}",
-                slot.index,
-                h.pid,
+        .map(|h| match h.pid {
+            0 => "unknown".to_owned(),
+            pid => format!(
+                "pid={pid} kind={} cmd={} since={}",
                 h.kind,
                 h.command.join(" "),
                 h.started_at
             ),
-            None => format!("{prefix}-{} unknown", slot.index),
         })
         .collect();
     let compilers: Vec<_> = s
@@ -1745,41 +1895,85 @@ fn deny_reason(
         .iter()
         .map(|p| format!("pid={} name={} cwd={}", p.pid, p.name, p.cwd))
         .collect();
-    let compiler_locks: Vec<_> = s
-        .compiler_locks
-        .iter()
-        .filter(|lock| lock.occupied)
-        .map(|lock| match &lock.holder {
-            Some(h) => format!(
-                "{}: pid={} kind={} cmd={} since={}",
-                lock.toolchain.as_str(),
-                h.pid,
-                h.kind,
-                h.command.join(" "),
-                h.started_at
-            ),
-            None => format!("{}: unknown", lock.toolchain.as_str()),
-        })
-        .collect();
-    let compiler_lock = if compiler_locks.is_empty() {
-        "none".into()
-    } else {
-        compiler_locks.join("; ")
-    };
     let message = format!(
-        "gate denied ({}) load={:.2}/{:.2} {} {}={}/{} holders=[{}] compiler_lock=[{}] compiling=[{}]",
+        "gate denied ({}) load={:.2}/{:.2} reserved_load={:.2} need_load={:.2} {} holders=[{}] compiling=[{}]",
         failed.join(","),
         s.load_1m,
         cfg.max_load,
-        memory_figures(s, cfg),
-        if prefix == "slot" { "slots" } else { "other_slots" },
-        holders.len(),
-        total,
+        table.load,
+        need_load,
+        memory_figures(s, cfg, &table),
         holders.join("; "),
-        compiler_lock,
         compilers.join("; ")
     );
-    Some((message, failed))
+    Some(Denial {
+        message,
+        reasons: failed,
+        table,
+        need_load,
+    })
+}
+
+fn two_decimals(n: f64) -> f64 {
+    (n * 100.0).round() / 100.0
+}
+
+/// What the machine has left, in figures every machine reports the same way so that a coordinator
+/// can compare them. All of it is read off one snapshot and one sum of the reservations, so the
+/// figures agree with each other and with what the gate would decide.
+#[derive(Serialize)]
+struct Capacity {
+    cpus: Option<usize>,
+    mem_total_mb: Option<u64>,
+    max_load: f64,
+    load_1m: f64,
+    /// Estimated load of the runs still warming up, decayed to now.
+    reserved_load: f64,
+    /// `max_load - load_1m - reserved_load`: negative once a build would be denied on load.
+    load_headroom: f64,
+    mem_available_mb: u64,
+    /// All the memory reserved, the `other` row's included.
+    reserved_mb: u64,
+    /// `mem_available_mb - reserved_mb`, never below 0.
+    mem_headroom_mb: u64,
+    /// PSI `some avg10`; None where the kernel has no PSI.
+    mem_pressure: Option<f64>,
+    /// Why a build or test run that needs nothing of its own would be denied right now. Empty when
+    /// it would start: a coordinator that sees headroom here need not be told otherwise.
+    blocked: Vec<&'static str>,
+    /// Runs still warming up, holders and admissions alike.
+    warming: usize,
+}
+
+fn capacity(s: &Snapshot, cfg: &Config, table: Reservation) -> Capacity {
+    let (reserved_mb, reserved_load, warming) = (table.mb(), table.load, table.warming);
+    // The gate's own reasons, for a run that asks for nothing: with nothing needed, memory already
+    // reserved denies nobody, so only load and memory pressure can be in it.
+    let blocked = deny_on(s, cfg, Kind::Build, &Estimate::default(), table)
+        .map_or_else(Vec::new, |denial| denial.reasons);
+    Capacity {
+        cpus: cfg.limits.cpus,
+        mem_total_mb: cfg.limits.mem_total_mb,
+        max_load: cfg.max_load,
+        load_1m: s.load_1m,
+        reserved_load: two_decimals(reserved_load),
+        load_headroom: two_decimals(cfg.max_load - s.load_1m - reserved_load),
+        mem_available_mb: s.mem_available_mb,
+        reserved_mb,
+        mem_headroom_mb: s.mem_available_mb.saturating_sub(reserved_mb),
+        mem_pressure: s.mem_pressure_some_avg10,
+        blocked,
+        warming,
+    }
+}
+
+/// The `status --json` document, which `fleet push` uploads as well: the snapshot, and the
+/// capacity read from it.
+#[derive(Serialize)]
+struct StatusDocument {
+    #[serde(flatten)]
+    snapshot: Snapshot,
+    capacity: Capacity,
 }
 
 fn warning(error: &io::Error) {
@@ -2102,15 +2296,17 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 pub fn check(kind: Kind) -> i32 {
     crate::fleet_cmd::maybe_push_background();
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
-        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, kind, &Estimate::default()) {
-            Some((reason, _)) => {
-                let _ = writeln!(io::stderr(), "{reason}");
+        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, &Estimate::default()) {
+            Some(denial) => {
+                let _ = writeln!(io::stderr(), "{}", denial.message);
+                record_path_deny("check", kind, &denial.reasons.join(","), denial.context(&s));
                 75
             }
             None => 0,
         },
         Err(e) if unreadable(&e) => {
             let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
+            record_path_deny("check", kind, "resources", Default::default());
             75
         }
         Err(e) => {
@@ -2171,41 +2367,36 @@ pub fn hook() -> i32 {
         .and_then(|id| duplicate(id, &snap, &procs, uid));
     let session = session_id.as_deref().map(short_hash);
     // The snapshot above was taken without any lock (the Gradle CPU sample sleeps). Only the
-    // check-then-record step is serialized, so a concurrent hook sees this one's admission.
-    let record_admission =
-        duplicate_reason.is_none() && kind.checks_compilers() && !wanted.toolchains.is_empty();
+    // check-then-record step is serialized, under the lock `gate run` shares, so whatever is
+    // registered or admitted meanwhile is read here and this hook's admission is read next.
+    let record_admission = duplicate_reason.is_none() && !wanted.toolchains.is_empty();
     let guard = if record_admission {
-        AdmissionGuard::acquire(&cfg.gate_dir).and_then(|guard| {
-            snap.admissions =
-                read_admissions(&cfg.gate_dir, unix_now(), cfg.reserve_warmup_secs).ok()?;
-            Some(guard)
-        })
+        AdmissionGuard::acquire(&cfg.gate_dir, ADMISSION_LOCK_BUDGET)
+            .and_then(|guard| snap.refresh(&cfg).ok().map(|()| guard))
     } else {
         None
     };
+    // The load figures of a denial by resources, for its deny log row. A duplicate is not one:
+    // the resources are fine, the same command is already running.
+    let mut loads = None;
     let (decision, keys) = if let Some(reason) = duplicate_reason {
         (Some(reason), vec!["duplicate"])
-    } else if let Some((reason, keys)) = deny_reason(&snap, &cfg, kind, kind, &wanted) {
-        // Only slots, compilers and reservations have holders to wait for; load and memory deny
-        // with holders=[].
-        // "reserved" has a holder to wait for only while the table is non-empty; otherwise
-        // MemAvailable alone is below the estimate.
-        let has_holders = snap.slots.iter().any(|slot| slot.occupied)
-            || snap.compiler_locks.iter().any(|lock| lock.occupied);
-        let wait = if keys
-            .iter()
-            .any(|key| matches!(*key, "slots" | "compiler" | "compiler-lock"))
-            || (keys.contains(&"reserved")
-                && has_holders
-                && !reserved(&snap, &cfg, unix_now()).is_empty())
-        {
-            "the holders above finish"
-        } else if keys.contains(&"reserved") && !reserved(&snap, &cfg, unix_now()).is_empty() {
-            "the reservation warm-up passes (reserved= above)"
+    } else if let Some(denial) = deny_reason(&snap, &cfg, kind, &wanted) {
+        // A denial the reservations cause is over once they are, at most when the longest warm-up
+        // left has passed. Otherwise -- load or memory pressure alone, or a need that MemAvailable
+        // alone cannot meet -- the wait is for load and memory pressure.
+        let by_reservation = (denial.reasons.contains(&"reserved") && denial.table.mb() > 0)
+            || (denial.reasons.contains(&"load")
+                && denial.table.load > 0.0
+                && snap.load_1m + wanted.load(&cfg) <= cfg.max_load);
+        let wait = if by_reservation {
+            format!("the warm-up passes (at most {}s)", denial.table.warmup_left)
         } else {
-            "load and memory pressure drop (figures above)"
+            "load and memory pressure drop (figures above)".to_owned()
         };
-        (Some(format!("{reason} Denied, not queued: nothing will run this command later. Retry it after {wait}; do not poll with sleep in the foreground.")), keys)
+        loads = Some((denial.table.load, denial.need_load));
+        let message = format!("{} Denied, not queued: nothing will run this command later. Retry it after {wait}; do not poll with sleep in the foreground.", denial.message);
+        (Some(message), denial.reasons)
     } else {
         (None, Vec::new())
     };
@@ -2232,17 +2423,21 @@ pub fn hook() -> i32 {
         .unwrap_or_else(|| "gradle".into());
     let now = unix_now();
     if let Some(reason) = decision {
+        let mut ctx = crate::gate_stats::DenyContext::new(
+            snap.mem_available_mb,
+            snap.mem_pressure_some_avg10,
+            snap.load_1m,
+        );
+        if let Some((reserved_load, need_load)) = loads {
+            ctx = ctx.with_loads(reserved_load, need_load);
+        }
         let retry = record_deny(
             now,
             session.as_deref(),
             id.as_deref(),
             &sub,
             &keys.join(","),
-            crate::gate_stats::DenyContext::new(
-                snap.mem_available_mb,
-                snap.mem_pressure_some_avg10,
-                snap.load_1m,
-            ),
+            ctx,
         );
         let reason = if let Some((count, first)) = retry.filter(|(count, _)| *count >= 2) {
             let suffix = if count >= 3 {
@@ -2318,159 +2513,106 @@ pub fn install(install: bool) -> i32 {
     }
 }
 
+/// How a `gate run` may start, as decided under `admission.lock`.
+enum Start {
+    /// Denied: the message for stderr, with its reasons and figures.
+    Denied(Denial),
+    /// Registered: the lock file is held until this is dropped.
+    Registered(Registration),
+    /// Nothing could be written to the registry: warn and run without a registration.
+    Unregistered(io::Error),
+}
+
 pub fn run(kind: Kind, command: &[String]) -> i32 {
     crate::fleet_cmd::maybe_push_background();
-    let result = config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s)));
-    let (cfg, snap) = match result {
-        Ok(pair) => pair,
-        Err(e) if unreadable(&e) => {
-            let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
-            return 75;
-        }
-        Err(e) => {
-            warning(&e);
-            return execute(command);
-        }
-    };
-    let wanted = argv_estimate(command, &cfg);
-    // A JS or Python test runner is no compiler: it needs a slot and the load/memory checks, but
-    // neither toolchain lock nor the compiler checks, so it never queues behind (or blocks) a
-    // cargo or Gradle build.
-    let check_kind = if runs_no_compiler(command) {
-        Kind::Other
-    } else {
-        kind
-    };
-    if let Some((reason, _)) = deny_reason(&snap, &cfg, check_kind, kind, &wanted) {
-        let _ = writeln!(io::stderr(), "{reason}");
-        return 75;
-    }
-    // Sorted, so two runs wanting both toolchains take the locks in the same order. An unknown
-    // toolchain holds them all, as the single lock used to.
-    let held: &[Toolchain] = if !wanted.toolchains.is_empty() {
-        &wanted.toolchains
-    } else if check_kind == Kind::Other {
-        &[]
-    } else {
-        &TOOLCHAINS
-    };
-    let (prefix, total) = pool(&cfg, kind);
-    for index in 0..total {
-        let path = cfg.gate_dir.join(format!("{prefix}-{index}.lock"));
-        let mut file = match lock_file(&path) {
-            Ok(f) => f,
+    let (cfg, mut snap) =
+        match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
+            Ok(pair) => pair,
+            Err(e) if unreadable(&e) => {
+                let _ = writeln!(io::stderr(), "{}", unreadable_reason(&e));
+                record_path_deny("run", kind, "resources", Default::default());
+                return 75;
+            }
             Err(e) => {
                 warning(&e);
                 return execute(command);
             }
         };
-        match file.try_lock() {
-            Ok(()) => {
-                let holder = Holder {
-                    pid: std::process::id(),
-                    kind: kind.as_str().into(),
-                    command: command.to_vec(),
-                    started_at: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
-                    cwd: env::current_dir()
-                        .ok()
-                        .and_then(|p| fs::canonicalize(p).ok())
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    target: env::var("CARGO_TARGET_DIR").ok(),
-                };
-                if let Err(e) = write_holder(&mut file, &holder) {
-                    warning(&e);
-                    return execute(command);
-                }
-                // The slot alone cannot see the startup window before cargo spawns its first
-                // rustc, so build/test also holds a second lock for the whole child lifetime.
-                let mut compilers = Vec::new();
-                if kind.checks_compilers() {
-                    for toolchain in held.iter().filter(|t| t.exclusive()) {
-                        let mut lock = match lock_file(&cfg.gate_dir.join(toolchain.lock_name())) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                warning(&e);
-                                return execute(command);
-                            }
-                        };
-                        match lock.try_lock() {
-                            Ok(()) => {
-                                if let Err(e) = write_holder(&mut lock, &holder) {
-                                    warning(&e);
-                                }
-                                compilers.push(lock);
-                            }
-                            Err(std::fs::TryLockError::WouldBlock) => {
-                                // Drop the slot and the locks taken so far before answering 75:
-                                // the caller queued, so it must not keep a place it will not use.
-                                // Only a race reaches this arm -- someone took the lock after the
-                                // snapshot's pre-check -- so no test drives it; keep the drop
-                                // when touching this.
-                                drop(compilers);
-                                drop(file);
-                                let mut data = String::new();
-                                let _ = lock.read_to_string(&mut data);
-                                let _ = writeln!(
-                                    io::stderr(),
-                                    "gate denied (compiler-lock) toolchain={} holder=[{}] load={:.2} {}",
-                                    toolchain.as_str(),
-                                    data.trim(),
-                                    snap.load_1m,
-                                    memory_figures(&snap, &cfg)
-                                );
-                                return 75;
-                            }
-                            Err(e) => {
-                                warning(&io::Error::other(e));
-                                return execute(command);
-                            }
-                        }
-                    }
-                }
-                let exit = crate::gate_stats::run_measured(kind.as_str(), command, &cfg.proc_root);
-                drop(compilers);
-                drop(file);
-                return exit;
-            }
-            Err(std::fs::TryLockError::WouldBlock) => continue,
-            Err(e) => {
-                warning(&io::Error::other(e));
-                return execute(command);
-            }
+    let wanted = argv_estimate(command, &cfg);
+    // A JS or Python test runner is no compiler: it is checked on the `other` row.
+    let check_kind = if runs_no_compiler(command) {
+        Kind::Other
+    } else {
+        kind
+    };
+    // The snapshot above was taken without any lock (the Gradle CPU sample sleeps). Check and
+    // register in the one critical section the hook shares, so two runs starting together cannot
+    // both find nothing reserved. Without the lock -- it stays busy, or the registry is unreadable
+    // -- warn and run, as for any other gate failure.
+    let guarded = AdmissionGuard::acquire(&cfg.gate_dir, RUN_LOCK_BUDGET)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{ADMISSION_LOCK} stayed locked for over {}ms",
+                    RUN_LOCK_BUDGET.as_millis()
+                ),
+            )
+        })
+        .and_then(|guard| snap.refresh(&cfg).map(|()| guard));
+    let guard = match guarded {
+        Ok(guard) => guard,
+        Err(e) => {
+            warning(&e);
+            return execute(command);
+        }
+    };
+    // Decide and register under the lock, and under it only: it is released before anything is
+    // done with the outcome. A child started under it -- on the way out after a failed
+    // registration, say -- would hold it for its whole runtime, and every other run and hook
+    // would wait out its budget until then.
+    let start = guard.under(|| {
+        if let Some(denial) = deny_reason(&snap, &cfg, check_kind, &wanted) {
+            return Start::Denied(denial);
+        }
+        let holder = Holder {
+            pid: std::process::id(),
+            kind: kind.as_str().into(),
+            command: command.to_vec(),
+            started_at: unix_now(),
+            cwd: env::current_dir()
+                .ok()
+                .and_then(|p| fs::canonicalize(p).ok())
+                .map(|p| p.to_string_lossy().into_owned()),
+            target: env::var("CARGO_TARGET_DIR").ok(),
+        };
+        match register(&cfg, &holder) {
+            Ok(registration) => Start::Registered(registration),
+            Err(e) => Start::Unregistered(e),
+        }
+    });
+    match start {
+        Start::Denied(denial) => {
+            let _ = writeln!(io::stderr(), "{}", denial.message);
+            // Outside the lock, like everything else done with the decision.
+            record_path_deny(
+                "run",
+                kind,
+                &denial.reasons.join(","),
+                denial.context(&snap),
+            );
+            75
+        }
+        Start::Unregistered(e) => {
+            warning(&e);
+            execute(command)
+        }
+        Start::Registered(registration) => {
+            let exit = crate::gate_stats::run_measured(kind.as_str(), command, &cfg.proc_root);
+            drop(registration);
+            exit
         }
     }
-    let _ = writeln!(
-        io::stderr(),
-        "gate denied (slots) load={:.2} {} {}={}/{} holders=[{}] compiling=[{}]",
-        snap.load_1m,
-        memory_figures(&snap, &cfg),
-        if prefix == "slot" {
-            "slots"
-        } else {
-            "other_slots"
-        },
-        total,
-        total,
-        snap.pool(kind)
-            .iter()
-            .filter_map(|s| s.holder.as_ref().map(|h| format!(
-                "pid={} kind={} cmd={}",
-                h.pid,
-                h.kind,
-                h.command.join(" ")
-            )))
-            .collect::<Vec<_>>()
-            .join("; "),
-        snap.compiling
-            .iter()
-            .map(|p| format!("pid={} name={} cwd={}", p.pid, p.name, p.cwd))
-            .collect::<Vec<_>>()
-            .join("; ")
-    );
-    75
 }
 
 fn execute(command: &[String]) -> i32 {
@@ -2499,21 +2641,70 @@ fn execute(command: &[String]) -> i32 {
 
 /// The `status --json` document as a value, for the fleet snapshot.
 pub fn status_value() -> io::Result<serde_json::Value> {
-    let snap = config().and_then(|cfg| snapshot(&cfg, true))?;
-    serde_json::to_value(&snap).map_err(io::Error::other)
+    document()
+        .map(|(document, _)| document)
+        .and_then(|document| serde_json::to_value(&document).map_err(io::Error::other))
+}
+
+/// The snapshot of this moment with the capacity read from it -- what `status` prints, as JSON or
+/// as text, and what `fleet push` uploads -- and the sum of reservations both were taken from, so
+/// that no figure of one report is a second older than another.
+fn document() -> io::Result<(StatusDocument, Reservation)> {
+    let cfg = config()?;
+    let snap = snapshot(&cfg, true)?;
+    let table = reserved(&snap, &cfg, unix_now());
+    let capacity = capacity(&snap, &cfg, table.clone());
+    Ok((
+        StatusDocument {
+            snapshot: snap,
+            capacity,
+        },
+        table,
+    ))
+}
+
+/// `CLAUDECAT_SLOTS` and `CLAUDECAT_OTHER_SLOTS` used to cap the runs. They do nothing now.
+fn obsolete_slot_variables() -> Vec<&'static str> {
+    ["CLAUDECAT_SLOTS", "CLAUDECAT_OTHER_SLOTS"]
+        .into_iter()
+        .filter(|key| env::var_os(key).is_some())
+        .collect()
+}
+
+/// The gate directory is private to our uid. One that group or others can get into -- made before
+/// it was 0700 -- is worth a notice, with its fix.
+fn open_gate_dir(path: &Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path).ok()?.permissions().mode() & 0o777;
+    (mode & 0o077 != 0).then(|| {
+        format!(
+            "gate directory {} is open to other users (mode {mode:o}); run chmod 700 on it",
+            path.display()
+        )
+    })
 }
 
 pub fn status(json: bool) -> i32 {
     crate::fleet_cmd::maybe_push_background();
-    let snap = match config().and_then(|cfg| snapshot(&cfg, true)) {
-        Ok(s) => s,
+    let (snap, capacity, table) = match document() {
+        Ok((
+            StatusDocument {
+                snapshot: snap,
+                capacity,
+            },
+            table,
+        )) => (snap, capacity, table),
         Err(e) => {
             let _ = writeln!(io::stderr(), "status warning: {e}");
             return 0;
         }
     };
+    let open_dir = open_gate_dir(&snap.gate_dir);
     if json {
-        match serde_json::to_string_pretty(&snap) {
+        match serde_json::to_string_pretty(&StatusDocument {
+            snapshot: snap,
+            capacity,
+        }) {
             Ok(s) => {
                 let _ = writeln!(io::stdout(), "{s}");
             }
@@ -2534,81 +2725,56 @@ pub fn status(json: bool) -> i32 {
         let l = &snap.limits;
         let _ = writeln!(
             io::stdout(),
-            "limits: cpus={} MemTotal={}; slots={} [{}]; other_slots={} [{}]; max_load={:.2} [{}]",
+            "limits: cpus={} MemTotal={}; max_load={:.2} [{}]",
             l.cpus.map_or_else(|| "?".into(), |c| c.to_string()),
             l.mem_total_mb
                 .map_or_else(|| "?".into(), |m| format!("{m}MB")),
-            l.slots,
-            l.slots_basis,
-            l.other_slots,
-            l.other_slots_basis,
             l.max_load,
             l.max_load_basis
         );
-        let pools = snap
-            .slots
-            .iter()
-            .map(|slot| ("slot", slot))
-            .chain(snap.other_slots.iter().map(|slot| ("other", slot)));
-        for (prefix, slot) in pools {
-            if prefix == "other" && !slot.occupied {
-                continue;
-            }
-            match &slot.holder {
-                Some(h) => {
-                    let _ = writeln!(
-                        io::stdout(),
-                        "{prefix}-{}: pid={} kind={} cmd={} since={}",
-                        slot.index,
-                        h.pid,
-                        h.kind,
-                        h.command.join(" "),
-                        h.started_at
-                    );
-                }
-                None if slot.occupied => {
-                    let _ = writeln!(
-                        io::stdout(),
-                        "{prefix}-{}: occupied (unknown holder)",
-                        slot.index
-                    );
-                }
-                None => {
-                    let _ = writeln!(io::stdout(), "slot-{}: empty", slot.index);
-                }
-            }
-        }
-        for lock in snap.compiler_locks.iter().filter(|lock| lock.occupied) {
-            let name = lock.toolchain.as_str();
-            match &lock.holder {
-                Some(h) => {
-                    let _ = writeln!(
-                        io::stdout(),
-                        "compiler lock ({name}): pid={} kind={} cmd={} since={}",
-                        h.pid,
-                        h.kind,
-                        h.command.join(" "),
-                        h.started_at
-                    );
-                }
-                None => {
-                    let _ = writeln!(
-                        io::stdout(),
-                        "compiler lock ({name}): occupied (unknown holder)"
-                    );
-                }
-            }
-        }
-        if !snap.compiler_lock.occupied {
-            let _ = writeln!(io::stdout(), "compiler lock: empty");
-        }
-        if let Ok(cfg) = config() {
+        let total = |figure: Option<String>| figure.unwrap_or_else(|| "?".to_owned());
+        let _ = writeln!(
+            io::stdout(),
+            "capacity: cpus={} mem_total={} max_load={:.2} load_1m={:.2} reserved_load={:.2} load_headroom={:.2}",
+            total(capacity.cpus.map(|c| c.to_string())),
+            total(capacity.mem_total_mb.map(|mb| format!("{mb}MB"))),
+            capacity.max_load,
+            capacity.load_1m,
+            capacity.reserved_load,
+            capacity.load_headroom
+        );
+        let _ = writeln!(
+            io::stdout(),
+            "capacity: mem_available={}MB reserved={}MB mem_headroom={}MB psi={} blocked={} warming={}",
+            capacity.mem_available_mb,
+            capacity.reserved_mb,
+            capacity.mem_headroom_mb,
+            capacity
+                .mem_pressure
+                .map_or_else(|| "n/a".into(), |psi| format!("{psi:.2}")),
+            if capacity.blocked.is_empty() {
+                "none".to_owned()
+            } else {
+                capacity.blocked.join(",")
+            },
+            capacity.warming
+        );
+        for h in &snap.holders {
             let _ = writeln!(
                 io::stdout(),
-                "{}",
-                reserved_figure(&reserved(&snap, &cfg, unix_now()))
+                "holder: pid={} kind={} cmd={} since={}",
+                h.pid,
+                h.kind,
+                h.command.join(" "),
+                h.started_at
             );
         }
+        let _ = writeln!(
+            io::stdout(),
+            "{} reserved_load={:.2}",
+            reserved_figure(&table),
+            table.load
+        );
         for p in &snap.compiling {
             let _ = writeln!(
                 io::stdout(),
@@ -2637,7 +2803,54 @@ pub fn status(json: bool) -> i32 {
             }
         }
     }
+    // Notices go to stderr, so `--json` stays a document.
+    if !json {
+        let obsolete = obsolete_slot_variables();
+        if !obsolete.is_empty() {
+            let _ = writeln!(
+                io::stderr(),
+                "status warning: {} set, but the gate no longer counts slots: it judges load and memory",
+                obsolete.join(" and ")
+            );
+        }
+    }
+    if let Some(notice) = open_dir {
+        let _ = writeln!(io::stderr(), "status warning: {notice}");
+    }
     0
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    /// Only lock files owned by our own uid are holders. Seeing that takes a foreign owner, which
+    /// needs root, so this calls the enumeration with another uid instead of going through the CLI.
+    #[test]
+    fn only_lock_files_of_our_own_uid_are_holders() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = own_uid().unwrap();
+        let path = dir.path().join("run-7-0000000000000001.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.try_lock().unwrap();
+        serde_json::to_writer(
+            &file,
+            &serde_json::json!({"pid":7,"kind":"build","command":["cargo","test"],"started_at":1}),
+        )
+        .unwrap();
+        let foreign = own
+            .checked_add(1)
+            .filter(|uid| *uid != 0)
+            .unwrap_or(own - 1);
+        assert_eq!(holders(dir.path(), own).unwrap().len(), 1);
+        assert!(holders(dir.path(), foreign).unwrap().is_empty());
+        assert!(path.exists(), "a file of another uid is not ours to remove");
+    }
 }
 
 #[cfg(test)]
@@ -2656,26 +2869,18 @@ mod duplicate_tests {
             swap_used_mb: 0,
             mem_available_mb: 0,
             mem_pressure_some_avg10: None,
-            slots: Vec::new(),
-            other_slots: Vec::new(),
+            holders: Vec::new(),
             limits: Limits {
                 cpus: None,
                 mem_total_mb: None,
-                slots: 0,
-                slots_basis: String::new(),
-                other_slots: 0,
-                other_slots_basis: String::new(),
                 max_load: 0.0,
                 max_load_basis: String::new(),
             },
-            compiler_lock: CompilerLock {
-                holder: None,
-                occupied: false,
-            },
-            compiler_locks: Vec::new(),
             compiling: Vec::new(),
             orphan_brokers: Vec::new(),
             admissions: Vec::new(),
+            uid: 5002,
+            gate_dir: PathBuf::new(),
         };
         let process = ProcEntry {
             uid: 5001,
@@ -2703,10 +2908,6 @@ mod estimate_tests {
         let limits = Limits {
             cpus: Some(cpus),
             mem_total_mb: Some(mem_total_mb),
-            slots: 3,
-            slots_basis: String::new(),
-            other_slots: 3,
-            other_slots_basis: String::new(),
             max_load: 6.0,
             max_load_basis: String::new(),
         };
@@ -2716,12 +2917,13 @@ mod estimate_tests {
             max_load: 6.0,
             max_mem_pressure: 10.0,
             min_available_mb: 1536,
-            slots: 3,
-            other_slots: 3,
             limits,
             reserve_gradle_mb: 3072,
             reserve_cargo_mb: 1536,
             reserve_warmup_secs: 60,
+            reserve_cargo_load: 2.0,
+            reserve_gradle_load: 1.0,
+            reserve_other_mb: 1024,
         }
     }
 
@@ -2731,17 +2933,13 @@ mod estimate_tests {
             swap_used_mb: 0,
             mem_available_mb: 0,
             mem_pressure_some_avg10: None,
-            slots: Vec::new(),
-            other_slots: Vec::new(),
+            holders: Vec::new(),
             limits: config(16, 32_000).limits,
-            compiler_lock: CompilerLock {
-                holder: None,
-                occupied: false,
-            },
-            compiler_locks: Vec::new(),
             compiling: Vec::new(),
             orphan_brokers: Vec::new(),
             admissions: Vec::new(),
+            uid: 0,
+            gate_dir: PathBuf::new(),
         }
     }
 
@@ -2781,7 +2979,7 @@ mod estimate_tests {
         let mut snap = snapshot();
         snap.admissions = read_admissions(dir.path(), 1000, 60).unwrap();
         assert_eq!(snap.admissions.len(), rows.len(), "every row stays fresh");
-        reserved(&snap, &config(16, 32_000), 1000)
+        reserved(&snap, &config(16, 32_000), 1000).memory
     }
 
     #[test]
@@ -2919,29 +3117,37 @@ mod estimate_tests {
         let cfg = config(16, 32_000);
         let run = &["./gradlew", "test", "-PtestForks=2"];
         let mut snap = snapshot();
-        snap.slots.push(Slot {
-            index: 0,
-            occupied: true,
-            holder: Some(holder(77, run, 1000)),
-        });
-        // The same holder in a slot and in a lock reserves once.
-        snap.compiler_locks.push(ToolchainLock {
-            toolchain: GRADLE,
-            occupied: true,
-            holder: Some(holder(77, run, 1000)),
-        });
-        let table = BTreeMap::from([(GRADLE, 2 * 3072)]);
-        assert_eq!(reserved(&snap, &cfg, 1010), table);
+        snap.holders.push(holder(77, run, 1000));
         // A second holder adds its own forks, and looks through `sh -c`.
-        snap.compiler_locks[0].holder = Some(holder(
+        snap.holders.push(holder(
             78,
             &["sh", "-c", "./gradlew test -PtestForks=3"],
             1000,
         ));
         let table = BTreeMap::from([(GRADLE, 5 * 3072)]);
-        assert_eq!(reserved(&snap, &cfg, 1010), table);
+        assert_eq!(reserved(&snap, &cfg, 1010).memory, table);
         // Past the warm-up window its memory is inside MemAvailable already.
-        assert_eq!(reserved(&snap, &cfg, 1060), BTreeMap::new());
+        assert_eq!(reserved(&snap, &cfg, 1060).memory, BTreeMap::new());
+        // The load is 1.0 per fork and decays linearly: ten seconds in 5/6 is left, halfway 1/2.
+        assert!((reserved(&snap, &cfg, 1010).load - 5.0 * 50.0 / 60.0).abs() < 1e-9);
+        assert!((reserved(&snap, &cfg, 1030).load - 2.5).abs() < 1e-9);
+        assert_eq!(reserved(&snap, &cfg, 1060).load, 0.0);
+        // A holder stamped in the future reserves nothing until the clock catches up (5s slack).
+        snap.holders[0].started_at = 1012;
+        assert_eq!(
+            reserved(&snap, &cfg, 1010).memory,
+            BTreeMap::from([(GRADLE, 5 * 3072)])
+        );
+        snap.holders[0].started_at = 1016;
+        assert_eq!(
+            reserved(&snap, &cfg, 1010).memory,
+            BTreeMap::from([(GRADLE, 3 * 3072)])
+        );
+        snap.holders[0].started_at = 1015;
+        assert_eq!(
+            reserved(&snap, &cfg, 1010).memory,
+            BTreeMap::from([(GRADLE, 5 * 3072)])
+        );
     }
 
     #[test]
@@ -2971,11 +3177,11 @@ mod estimate_tests {
     #[test]
     fn a_sessions_new_run_replaces_the_old_one_forks_included() {
         let dir = tempfile::tempdir().unwrap();
-        let guard = AdmissionGuard::acquire(dir.path()).unwrap();
+        let guard = AdmissionGuard::acquire(dir.path(), ADMISSION_LOCK_BUDGET).unwrap();
         let table = |rows: Vec<Admission>| {
             let mut snap = snapshot();
             snap.admissions = rows;
-            reserved(&snap, &config(16, 32_000), 1000)
+            reserved(&snap, &config(16, 32_000), 1000).memory
         };
         // The same session runs its commands one after another: the later Gradle run replaces the
         // earlier one, with its own forks.

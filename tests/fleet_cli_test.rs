@@ -28,6 +28,22 @@ fn status(mem: u64, load: f64, used: usize) -> Value {
 }
 
 /// A row as the table stores it: (host, age in seconds, status document).
+/// The status document of a machine that reports `capacity` and no slots (every build with the
+/// load-only gate): `blocked` is why a new build would be denied there now.
+fn new_status(host_load: f64, mem: u64, max_load: f64, blocked: &[&str]) -> Value {
+    json!({
+        "load_1m": host_load, "mem_available_mb": mem, "swap_used_mb": 0, "mem_pressure_some_avg10": 0.1,
+        "holders": [], "compiling": [],
+        "limits": {"cpus": 6, "mem_total_mb": 8000, "max_load": max_load, "max_load_basis": "cpus 6x1"},
+        "capacity": {
+            "cpus": 6, "mem_total_mb": 8000, "max_load": max_load, "load_1m": host_load,
+            "reserved_load": 0.0, "load_headroom": max_load - host_load, "mem_available_mb": mem,
+            "reserved_mb": 0, "mem_headroom_mb": mem, "mem_pressure": 0.1,
+            "blocked": blocked, "warming": 0,
+        }
+    })
+}
+
 fn db_row(host: &str, age: u64, st: Result<Value, String>) -> Vec<Value> {
     let snap = assemble(host, "linux", now() - age, st, Some(vec![]));
     vec![
@@ -255,7 +271,193 @@ fn pick_with_no_fit_host_exits_1_with_a_reason() {
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(
         text(&o.stderr).trim(),
-        "fleet pick: no eligible host (every host is unknown or has no free slot)"
+        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
+    );
+}
+
+/// 4.5: machines that report no slots are judged on their capacity. They are picked, most memory
+/// first; a blocked one is not, whatever its memory, and no row shows a slot count any more.
+#[test]
+fn pick_judges_machines_without_slots_on_capacity_and_skips_blocked_ones() {
+    let s = stub(
+        vec![
+            db_row("small", 10, Ok(new_status(0.5, 9000, 6.0, &[]))),
+            db_row(
+                "blocked-load",
+                10,
+                Ok(new_status(0.5, 50000, 6.0, &["load"])),
+            ),
+            db_row("big", 10, Ok(new_status(0.5, 20000, 6.0, &[]))),
+            db_row(
+                "blocked-memory",
+                10,
+                Ok(new_status(0.5, 30000, 6.0, &["memory"])),
+            ),
+        ],
+        200,
+    );
+    for kind in ["gradle", "other"] {
+        let o = run(&s, &["fleet", "pick", "--kind", kind, "--json"]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+        let hosts: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["host"].as_str().unwrap())
+            .collect();
+        assert_eq!(hosts, ["big", "small"], "{kind}");
+        assert!(v
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["free_slots"].is_null()));
+    }
+    let o = run(&s, &["fleet", "pick"]);
+    let line = |host: &str| {
+        o.stdout
+            .split(|b| *b == b'\n')
+            .find(|l| l.starts_with(host.as_bytes()))
+            .unwrap_or_else(|| panic!("{host}: {}", text(&o.stdout)))
+    };
+    assert_eq!(
+        text(line("big")),
+        "big free_slots=- mem_available_mb=20000 load=0.50/6.00"
+    );
+    assert_eq!(
+        text(line("small")),
+        "small free_slots=- mem_available_mb=9000 load=0.50/6.00"
+    );
+
+    let s = stub(
+        vec![
+            db_row("full", 10, Ok(status(30000, 0.0, 3))),
+            db_row("blocked", 10, Ok(new_status(0.5, 30000, 6.0, &["load"]))),
+        ],
+        200,
+    );
+    let o = run(&s, &["fleet", "pick"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        text(&o.stderr).trim(),
+        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
+    );
+}
+
+/// A machine whose memory headroom is used up by reservations is not picked, though `blocked` is
+/// empty: the machine figures that for a run that needs nothing. `fleet pick` and `fleet` report
+/// the headroom.
+#[test]
+fn pick_skips_machines_whose_memory_headroom_is_used_up() {
+    // `mem` MB available, `reserved_mb` of them held for runs still warming up.
+    let status = |mem: u64, reserved_mb: u64| {
+        let mut status = new_status(0.5, mem, 6.0, &[]);
+        status["capacity"]["reserved_mb"] = reserved_mb.into();
+        status["capacity"]["mem_headroom_mb"] = mem.saturating_sub(reserved_mb).into();
+        status
+    };
+    let s = stub(
+        vec![
+            db_row("used-up", 10, Ok(status(4000, 4096))),
+            db_row("room", 10, Ok(status(4000, 0))),
+        ],
+        200,
+    );
+    for kind in ["gradle", "other"] {
+        let o = run(&s, &["fleet", "pick", "--kind", kind, "--json"]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+        let hosts: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["host"].as_str().unwrap())
+            .collect();
+        assert_eq!(hosts, ["room"], "{kind}");
+        assert_eq!(v[0]["mem_available_mb"], 4000);
+        assert_eq!(v[0]["mem_headroom_mb"], 4000);
+    }
+    let o = run(&s, &["fleet", "--json"]);
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let by_host = |host: &str| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["host"] == host)
+            .unwrap()
+    };
+    assert_eq!(by_host("used-up")["blocked"], json!([]));
+    assert_eq!(by_host("used-up")["mem_available_mb"], 4000);
+    assert_eq!(by_host("used-up")["mem_headroom_mb"], 0);
+
+    let s = stub(vec![db_row("used-up", 10, Ok(status(4000, 4096)))], 200);
+    let o = run(&s, &["fleet", "pick"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        text(&o.stderr).trim(),
+        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
+    );
+}
+
+/// A binary older than `capacity` reports neither it nor slots. Its memory must cover a run of the
+/// pool: 2000 MB is less than a Gradle run needs, and more than one of the other pool.
+#[test]
+fn pick_needs_a_pools_worth_of_memory_from_a_machine_that_reports_no_capacity() {
+    let mut old = new_status(0.5, 2000, 6.0, &[]);
+    old.as_object_mut().unwrap().remove("capacity");
+    let s = stub(vec![db_row("old", 10, Ok(old))], 200);
+    let o = run(&s, &["fleet", "pick", "--kind", "gradle", "--json"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o.stdout));
+    assert_eq!(
+        text(&o.stderr).trim(),
+        "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)"
+    );
+    let o = run(&s, &["fleet", "pick", "--kind", "other", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v[0]["host"], "old");
+    // No capacity, so no headroom to report: the run was judged on `mem_available_mb`.
+    assert_eq!(v[0]["mem_headroom_mb"], Value::Null);
+}
+
+/// The fleet table has no slot count to show for a machine that reports none.
+#[test]
+fn fleet_table_shows_no_slot_count_for_machines_without_slots() {
+    let s = stub(
+        vec![
+            db_row("nuc", 10, Ok(status(5000, 0.5, 1))),
+            db_row("gpu", 10, Ok(new_status(0.5, 9000, 16.0, &[]))),
+        ],
+        200,
+    );
+    let o = run(&s, &["fleet", "--json"]);
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let by_host = |host: &str| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["host"] == host)
+            .unwrap()
+    };
+    assert_eq!(by_host("nuc")["slots_used"], 1);
+    assert_eq!(by_host("nuc")["slots_total"], 3);
+    assert_eq!(by_host("gpu")["slots_used"], Value::Null);
+    assert_eq!(by_host("gpu")["slots_total"], Value::Null);
+    assert_eq!(by_host("gpu")["blocked"], json!([]));
+    assert_eq!(by_host("gpu")["mem_available_mb"], 9000);
+    let o = run(&s, &["fleet"]);
+    let out = text(&o.stdout);
+    assert!(out.contains("\ngpu"), "{out}");
+    let gpu = out.lines().find(|l| l.starts_with("gpu")).unwrap();
+    // The age is 10s or 11s, by when the clock last turned over: not what this is about.
+    let cells: Vec<&str> = gpu
+        .split_whitespace()
+        .filter(|c| !c.ends_with('s'))
+        .collect();
+    assert_eq!(
+        cells,
+        ["gpu", "ok", "-", "9000", "0.50/16.00", "0/0", "0"],
+        "{out}"
     );
 }
 

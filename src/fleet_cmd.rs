@@ -81,7 +81,9 @@ pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
     };
     let fit = pick(&rows, pool);
     if fit.is_empty() {
-        return fail("fleet pick: no eligible host (every host is unknown or has no free slot)");
+        return fail(
+            "fleet pick: no eligible host (every host is unknown, blocked or has no free slot)",
+        );
     }
     if json {
         println!(
@@ -92,7 +94,11 @@ pub fn pick_cmd(pool: Pool, json: bool) -> i32 {
         for p in &fit {
             println!(
                 "{} free_slots={} mem_available_mb={} load={:.2}/{:.2}",
-                p.host, p.free_slots, p.mem_available_mb, p.load_1m, p.max_load
+                p.host,
+                p.free_slots.map_or("-".to_owned(), |free| free.to_string()),
+                p.mem_available_mb,
+                p.load_1m,
+                p.max_load
             );
         }
     }
