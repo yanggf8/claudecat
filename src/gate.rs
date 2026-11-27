@@ -22,6 +22,9 @@ const DEFAULT_SLOTS: usize = 3;
 // exposes 6 CPUs, so 1.0 per CPU keeps it there.
 const LOAD_PER_CPU: f64 = 1.0;
 // Estimated peak memory of a fresh build, reserved only while its holder is still warming up.
+// The Gradle figure is per test fork: a Gradle test run with N forks reserves N times this,
+// because backend tests with 2 parallel forks peaked at ~5.4 GB on mgpu (2026-11-23), so one
+// flat figure under-reserved them.
 const DEFAULT_RESERVE_GRADLE_MB: u64 = 3072;
 const DEFAULT_RESERVE_CARGO_MB: u64 = 1536;
 const DEFAULT_RESERVE_WARMUP_SECS: u64 = 60;
@@ -349,6 +352,7 @@ impl Toolchain {
         format!("compiler-{}.lock", self.as_str())
     }
 
+    /// Estimated peak memory of one run, in MB. A Gradle test run multiplies this by its forks.
     fn estimate_mb(self, cfg: &Config) -> u64 {
         match self {
             Self::Cargo => cfg.reserve_cargo_mb,
@@ -365,29 +369,173 @@ fn segment_toolchain(words: &[String]) -> Option<Toolchain> {
     })
 }
 
-/// Toolchains of every heavy segment of a shell command, sorted; empty when none is recognised.
-fn command_toolchains(command: &str) -> Vec<Toolchain> {
+/// The forks a Gradle invocation states: the last of its `-PtestForks=N` and `-P testForks=N`
+/// arguments, when it parses as an integer of at least 1. Anything else is left to the default.
+fn stated_test_forks(args: &[String]) -> Option<u64> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(i, arg)| {
+            if arg == "-P" {
+                return args
+                    .get(i + 1)
+                    .and_then(|next| next.strip_prefix("testForks="));
+            }
+            arg.strip_prefix("-PtestForks=")
+        })
+        .next_back()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|forks| *forks >= 1)
+}
+
+/// The build's own default when a Gradle test run states no fork count: 2 on a machine with at
+/// least 8192 MB and 4 CPUs, else 1 (also when either figure is unknown).
+fn default_test_forks(cfg: &Config) -> u64 {
+    match (cfg.limits.mem_total_mb, cfg.limits.cpus) {
+        (Some(mb), Some(cpus)) if mb >= 8192 && cpus >= 4 => 2,
+        _ => 1,
+    }
+}
+
+/// Forks of a Gradle segment's test run: what it states, else the build's default. A segment
+/// that names no test task (`test`, `:backend:test`) is no test run and keeps 1.
+fn gradle_forks(words: &[String], cfg: &Config) -> u64 {
+    let args = &words[command_index(words) + 1..];
+    if !names_test_task(args) {
+        return 1;
+    }
+    stated_test_forks(args).unwrap_or_else(|| default_test_forks(cfg))
+}
+
+/// Gradle options whose value is the next word. That word is never a task: `-x test` excludes
+/// the test task, and a `--tests test` filter or a `-p test` directory names none.
+const GRADLE_VALUE_OPTIONS: [&str; 22] = [
+    "-x",
+    "--exclude-task",
+    "--tests",
+    "-p",
+    "--project-dir",
+    "-P",
+    "--project-prop",
+    "-D",
+    "--system-prop",
+    "-g",
+    "--gradle-user-home",
+    "-I",
+    "--init-script",
+    "-b",
+    "--build-file",
+    "-c",
+    "--settings-file",
+    "--console",
+    "--warning-mode",
+    "--max-workers",
+    "--include-build",
+    "--project-cache-dir",
+];
+
+/// Whether a Gradle argument list runs a test task (`test`, `:backend:test`), skipping option
+/// values so `./gradlew build -x test` is not taken for a test run.
+fn names_test_task(args: &[String]) -> bool {
+    let mut skip_value = false;
+    for arg in args {
+        if std::mem::take(&mut skip_value) {
+            continue;
+        }
+        if GRADLE_VALUE_OPTIONS.contains(&arg.as_str()) {
+            skip_value = true;
+            continue;
+        }
+        if arg == "test" || arg.ends_with(":test") {
+            return true;
+        }
+    }
+    false
+}
+
+/// What one heavy segment drives: its toolchain and, for Gradle, its test forks.
+fn segment_estimate(words: &[String], cfg: &Config) -> Option<(Toolchain, u64)> {
+    let toolchain = segment_toolchain(words)?;
+    let forks = if toolchain == Toolchain::Gradle {
+        gradle_forks(words, cfg)
+    } else {
+        1
+    };
+    Some((toolchain, forks))
+}
+
+/// What a command drives and the memory reserved for it. `toolchains` is sorted and without
+/// repeats; `gradle_forks` is the forks of its Gradle test runs, each taking the full Gradle
+/// estimate. Cargo is never scaled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Estimate {
+    toolchains: Vec<Toolchain>,
+    gradle_forks: u64,
+}
+
+impl Estimate {
+    /// Adds a segment: its toolchain once, and its forks when they are the command's most. The
+    /// segments of one command run one after another, so the largest run sets the peak.
+    fn add(&mut self, toolchain: Toolchain, forks: u64) {
+        if !self.toolchains.contains(&toolchain) {
+            self.toolchains.push(toolchain);
+        }
+        self.gradle_forks = self.gradle_forks.max(forks);
+    }
+
+    /// Estimated peak memory, in MB, of the command's run of `toolchain`.
+    fn mb(&self, toolchain: Toolchain, cfg: &Config) -> u64 {
+        let forks = if toolchain == Toolchain::Gradle {
+            self.gradle_forks
+        } else {
+            1
+        };
+        toolchain.estimate_mb(cfg).saturating_mul(forks)
+    }
+
+    /// Estimated peak memory, in MB, of the whole command.
+    fn total_mb(&self, cfg: &Config) -> u64 {
+        self.toolchains
+            .iter()
+            .fold(0u64, |sum, t| sum.saturating_add(self.mb(*t, cfg)))
+    }
+
+    /// Adds the estimate of one run to `table`, as `reserved` sums up holders and admissions.
+    fn reserve_into(&self, table: &mut BTreeMap<Toolchain, u64>, cfg: &Config) {
+        for toolchain in &self.toolchains {
+            let slot = table.entry(*toolchain).or_insert(0u64);
+            *slot = slot.saturating_add(self.mb(*toolchain, cfg));
+        }
+    }
+}
+
+/// Estimate of a shell command: every heavy segment, sorted; empty when none is recognised.
+fn command_estimate(command: &str, cfg: &Config) -> Estimate {
+    let mut estimate = Estimate::default();
     let Some(tokens) = lex(command) else {
-        return Vec::new();
+        return estimate;
     };
     let mut segment = Vec::new();
-    let mut found = BTreeSet::new();
     for token in tokens.iter().chain(std::iter::once(&ShellToken::Separator)) {
         match token {
             ShellToken::Word(word) => segment.push(word.clone()),
             ShellToken::Separator => {
-                found.extend(segment_toolchain(&segment));
+                if let Some((toolchain, forks)) = segment_estimate(&segment, cfg) {
+                    estimate.add(toolchain, forks);
+                }
                 segment.clear();
             }
         }
     }
-    found.into_iter().collect()
+    estimate.toolchains.sort();
+    estimate
 }
 
-/// Toolchains of an argv (a `gate run` command or a holder's), looking through `sh -c "..."`.
-fn argv_toolchains(argv: &[String]) -> Vec<Toolchain> {
-    if let Some(toolchain) = segment_toolchain(argv) {
-        return vec![toolchain];
+/// Estimate of an argv (a `gate run` command or a holder's), looking through `sh -c "..."`.
+fn argv_estimate(argv: &[String], cfg: &Config) -> Estimate {
+    let mut estimate = Estimate::default();
+    if let Some((toolchain, forks)) = segment_estimate(argv, cfg) {
+        estimate.add(toolchain, forks);
+        return estimate;
     }
     let i = command_index(argv);
     if argv
@@ -395,10 +543,10 @@ fn argv_toolchains(argv: &[String]) -> Vec<Toolchain> {
         .is_some_and(|c| matches!(basename(c), "sh" | "bash" | "zsh"))
     {
         if let Some(script) = argv[i + 1..].iter().skip_while(|a| *a != "-c").nth(1) {
-            return command_toolchains(script);
+            return command_estimate(script, cfg);
         }
     }
-    Vec::new()
+    estimate
 }
 
 /// Test runners that are known not to drive cargo or Gradle. Anything else unrecognised (`make`,
@@ -931,21 +1079,23 @@ fn reserved(s: &Snapshot, cfg: &Config, now: u64) -> BTreeMap<Toolchain, u64> {
         {
             continue;
         }
-        for toolchain in argv_toolchains(&holder.command) {
-            let slot = table.entry(toolchain).or_insert(0u64);
-            *slot = slot.saturating_add(toolchain.estimate_mb(cfg));
-        }
+        argv_estimate(&holder.command, cfg).reserve_into(&mut table, cfg);
     }
     for admission in &s.admissions {
         if now.saturating_sub(admission.ts) >= cfg.reserve_warmup_secs {
             continue;
         }
-        for toolchain in &admission.toolchains {
-            let slot = table.entry(*toolchain).or_insert(0u64);
-            *slot = slot.saturating_add(toolchain.estimate_mb(cfg));
-        }
+        admission.estimate().reserve_into(&mut table, cfg);
     }
     table
+}
+
+fn one() -> u64 {
+    1
+}
+
+fn is_one(n: &u64) -> bool {
+    *n == 1
 }
 
 /// A command the PreToolUse hook allowed. Claude runs it directly, so it registers no holder;
@@ -955,6 +1105,19 @@ struct Admission {
     ts: u64,
     session: Option<String>,
     toolchains: Vec<Toolchain>,
+    /// Forks of a Gradle test run. A row without the field (written before it existed) is one
+    /// fork, and it is written only when it differs, so such rows stay in the old shape.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    gradle_forks: u64,
+}
+
+impl Admission {
+    fn estimate(&self) -> Estimate {
+        Estimate {
+            toolchains: self.toolchains.clone(),
+            gradle_forks: self.gradle_forks,
+        }
+    }
 }
 
 const ADMISSION_FILE: &str = "admitted.jsonl";
@@ -980,6 +1143,8 @@ fn read_admissions(dir: &Path, now: u64, warmup: u64) -> io::Result<Vec<Admissio
         .map(|mut a| {
             a.toolchains.sort();
             a.toolchains.dedup();
+            // A hand-edited 0 would reserve nothing where one fork is the least a run takes.
+            a.gradle_forks = a.gradle_forks.max(1);
             a
         })
         .collect())
@@ -1504,23 +1669,22 @@ impl Snapshot {
     }
 }
 
-/// `wanted` is the toolchains the command drives; empty means unknown, and then every toolchain's
-/// compilers and lock count against it and no reservation is checked. `pool_kind` picks the slot
-/// pool (the declared kind); `kind` picks the checks (a JS test runner is checked as Other).
+/// `wanted` is the toolchains the command drives, with the memory reserved for them; no toolchain
+/// means unknown, and then every toolchain's compilers and lock count against it and no
+/// reservation is checked. `pool_kind` picks the slot pool (the declared kind); `kind` picks the
+/// checks (a JS test runner is checked as Other).
 fn deny_reason(
     s: &Snapshot,
     cfg: &Config,
     kind: Kind,
     pool_kind: Kind,
-    wanted: &[Toolchain],
+    wanted: &Estimate,
 ) -> Option<(String, Vec<&'static str>)> {
     let (prefix, total) = pool(cfg, pool_kind);
     let pool_slots = s.pool(pool_kind);
-    let counts = |t: Toolchain| wanted.is_empty() || wanted.contains(&t);
+    let counts = |t: Toolchain| wanted.toolchains.is_empty() || wanted.toolchains.contains(&t);
     let table = reserved(s, cfg, unix_now());
-    let need = wanted
-        .iter()
-        .fold(0u64, |sum, t| sum.saturating_add(t.estimate_mb(cfg)));
+    let need = wanted.total_mb(cfg);
     let reasons = [
         (s.load_1m > cfg.max_load, "load"),
         (
@@ -1532,16 +1696,16 @@ fn deny_reason(
         (pool_slots.iter().all(|slot| slot.occupied), "slots"),
         (
             kind.checks_compilers()
-                && s.compiling.iter().any(|p| {
-                    process_toolchain(p).is_none_or(|t| t.exclusive() && counts(t))
-                }),
+                && s.compiling
+                    .iter()
+                    .any(|p| process_toolchain(p).is_none_or(|t| t.exclusive() && counts(t))),
             "compiler",
         ),
         (
             kind.checks_compilers()
-                && s.compiler_locks
-                    .iter()
-                    .any(|lock| lock.occupied && lock.toolchain.exclusive() && counts(lock.toolchain)),
+                && s.compiler_locks.iter().any(|lock| {
+                    lock.occupied && lock.toolchain.exclusive() && counts(lock.toolchain)
+                }),
             "compiler-lock",
         ),
         (
@@ -1938,7 +2102,7 @@ fn write_holder(file: &mut File, holder: &Holder) -> io::Result<()> {
 pub fn check(kind: Kind) -> i32 {
     crate::fleet_cmd::maybe_push_background();
     match config().and_then(|cfg| snapshot(&cfg, kind.checks_compilers()).map(|s| (cfg, s))) {
-        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, kind, &[]) {
+        Ok((cfg, s)) => match deny_reason(&s, &cfg, kind, kind, &Estimate::default()) {
             Some((reason, _)) => {
                 let _ = writeln!(io::stderr(), "{reason}");
                 75
@@ -1980,7 +2144,6 @@ pub fn hook() -> i32 {
         return 0;
     };
     let (classification, identity) = classify_with_cwd(&command, &cwd);
-    let wanted = command_toolchains(&command);
     let Classification::Heavy(kind) = classification else {
         return 0;
     };
@@ -1999,6 +2162,9 @@ pub fn hook() -> i32 {
         }
         Err(_) => return 0,
     };
+    // After `config`: a Gradle test run that states no fork count takes the build's default,
+    // which depends on this machine's memory and CPUs.
+    let wanted = command_estimate(&command, &cfg);
     let uid = own_uid().unwrap_or(u32::MAX);
     let duplicate_reason = identity
         .as_ref()
@@ -2007,7 +2173,7 @@ pub fn hook() -> i32 {
     // The snapshot above was taken without any lock (the Gradle CPU sample sleeps). Only the
     // check-then-record step is serialized, so a concurrent hook sees this one's admission.
     let record_admission =
-        duplicate_reason.is_none() && kind.checks_compilers() && !wanted.is_empty();
+        duplicate_reason.is_none() && kind.checks_compilers() && !wanted.toolchains.is_empty();
     let guard = if record_admission {
         AdmissionGuard::acquire(&cfg.gate_dir).and_then(|guard| {
             snap.admissions =
@@ -2048,7 +2214,8 @@ pub fn hook() -> i32 {
             Admission {
                 ts: unix_now(),
                 session: session.clone(),
-                toolchains: wanted.clone(),
+                toolchains: wanted.toolchains.clone(),
+                gradle_forks: wanted.gradle_forks,
             },
             unix_now(),
             cfg.reserve_warmup_secs,
@@ -2165,7 +2332,7 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
             return execute(command);
         }
     };
-    let wanted = argv_toolchains(command);
+    let wanted = argv_estimate(command, &cfg);
     // A JS or Python test runner is no compiler: it needs a slot and the load/memory checks, but
     // neither toolchain lock nor the compiler checks, so it never queues behind (or blocks) a
     // cargo or Gradle build.
@@ -2180,8 +2347,8 @@ pub fn run(kind: Kind, command: &[String]) -> i32 {
     }
     // Sorted, so two runs wanting both toolchains take the locks in the same order. An unknown
     // toolchain holds them all, as the single lock used to.
-    let held: &[Toolchain] = if !wanted.is_empty() {
-        &wanted
+    let held: &[Toolchain] = if !wanted.toolchains.is_empty() {
+        &wanted.toolchains
     } else if check_kind == Kind::Other {
         &[]
     } else {
@@ -2521,5 +2688,309 @@ mod duplicate_tests {
             environ_readable: true,
         };
         assert!(duplicate(&id, &snap, &[process], 5002).is_none());
+    }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+
+    const GRADLE: Toolchain = Toolchain::Gradle;
+    const CARGO: Toolchain = Toolchain::Cargo;
+
+    /// The default estimates, on a machine with `cpus` CPUs and `mem_total_mb`.
+    fn config(cpus: usize, mem_total_mb: u64) -> Config {
+        let limits = Limits {
+            cpus: Some(cpus),
+            mem_total_mb: Some(mem_total_mb),
+            slots: 3,
+            slots_basis: String::new(),
+            other_slots: 3,
+            other_slots_basis: String::new(),
+            max_load: 6.0,
+            max_load_basis: String::new(),
+        };
+        Config {
+            proc_root: PathBuf::new(),
+            gate_dir: PathBuf::new(),
+            max_load: 6.0,
+            max_mem_pressure: 10.0,
+            min_available_mb: 1536,
+            slots: 3,
+            other_slots: 3,
+            limits,
+            reserve_gradle_mb: 3072,
+            reserve_cargo_mb: 1536,
+            reserve_warmup_secs: 60,
+        }
+    }
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            load_1m: 0.0,
+            swap_used_mb: 0,
+            mem_available_mb: 0,
+            mem_pressure_some_avg10: None,
+            slots: Vec::new(),
+            other_slots: Vec::new(),
+            limits: config(16, 32_000).limits,
+            compiler_lock: CompilerLock {
+                holder: None,
+                occupied: false,
+            },
+            compiler_locks: Vec::new(),
+            compiling: Vec::new(),
+            orphan_brokers: Vec::new(),
+            admissions: Vec::new(),
+        }
+    }
+
+    fn holder(pid: u32, command: &[&str], started_at: u64) -> Holder {
+        Holder {
+            pid,
+            kind: "build".into(),
+            command: command.iter().map(|w| w.to_string()).collect(),
+            started_at,
+            cwd: None,
+            target: None,
+        }
+    }
+
+    fn words(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|w| w.to_string()).collect()
+    }
+
+    fn row(session: Option<&str>, toolchains: &[Toolchain], gradle_forks: u64) -> Admission {
+        Admission {
+            ts: 1000,
+            session: session.map(str::to_owned),
+            toolchains: toolchains.to_vec(),
+            gradle_forks,
+        }
+    }
+
+    /// The reservation table of `rows` alone, after a round trip through a fresh admission file.
+    fn reserved_rows(rows: &[Admission]) -> BTreeMap<Toolchain, u64> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = Vec::new();
+        for row in rows {
+            serde_json::to_writer(&mut text, row).unwrap();
+            text.push(b'\n');
+        }
+        fs::write(dir.path().join(ADMISSION_FILE), text).unwrap();
+        let mut snap = snapshot();
+        snap.admissions = read_admissions(dir.path(), 1000, 60).unwrap();
+        assert_eq!(snap.admissions.len(), rows.len(), "every row stays fresh");
+        reserved(&snap, &config(16, 32_000), 1000)
+    }
+
+    #[test]
+    fn gradle_test_forks_follow_the_command() {
+        // 16 CPUs and 32 GB: the build's default is 2 forks.
+        let cfg = config(16, 32_000);
+        let forks = |command: &str| command_estimate(command, &cfg).gradle_forks;
+        assert_eq!(forks("./gradlew test -PtestForks=3"), 3);
+        assert_eq!(forks("gradlew :backend:test -P testForks=4"), 4);
+        // Invalid values are no statement: the build's default applies.
+        assert_eq!(forks("./gradlew test -PtestForks=0"), 2);
+        assert_eq!(forks("./gradlew test -PtestForks=x"), 2);
+        assert_eq!(forks("./gradlew test -P testForks="), 2);
+        assert_eq!(forks("./gradlew test -P"), 2);
+        assert_eq!(forks("./gradlew :backend:test"), 2);
+        assert_eq!(forks("./gradlew test -PtestForks=3 -P testForks=x"), 2);
+        // Flags change nothing, and wrappers are skipped on the way to the arguments.
+        assert_eq!(
+            forks("./gradlew test --rerun-tasks --no-daemon -PtestForks=3"),
+            3
+        );
+        assert_eq!(
+            forks("timeout -s TERM 30s env A=b ./gradlew test -PtestForks=3"),
+            3
+        );
+        assert_eq!(
+            forks("/opt/gradle/bin/gradle :backend:test -PtestForks=3"),
+            3
+        );
+        // No test task is no test run, whatever the command says about forks.
+        assert_eq!(forks("./gradlew build"), 1);
+        assert_eq!(forks("./gradlew build -PtestForks=3"), 1);
+        assert_eq!(
+            forks("./gradlew testClasses :backend:assemble -PtestForks=3"),
+            1
+        );
+        // Only the arguments after the command name are tasks.
+        assert_eq!(forks("X=:test ./gradlew build"), 1);
+        assert_eq!(forks("env test=./gradlew ./gradlew build"), 1);
+    }
+
+    #[test]
+    fn default_gradle_test_forks_follow_the_machine() {
+        let forks = |cpus, mem_total_mb| default_test_forks(&config(cpus, mem_total_mb));
+        assert_eq!(forks(16, 32_000), 2);
+        assert_eq!(forks(4, 8192), 2);
+        assert_eq!(forks(2, 32_000), 1);
+        assert_eq!(forks(3, 32_000), 1);
+        assert_eq!(forks(16, 6000), 1);
+        assert_eq!(forks(16, 8191), 1);
+        let mut cfg = config(16, 32_000);
+        cfg.limits.cpus = None;
+        assert_eq!(default_test_forks(&cfg), 1);
+        cfg = config(16, 32_000);
+        cfg.limits.mem_total_mb = None;
+        assert_eq!(default_test_forks(&cfg), 1);
+    }
+
+    #[test]
+    fn only_gradle_test_runs_are_scaled() {
+        // 16 CPUs and 32 GB: a test run without a statement takes 2 forks.
+        let cfg = config(16, 32_000);
+        let total = |command: &str| command_estimate(command, &cfg).total_mb(&cfg);
+        assert_eq!(total("./gradlew test"), 2 * 3072);
+        assert_eq!(total("./gradlew test -PtestForks=3"), 3 * 3072);
+        assert_eq!(total("./gradlew build"), 3072);
+        // An option's value is no task: `-x test` excludes the tests, `--tests test` filters them
+        // in a run that names no test task, `-p test` is a directory.
+        assert_eq!(total("./gradlew build -x test"), 3072);
+        assert_eq!(total("./gradlew build --exclude-task test"), 3072);
+        assert_eq!(total("./gradlew -p test build"), 3072);
+        assert_eq!(total("./gradlew build -x test test"), 2 * 3072);
+        assert_eq!(total("./gradlew -x :lint:check :backend:test"), 2 * 3072);
+        // Cargo keeps its own estimate, whatever its arguments say.
+        assert_eq!(command_estimate("cargo test", &cfg).toolchains, vec![CARGO]);
+        assert_eq!(total("cargo test"), 1536);
+        assert_eq!(total("cargo test -PtestForks=8"), 1536);
+        assert_eq!(
+            total("cargo build && ./gradlew test -PtestForks=2"),
+            1536 + 2 * 3072
+        );
+        // The segments of one command run one after another: the largest sets the peak, and a
+        // toolchain is counted once.
+        assert_eq!(
+            total("./gradlew test -PtestForks=5 && ./gradlew test -PtestForks=2"),
+            5 * 3072
+        );
+        assert_eq!(total("./gradlew test && ./gradlew build"), 2 * 3072);
+        let both = command_estimate("./gradlew test -PtestForks=2 && cargo build", &cfg);
+        assert_eq!(both.toolchains, vec![CARGO, GRADLE], "sorted");
+        assert_eq!(both.total_mb(&cfg), 2 * 3072 + 1536);
+        // Nothing recognised: nothing to reserve.
+        assert_eq!(command_estimate("echo hi", &cfg), Estimate::default());
+        assert_eq!(
+            command_estimate("echo \"unterminated", &cfg),
+            Estimate::default()
+        );
+        // Saturation, not wrapping.
+        let mut huge = config(16, 32_000);
+        huge.reserve_gradle_mb = u64::MAX;
+        assert_eq!(
+            command_estimate("./gradlew test -PtestForks=2", &huge).total_mb(&huge),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn argv_estimates_look_through_sh_c() {
+        let cfg = config(2, 6000);
+        let total = |argv: &[&str]| argv_estimate(&words(argv), &cfg).total_mb(&cfg);
+        assert_eq!(total(&["./gradlew", "test", "-PtestForks=3"]), 3 * 3072);
+        assert_eq!(
+            total(&["sh", "-c", "./gradlew test -PtestForks=3"]),
+            3 * 3072
+        );
+        assert_eq!(
+            total(&["bash", "-l", "-c", "cd x && ./gradlew test -PtestForks=3"]),
+            3 * 3072
+        );
+        // 2 CPUs: the build's default is one fork.
+        assert_eq!(total(&["sh", "-c", "./gradlew test"]), 3072);
+        assert_eq!(total(&["cargo", "test"]), 1536);
+        assert_eq!(
+            argv_estimate(&words(&["make", "all"]), &cfg),
+            Estimate::default()
+        );
+        assert_eq!(
+            argv_estimate(&words(&["sh", "-c", "echo hi"]), &cfg),
+            Estimate::default()
+        );
+    }
+
+    #[test]
+    fn warming_up_holders_reserve_gradle_per_fork() {
+        let cfg = config(16, 32_000);
+        let run = &["./gradlew", "test", "-PtestForks=2"];
+        let mut snap = snapshot();
+        snap.slots.push(Slot {
+            index: 0,
+            occupied: true,
+            holder: Some(holder(77, run, 1000)),
+        });
+        // The same holder in a slot and in a lock reserves once.
+        snap.compiler_locks.push(ToolchainLock {
+            toolchain: GRADLE,
+            occupied: true,
+            holder: Some(holder(77, run, 1000)),
+        });
+        let table = BTreeMap::from([(GRADLE, 2 * 3072)]);
+        assert_eq!(reserved(&snap, &cfg, 1010), table);
+        // A second holder adds its own forks, and looks through `sh -c`.
+        snap.compiler_locks[0].holder = Some(holder(
+            78,
+            &["sh", "-c", "./gradlew test -PtestForks=3"],
+            1000,
+        ));
+        let table = BTreeMap::from([(GRADLE, 5 * 3072)]);
+        assert_eq!(reserved(&snap, &cfg, 1010), table);
+        // Past the warm-up window its memory is inside MemAvailable already.
+        assert_eq!(reserved(&snap, &cfg, 1060), BTreeMap::new());
+    }
+
+    #[test]
+    fn admission_rows_reserve_gradle_per_fork() {
+        // A row written before the field existed is one fork, on a machine whose default is 2.
+        let old = r#"{"ts":1000,"session":null,"toolchains":["gradle"]}"#;
+        let admission: Admission = serde_json::from_str(old).unwrap();
+        assert_eq!(admission.gradle_forks, 1);
+        let table = BTreeMap::from([(GRADLE, 3072)]);
+        assert_eq!(reserved_rows(&[admission]), table);
+        // One fork is not written, so such rows keep the old shape.
+        assert_eq!(
+            serde_json::to_string(&row(None, &[GRADLE], 1)).unwrap(),
+            old
+        );
+        // A hand-edited zero is one fork too.
+        let zero: Admission = serde_json::from_str(
+            r#"{"ts":1000,"session":null,"toolchains":["gradle"],"gradle_forks":0}"#,
+        )
+        .unwrap();
+        assert_eq!(reserved_rows(&[zero]), table);
+        // The field scales Gradle only.
+        let table = BTreeMap::from([(GRADLE, 2 * 3072), (CARGO, 1536)]);
+        assert_eq!(reserved_rows(&[row(None, &[CARGO, GRADLE], 2)]), table);
+    }
+
+    #[test]
+    fn a_sessions_new_run_replaces_the_old_one_forks_included() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = AdmissionGuard::acquire(dir.path()).unwrap();
+        let table = |rows: Vec<Admission>| {
+            let mut snap = snapshot();
+            snap.admissions = rows;
+            reserved(&snap, &config(16, 32_000), 1000)
+        };
+        // The same session runs its commands one after another: the later Gradle run replaces the
+        // earlier one, with its own forks.
+        guard.admit(row(Some("a"), &[GRADLE], 4), 1000, 60).unwrap();
+        guard.admit(row(Some("a"), &[GRADLE], 2), 1000, 60).unwrap();
+        let rows = read_admissions(dir.path(), 1000, 60).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].gradle_forks, 2);
+        assert_eq!(table(rows), BTreeMap::from([(GRADLE, 2 * 3072)]));
+        // Another session's run, or the same session's run of another toolchain, keeps its own.
+        guard.admit(row(Some("b"), &[GRADLE], 3), 1000, 60).unwrap();
+        guard.admit(row(Some("a"), &[CARGO], 1), 1000, 60).unwrap();
+        let rows = read_admissions(dir.path(), 1000, 60).unwrap();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let expected = BTreeMap::from([(GRADLE, 5 * 3072), (CARGO, 1536)]);
+        assert_eq!(table(rows), expected);
     }
 }
