@@ -2,7 +2,7 @@
 
 - 日期：2026-11-28
 - 需求：AI-Board claude-code #5955（補充 #5956～#5960）
-- 狀態：v1 → 作者自審 → 他審（Fable：APPROVE WITH CHANGES，4 blocker／7 should-fix）→ **v2（本版，逐條核實後修入）** → 用戶確認 → 實作
+- 狀態：v1 → 作者自審 → 他審（Fable：APPROVE WITH CHANGES，4 blocker／7 should-fix）→ v2（逐條核實後修入）→ **用戶確認（2026-11-28「加，照標準工法開工」）** → 實作
 - 行號皆指 main 08646bb
 
 ## 1. 為什麼改
@@ -107,11 +107,11 @@ Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行 
 - 其他：0。
 - 同一 session 的新 admission 取代舊的（`gate.rs:1191-1194`），負載預留同樣繼承這個行為：同一 session 在背景並行的兩支 cargo 只算一支。既有取捨，照舊。
 
-#### other 的記憶體預留（Fable S5，**待用戶確認**）
+#### other 的記憶體預留（Fable S5，用戶 2026-11-28 確認「加」）
 
 拿掉 other 池後，派工路徑沒有任何併發界線。派工多半是等待 LLM 的低 CPU 工作，負載撐得住；風險在記憶體：gpu 上 other 122 次，RSS p50 1.6 GB、p90 6.9 GB、最大 12 GB。一次丟 20 件到同一台，每件需求為 0 會全部放行，`MemAvailable` 快用光才開始擋，已放行的繼續長。
 
-提案：`CLAUDECAT_RESERVE_OTHER_MB`，預設 **1024**，other 的 holder 在暖機窗內計入記憶體預留，新的 other 要過 `reserved` 檢查。這仍是「只看資源」，不是名額。**這條是用戶沒要求的新保護，實作前請用戶決定要不要。**
+提案：`CLAUDECAT_RESERVE_OTHER_MB`，預設 **1024**，other 的 holder 在暖機窗內計入記憶體預留，新的 other 要過 `reserved` 檢查。這仍是「只看資源」，不是名額。用戶 2026-11-28 確認採用。
 
 ### 4.4 狀態與容量回報
 
@@ -166,7 +166,7 @@ Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行 
 | 瞬間湧入（load 延遲） | 預留負載（遞減）＋兩條路徑共用臨界區（4.3） |
 | 兩個 cargo 同時編、各自吃滿核 | 第二個在暖機窗內看到第一個的預留；過窗由真實 load 擋。最壞是兩件一起慢 |
 | 預留估太高卡死小機器 | 預設隨 cpus 縮放、遞減、可用環境變數調；拒絕寫 deny log 方便校正 |
-| 派工記憶體爆量 | 4.3 的 other 記憶體預留（待用戶確認） |
+| 派工記憶體爆量 | 4.3 的 other 記憶體預留 |
 | 登記檔競態、pid 重用、殘檔 | 4.2 協定 |
 | hook 與 gate run 不是同一個執行檔 | 推版步驟 2、status 提示 |
 | 外部腳本讀 `slots` 欄位 | agent-portal-tpm 只用結束碼；其他使用者未知，合併公告列出欄位異動 |
@@ -204,13 +204,14 @@ Gradle CPU 取樣（sleep 100 ms）留在鎖外。拿不到鎖：hook 照現行 
 | S2 need 為 0 的工作要不要吃預留負載 | 成立 | 4.1：other 不吃 |
 | S3 `check --kind test` 變弱 | 成立 | 5 列入行為變化 |
 | S4 cargo 固定 2.0、預留階梯式 | 成立 | 4.3 隨 cpus 縮放、線性遞減 |
-| S5 other 無併發界線、記憶體風險 | 成立 | 4.3 提案，待用戶決定 |
+| S5 other 無併發界線、記憶體風險 | 成立 | 4.3，用戶確認採用 |
 | S6 容量數字誤導 pick、未來時間戳、權限 | 成立 | 4.4 `blocked`、4.5 列齡、4.2 第 6、8 點 |
 | S7 hook 與 gate run 不保證同一執行檔 | 成立（`gate install` 存 `current_exe()`） | 5 推版步驟 2 |
 | Nit | 採納 | 3 現況改寫；4.1 數量更正；4.4 平台差異與 null |
 
 ## 9. 分批
 
-- **A：** gate（4.1～4.4、4.6）＋ fleet 最小修改（4.5 第一點）＋測試。
+- **A1：** 放行規則與登記：4.1、4.2、4.3（含共用臨界區、預留負載、other 記憶體預留）＋對應測試。
+- **A2：** 回報與量測：4.4、4.6 ＋ fleet 最小修改（4.5 第一點）＋對應測試。A1、A2 合完才一起推各機（中間不推，避免 pick 回空）。
 - **B：** fleet 全局表與 pick（4.5 其餘）＋README／SKILL.md。
 - 每批：GLM 實作 → codex 審 → Opus 核實 → 合 main → 依第 5 節順序推各機。
