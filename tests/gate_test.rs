@@ -1240,6 +1240,10 @@ fn cargo_identity_paths_options_and_targets() {
     fs::create_dir(&project).unwrap();
     let link = root.join("link");
     symlink(&project, &link).unwrap();
+    // Compare the canonical forms: a kernel always reports a canonical cwd (Linux
+    // /proc/<pid>/cwd, macOS proc_pidinfo), which differs from the tempdir's spelling under
+    // /var -> /private/var on macOS.
+    let project = fs::canonicalize(&project).unwrap();
     let cases = [
         "cd x && cargo test",
         "cargo test --manifest-path x/Cargo.toml",
@@ -1363,7 +1367,10 @@ fn duplicate_target_and_symlink_and_busy_precedence() {
     symlink(&real, &link).unwrap();
     f.process(1002, "cargo", &["cargo", "test"], 1);
     fs::remove_file(f.proc().join("1002/cwd")).unwrap();
-    symlink(&real, f.proc().join("1002/cwd")).unwrap();
+    // A kernel always reports a canonical cwd (Linux /proc/<pid>/cwd, macOS proc_pidinfo), so
+    // the fake points at the canonical dir; the hook's cwd below keeps the unresolved `link`
+    // (/var vs /private/var on macOS).
+    symlink(fs::canonicalize(&real).unwrap(), f.proc().join("1002/cwd")).unwrap();
     fs::write(f.proc().join("1002/environ"), "").unwrap();
     let out = hook_command(&f, "cargo test", &link);
     assert_eq!(code(&out), 75);
@@ -1451,7 +1458,10 @@ fn duplicate_relative_target_follows_symlinked_dir() {
     symlink(&real, &link).unwrap();
     f.process(1005, "cargo", &["cargo", "test", "--target-dir=out"], 1);
     fs::remove_file(f.proc().join("1005/cwd")).unwrap();
-    symlink(&real, f.proc().join("1005/cwd")).unwrap();
+    // A kernel always reports a canonical cwd (Linux /proc/<pid>/cwd, macOS proc_pidinfo), so
+    // the fake points at the canonical dir; the hook's cwd below keeps the unresolved `link`
+    // (/var vs /private/var on macOS).
+    symlink(fs::canonicalize(&real).unwrap(), f.proc().join("1005/cwd")).unwrap();
     let out = hook_command(&f, "cargo test --target-dir=out", &link);
     assert_eq!(code(&out), 75);
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("gate denied (duplicate)"));
