@@ -2465,8 +2465,10 @@ fn gate_run_and_hook_see_each_others_reserved_load() {
     assert_eq!(code(&denied), 75);
     let stderr = String::from_utf8(denied.stderr).unwrap();
     assert!(stderr.starts_with("gate denied (load) "), "{stderr}");
+    // Reserved load decays per whole second: 2.00, or 1.97 (2.00 x 59/60) past a second boundary.
     assert!(
-        stderr.contains("reserved_load=2.00 need_load=2.00"),
+        stderr.contains("reserved_load=2.00 need_load=2.00")
+            || stderr.contains("reserved_load=1.97 need_load=2.00"),
         "{stderr}"
     );
     let line = deny_line(&hook_at(&f, Some("sess-a"), "cargo test", "4.4"));
