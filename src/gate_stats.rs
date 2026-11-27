@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io;
+use std::mem::MaybeUninit;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,8 @@ use std::time::{Duration, Instant};
 const DEFAULT_SAMPLE_MS: u64 = 2000;
 /// Longest the gate waits for the sampler thread after the child exits.
 const JOIN_CAP: Duration = Duration::from_millis(50);
-/// USER_HZ: /proc reports CPU time in these ticks on every Linux configuration in practice.
+/// USER_HZ: /proc reports CPU time in these ticks on every Linux configuration in practice. macOS
+/// has no /proc, so `host_macos::task_sample` turns its CPU time into the same ticks.
 const CLK_TCK: f64 = 100.0;
 
 /// Minimal view of a JSONL row used by age-based compaction (any log with a `ts` field).
@@ -391,12 +393,20 @@ struct TreeSample {
     family_cpu: Vec<((u32, u64), u64)>,
 }
 
+/// One process as the walk sees it, from a proc tree or from the kernel alike.
+struct Entry {
+    pid: u32,
+    /// Parent pid, start time and CPU ticks (utime + stime). None when its stat line does not
+    /// parse: such a process is in no tree, but may still be a Gradle JVM.
+    stat: Option<(u32, u64, u64)>,
+    /// A Gradle JVM of the family's user; never when no family is followed.
+    gradle_jvm: bool,
+}
+
 /// A Gradle daemon, worker or Kotlin daemon: a `java` process naming one of their main classes.
-fn is_gradle_jvm(root: &Path, pid: u32) -> bool {
-    let Ok(bytes) = fs::read(root.join(pid.to_string()).join("cmdline")) else {
-        return false;
-    };
-    let mut args = bytes.split(|b| *b == 0);
+/// `argv` is as `/proc/<pid>/cmdline` and KERN_PROCARGS2 give it, valid UTF-8 or not.
+fn is_gradle_jvm<'a>(argv: impl IntoIterator<Item = &'a [u8]>) -> bool {
+    let mut args = argv.into_iter();
     let java = args
         .next()
         .is_some_and(|a| a.rsplit(|b| *b == b'/').next() == Some(b"java"));
@@ -411,12 +421,9 @@ fn is_gradle_jvm(root: &Path, pid: u32) -> bool {
     })
 }
 
-/// One pass over `root`: total RSS (kB) of `leader` and its descendants, and their CPU ticks.
-/// None if the leader itself is not visible.
-fn sample_tree(root: &Path, leader: u32, family_uid: Option<u32>) -> Option<TreeSample> {
-    let mut stats = HashMap::new();
-    let mut gradle_jvms = Vec::new();
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+/// Every process under `root`, a proc tree as Linux has it or a test's fixture of one.
+fn proc_entries(root: &Path, family_uid: Option<u32>) -> Option<Vec<Entry>> {
+    let mut entries = Vec::new();
     for entry in fs::read_dir(root).ok()?.flatten() {
         let Some(pid) = entry
             .file_name()
@@ -428,14 +435,80 @@ fn sample_tree(root: &Path, leader: u32, family_uid: Option<u32>) -> Option<Tree
         let Ok(text) = fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
-        if family_uid.is_some_and(|uid| {
-            entry.metadata().is_ok_and(|m| m.uid() == uid) && is_gradle_jvm(root, pid)
-        }) {
-            gradle_jvms.push(pid);
+        // Only a Gradle run reads command lines, and only those of its own user.
+        let gradle_jvm = family_uid.is_some_and(|uid| {
+            entry.metadata().is_ok_and(|m| m.uid() == uid)
+                && fs::read(root.join(pid.to_string()).join("cmdline"))
+                    .is_ok_and(|bytes| is_gradle_jvm(bytes.split(|b| *b == 0)))
+        });
+        entries.push(Entry {
+            pid,
+            stat: parse_stat(&text).map(|(_, ppid, start, cpu)| (ppid, start, cpu)),
+            gradle_jvm,
+        });
+    }
+    Some(entries)
+}
+
+/// One pass over the processes of `root`: total RSS (kB) of `leader` and its descendants, and
+/// their CPU ticks. None if the leader itself is not visible. macOS has no /proc: there a root
+/// that does not exist means the machine itself, read through `host_macos` instead of files.
+fn sample_tree(root: &Path, leader: u32, family_uid: Option<u32>) -> Option<TreeSample> {
+    #[cfg(target_os = "macos")]
+    if crate::host_macos::native(root) {
+        return sample_tree_native(leader, family_uid);
+    }
+    let entries = proc_entries(root, family_uid)?;
+    tree_sample(&entries, leader, family_uid.is_some(), |pid| {
+        vm_rss_kb(root, pid)
+    })
+}
+
+/// macOS: the same entries from libproc. A process that has exited or is another user's is left
+/// out, as one whose `stat` is gone on Linux; its RSS is asked for only when the walk wants it,
+/// as a proc tree's `status` is.
+#[cfg(target_os = "macos")]
+fn sample_tree_native(leader: u32, family_uid: Option<u32>) -> Option<TreeSample> {
+    use crate::host_macos as mac;
+    let entries: Vec<Entry> = mac::all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let info = mac::proc_info(pid)?;
+            let (ticks, start) = mac::cpu_sample(pid)?;
+            let gradle_jvm = family_uid == Some(info.uid)
+                && mac::args_env(pid)
+                    .is_some_and(|(argv, _)| is_gradle_jvm(argv.iter().map(String::as_bytes)));
+            Some(Entry {
+                pid,
+                stat: Some((info.ppid, start, ticks)),
+                gradle_jvm,
+            })
+        })
+        .collect();
+    tree_sample(&entries, leader, family_uid.is_some(), |pid| {
+        mac::task_sample(pid).map(|sample| sample.rss_kb)
+    })
+}
+
+/// One pass over the processes listed: total RSS (kB) of `leader` and its descendants, and their
+/// CPU ticks; `rss_of` gives a process's RSS where its platform keeps it. None if the leader
+/// itself is not visible.
+fn tree_sample(
+    entries: &[Entry],
+    leader: u32,
+    family: bool,
+    rss_of: impl Fn(u32) -> Option<u64>,
+) -> Option<TreeSample> {
+    let mut stats = HashMap::new();
+    let mut gradle_jvms = Vec::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for entry in entries {
+        if entry.gradle_jvm {
+            gradle_jvms.push(entry.pid);
         }
-        if let Some((_, ppid, start, cpu)) = parse_stat(&text) {
-            children.entry(ppid).or_default().push(pid);
-            stats.insert(pid, (start, cpu));
+        if let Some((ppid, start, cpu)) = entry.stat {
+            children.entry(ppid).or_default().push(entry.pid);
+            stats.insert(entry.pid, (start, cpu));
         }
     }
     stats.get(&leader)?;
@@ -443,7 +516,7 @@ fn sample_tree(root: &Path, leader: u32, family_uid: Option<u32>) -> Option<Tree
     let mut stack = vec![leader];
     let (mut rss, mut cpu) = (0, Vec::new());
     while let Some(pid) = stack.pop() {
-        rss += vm_rss_kb(root, pid).unwrap_or(0);
+        rss += rss_of(pid).unwrap_or(0);
         if let Some(&(start, ticks)) = stats.get(&pid) {
             cpu.push(((pid, start), ticks));
         }
@@ -453,11 +526,11 @@ fn sample_tree(root: &Path, leader: u32, family_uid: Option<u32>) -> Option<Tree
             }
         }
     }
-    let family_kb = if family_uid.is_some() {
+    let family_kb = if family {
         rss + gradle_jvms
             .iter()
             .filter(|pid| !seen.contains(pid))
-            .map(|pid| vm_rss_kb(root, *pid).unwrap_or(0))
+            .map(|pid| rss_of(*pid).unwrap_or(0))
             .sum::<u64>()
     } else {
         0
@@ -515,21 +588,28 @@ struct Stop {
 }
 
 impl Stop {
-    /// Ask the sampler to stop and wait at most JOIN_CAP; a stuck /proc read is abandoned.
+    /// Ask the sampler to stop and wait at most JOIN_CAP; a stuck process read is abandoned.
     fn finish(self) {
         let _ = self.stop_tx.send(());
         let _ = self.done_rx.recv_timeout(JOIN_CAP);
     }
 }
 
-/// CPU seconds of every child this process has waited for (and their waited descendants).
+/// CPU seconds of every child this process has waited for (and their waited descendants):
+/// `getrusage(RUSAGE_CHILDREN)` counts the same time as cutime+cstime of `/proc/self/stat`, and
+/// does so on macOS too, which has no /proc.
 fn reaped_cpu_secs() -> Option<f64> {
-    let text = fs::read_to_string("/proc/self/stat").ok()?;
-    let rest = text.get(text.rfind(')')? + 1..)?;
-    let f: Vec<&str> = rest.split_whitespace().collect();
-    // f[13]=cutime f[14]=cstime
-    let ticks = f.get(13)?.parse::<u64>().ok()? + f.get(14)?.parse::<u64>().ok()?;
-    Some(ticks as f64 / CLK_TCK)
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: rusage is a struct of integers; getrusage writes a whole one and reports failure by
+    // its return value, so it is only read on success.
+    let ok = unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, usage.as_mut_ptr()) } == 0;
+    (ok).then(|| {
+        let usage = unsafe { usage.assume_init() };
+        [usage.ru_utime, usage.ru_stime]
+            .iter()
+            .map(|t| t.tv_sec as f64 + t.tv_usec as f64 / 1e6)
+            .sum()
+    })
 }
 
 fn round(value: f64, places: i32) -> f64 {
@@ -571,8 +651,9 @@ fn spawn(command: &[String]) -> io::Result<Child> {
 /// Run `command` under nice like `gate::execute`, sample its process tree, and append one row to
 /// the usage log when it exits. Returns the child's exit code.
 pub fn run_measured(kind: &str, command: &[String], proc_root: &Path) -> i32 {
-    // CLAUDECAT_USAGE_PID_ROOT lets tests sample the real /proc while the gate's own figures
-    // come from a fixture CLAUDECAT_PROC_ROOT; by default both are the same tree.
+    // CLAUDECAT_USAGE_PID_ROOT lets tests sample the real process tree -- /proc on Linux, the
+    // machine itself on macOS -- while the gate's own figures come from a fixture
+    // CLAUDECAT_PROC_ROOT; by default both are the same tree.
     let pid_root = env::var_os("CLAUDECAT_USAGE_PID_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| proc_root.to_path_buf());
@@ -895,7 +976,20 @@ mod tests {
 
     #[test]
     fn sampler_tolerates_missing_proc() {
+        // A root that does not exist: nothing to read on Linux; macOS has no proc tree, so there
+        // it means the machine itself, where this test's own process is to be found.
+        #[cfg(not(target_os = "macos"))]
         assert!(sample_tree(Path::new("/nonexistent/proc/root"), 1, None).is_none());
+        #[cfg(target_os = "macos")]
+        assert!(
+            sample_tree(
+                Path::new("/nonexistent/proc/root"),
+                std::process::id(),
+                None
+            )
+            .is_some_and(|sample| sample.rss_kb > 0),
+            "the machine itself is sampled"
+        );
         let dir = tempfile::tempdir().unwrap();
         assert!(sample_tree(dir.path(), 1, None).is_none());
         let acc = Arc::new(Mutex::new(Acc::default()));
@@ -909,6 +1003,67 @@ mod tests {
         )
         .finish();
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn reaped_cpu_counts_a_waited_child() {
+        let before = reaped_cpu_secs().expect("getrusage");
+        let status = Command::new("sh")
+            .args(["-c", "i=0; while [ $i -lt 2000 ]; do i=$((i+1)); done"])
+            .status()
+            .expect("sh");
+        assert!(status.success());
+        let after = reaped_cpu_secs().expect("getrusage");
+        assert!(after > before, "{before} -> {after}");
+    }
+
+    /// One rule for both platforms: over the NUL-split `cmdline` of a proc tree and over the
+    /// strings KERN_PROCARGS2 parses into.
+    #[test]
+    fn gradle_jvm_rule_reads_argv() {
+        let cmdline = |argv: &[&str]| argv.join("\0") + "\0";
+        let strings =
+            |argv: &[&str]| -> Vec<String> { argv.iter().map(|a| (*a).to_owned()).collect() };
+        for argv in [
+            &[
+                "/usr/bin/java",
+                "-cp",
+                "x.jar",
+                "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+            ][..],
+            &[
+                "java",
+                "worker.org.gradle.process.internal.worker.GradleWorkerMain",
+            ][..],
+            &["java", "org.jetbrains.kotlin.daemon.KotlinCompileDaemon"][..],
+        ] {
+            assert!(
+                is_gradle_jvm(cmdline(argv).as_bytes().split(|b| *b == 0)),
+                "{argv:?}"
+            );
+            assert!(
+                is_gradle_jvm(strings(argv).iter().map(String::as_bytes)),
+                "{argv:?}"
+            );
+        }
+        // Not java, or java naming none of their main classes.
+        for argv in [
+            &["rg", "GradleDaemon"][..],
+            &["GradleDaemon"][..],
+            &["/usr/bin/javac", "GradleDaemon"][..],
+            &["java", "-jar", "app.jar"][..],
+            &["java", "GradleWrapperMain"][..],
+            &[""][..],
+        ] {
+            assert!(
+                !is_gradle_jvm(cmdline(argv).as_bytes().split(|b| *b == 0)),
+                "{argv:?}"
+            );
+            assert!(
+                !is_gradle_jvm(strings(argv).iter().map(String::as_bytes)),
+                "{argv:?}"
+            );
+        }
     }
 
     #[test]

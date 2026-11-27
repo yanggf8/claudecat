@@ -203,13 +203,44 @@ fn parse_procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<u8>)> {
     Some((argv, env))
 }
 
-/// (使用者＋系統 CPU 時間，單位 10ms＝Linux 100Hz tick；程序開始時間)。
-/// 換成 tick 是為了和 Linux 的 `/proc/<pid>/stat` 同單位，`compiling` 只比前後是否增加。
-pub fn cpu_sample(pid: u32) -> Option<(u64, u64)> {
+/// 一個程序的一次 CPU／RSS 取樣。
+pub struct TaskSample {
+    /// 使用者＋系統 CPU 時間，單位 10ms tick。
+    pub ticks: u64,
+    /// 常駐記憶體，單位 kB。
+    pub rss_kb: u64,
+    /// 程序開始時間（秒＋微秒），同 `Proc::start`。
+    pub start: u64,
+}
+
+/// mach absolute time 換成奈秒：一秒有 `hw.tbfrequency` 格。
+/// 核心給的程序 CPU 時間是 mach absolute time，不是標頭檔寫的奈秒：Apple Silicon 的 timebase 是
+/// 24MHz（一格 125/3 ns），Intel 才是 1GHz。直接當奈秒，Apple Silicon 上會少算 41.7 倍。
+fn abs_time_ns(ticks: u64) -> Option<u64> {
+    let hz = sysctl_raw::<u64>(c"hw.tbfrequency").filter(|hz| *hz > 0)?;
+    u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(hz)).ok()
+}
+
+/// 程序的 CPU 時間與 RSS：CPU 取 `PROC_PIDTASKINFO` 的 user＋system，換成 10ms tick（＝Linux 100Hz，
+/// 和 `/proc/<pid>/stat` 同單位）；RSS 取 `pti_resident_size` 換成 kB，同 `/proc/<pid>/status` 的
+/// VmRSS。開始時間那一個 flavor 沒有，另取 `proc_info`。
+/// 別人的程序或已結束的（還沒被收的殭屍也算）⇒ None，同 `proc_info`。
+pub fn task_sample(pid: u32) -> Option<TaskSample> {
     let task: libc::proc_taskinfo = pidinfo(pid, libc::PROC_PIDTASKINFO)?;
     let start = proc_info(pid)?.start;
-    let ns = task.pti_total_user.checked_add(task.pti_total_system)?;
-    Some((ns / 10_000_000, start))
+    let ns = abs_time_ns(task.pti_total_user.checked_add(task.pti_total_system)?)?;
+    Some(TaskSample {
+        ticks: ns / 10_000_000,
+        rss_kb: task.pti_resident_size / 1024,
+        start,
+    })
+}
+
+/// (使用者＋系統 CPU 時間，單位 10ms＝Linux 100Hz tick；程序開始時間)，即 `task_sample` 的 CPU 部分。
+/// 換成 tick 是為了和 Linux 的 `/proc/<pid>/stat` 同單位，`compiling` 只比前後是否增加。
+pub fn cpu_sample(pid: u32) -> Option<(u64, u64)> {
+    let sample = task_sample(pid)?;
+    Some((sample.ticks, sample.start))
 }
 
 #[cfg(test)]
@@ -267,5 +298,67 @@ mod tests {
                 .as_deref()
         );
         assert!(cpu_sample(me).is_some());
+    }
+
+    // `task_sample` 與 `cpu_sample` 同源：自己的程序 RSS 大於 0，開始時間與 CPU tick 單位一致。
+    // tick 在兩次取樣之間只增不減，所以夾在不等式裡比，不比相等。
+    #[test]
+    fn task_sample_of_own_process_agrees_with_cpu_sample() {
+        let me = std::process::id();
+        let (before, start) = cpu_sample(me).expect("own cpu_sample");
+        let sample = task_sample(me).expect("own task_sample");
+        let (after, _) = cpu_sample(me).expect("own cpu_sample again");
+        assert!(sample.rss_kb > 0, "rss_kb {}", sample.rss_kb);
+        assert_eq!(sample.start, start);
+        assert!(
+            before <= sample.ticks && sample.ticks <= after,
+            "ticks {before} {} {after}",
+            sample.ticks
+        );
+    }
+
+    /// 這一條執行緒已經用掉的 CPU 時間（奈秒）。
+    fn thread_cpu_ns() -> u128 {
+        let mut ts = MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: 緩衝區大小就是 timespec；回傳 0 才成功，也才讀它。
+        let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, ts.as_mut_ptr()) };
+        let ts = (rc == 0)
+            .then(|| unsafe { ts.assume_init() })
+            .expect("thread cpu clock");
+        (ts.tv_sec as i128 * 1_000_000_000 + ts.tv_nsec as i128) as u128
+    }
+
+    // tick 真的是 10ms：自己的程序用滿 0.2 秒 CPU 之後，tick 數要跟 getrusage(RUSAGE_SELF) 對得上。
+    // 上面那條只比 `task_sample` 跟 `cpu_sample`，同源，單位錯了兩個一起錯；這條跟核心的 rusage 比。
+    // 核心給的是 mach absolute time（Apple Silicon 一格 125/3 ns），當奈秒直接除只會剩 1/41.7。
+    #[test]
+    fn task_sample_counts_ten_millisecond_ticks() {
+        // 轉到這條執行緒自己用滿 0.2 秒 CPU 為止，機器再忙也燒得到。
+        std::thread::spawn(|| {
+            let until = thread_cpu_ns() + 200_000_000;
+            let mut x = 0u64;
+            while thread_cpu_ns() < until {
+                x = x.wrapping_add(1);
+            }
+            x
+        })
+        .join()
+        .unwrap();
+        let me = std::process::id();
+        let before = task_sample(me).expect("own task_sample").ticks;
+        let mut own = MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: rusage 是整數結構；回傳 0 才成功，也才讀它。
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, own.as_mut_ptr()) };
+        let own = (rc == 0)
+            .then(|| unsafe { own.assume_init() })
+            .expect("getrusage");
+        let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+        let own_ticks = (secs(own.ru_utime) + secs(own.ru_stime)) * 100.0;
+        let (after, _) = cpu_sample(me).expect("own cpu_sample");
+        assert!(before >= 19, "0.2 s of CPU: {before} ticks");
+        assert!(
+            own_ticks >= before as f64 - 1.0 && own_ticks <= after as f64 + 1.0,
+            "getrusage {own_ticks:.1} vs task_sample {before}..{after} ticks"
+        );
     }
 }
